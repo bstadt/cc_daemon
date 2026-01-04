@@ -1,0 +1,370 @@
+"""Claude Connect Flask application.
+
+Handles OAuth flow and repo management.
+"""
+
+import os
+import secrets
+import subprocess
+import base64
+import json
+import time
+from pathlib import Path
+from flask import Flask, redirect, request, session, url_for, jsonify
+from authlib.integrations.flask_client import OAuth
+from urllib.parse import urlencode
+from werkzeug.middleware.proxy_fix import ProxyFix
+from cryptography.fernet import Fernet, InvalidToken
+import httpx
+
+app = Flask(__name__)
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(32))
+
+# Fernet key for SVN tokens - must be 32 url-safe base64-encoded bytes
+# Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+FERNET_KEY = os.environ.get("FERNET_KEY")
+if FERNET_KEY:
+    fernet = Fernet(FERNET_KEY.encode())
+else:
+    fernet = None
+
+# Handle reverse proxy (Apache) - trust X-Forwarded headers
+app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
+
+# Paths
+SVN_REPOS_DIR = Path("/var/svn/repos")
+
+# OAuth setup
+oauth = OAuth(app)
+google = oauth.register(
+    name="google",
+    client_id=os.environ.get("GOOGLE_CLIENT_ID"),
+    client_secret=os.environ.get("GOOGLE_CLIENT_SECRET"),
+    server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
+    client_kwargs={
+        "scope": "openid email",
+        "access_type": "offline",  # Request refresh token
+        "prompt": "consent",  # Force consent to always get refresh token
+    },
+)
+
+
+def email_to_repo_name(email: str) -> str:
+    """Convert email to SVN repo name."""
+    return email.replace("@", "-").replace(".", "-").lower()
+
+
+def decode_jwt_payload(token: str) -> dict:
+    """Decode JWT payload without verification (server already validated)."""
+    try:
+        payload_b64 = token.split(".")[1]
+        padding = 4 - len(payload_b64) % 4
+        if padding != 4:
+            payload_b64 += "=" * padding
+        payload_bytes = base64.urlsafe_b64decode(payload_b64)
+        return json.loads(payload_bytes)
+    except Exception:
+        return {}
+
+
+def verify_id_token(id_token: str) -> tuple[bool, str]:
+    """
+    Verify Google id_token and extract email.
+
+    Returns:
+        Tuple of (valid, email_or_error)
+    """
+    try:
+        # Use Google's tokeninfo endpoint for verification
+        response = httpx.get(
+            f"https://oauth2.googleapis.com/tokeninfo?id_token={id_token}",
+            timeout=10,
+        )
+
+        if response.status_code != 200:
+            return False, "Invalid token"
+
+        data = response.json()
+        email = data.get("email")
+
+        if not email:
+            return False, "No email in token"
+
+        # Verify it's for our app
+        expected_client_id = os.environ.get("GOOGLE_CLIENT_ID")
+        if data.get("aud") != expected_client_id:
+            return False, "Token not for this application"
+
+        return True, email
+
+    except Exception as e:
+        return False, str(e)
+
+
+def ensure_authz(repo_path: Path, email: str, use_sudo: bool = False) -> None:
+    """
+    Ensure authz file exists and has correct permissions for the user.
+
+    Args:
+        repo_path: Path to the SVN repository
+        email: User's email for authz
+        use_sudo: If True, use sudo tee to write (for existing repos owned by www-data)
+    """
+    # Note: SVN authz only supports 'r' or 'rw', not write-only 'w'
+    # friend_requests is world-readable/writable so anyone can send requests
+    authz_content = f"""[/]
+{email} = rw
+
+[/friend_requests]
+* = rw
+{email} = rw
+"""
+    authz_path = repo_path / "conf" / "authz"
+
+    if use_sudo:
+        # Use sudo tee to write when repo is owned by www-data
+        subprocess.run(
+            ["sudo", "tee", str(authz_path)],
+            input=authz_content.encode(),
+            stdout=subprocess.DEVNULL,
+            check=True,
+        )
+    else:
+        authz_path.write_text(authz_content)
+
+
+def create_svn_repo(repo_name: str, email: str) -> tuple[bool, str]:
+    """
+    Create an SVN repository with default structure, or ensure existing repo has correct authz.
+
+    Args:
+        repo_name: Name for the repo (sanitized email)
+        email: User's email for authz
+
+    Returns:
+        Tuple of (success, message_or_error)
+    """
+    repo_path = SVN_REPOS_DIR / repo_name
+
+    if repo_path.exists():
+        # Repo exists - ensure authz is correct (use sudo since owned by www-data)
+        try:
+            ensure_authz(repo_path, email, use_sudo=True)
+            # Fix ownership in case authz was created by wrong user
+            subprocess.run(
+                ["sudo", "chown", "-R", "www-data:www-data", str(repo_path)],
+                check=True,
+            )
+            return True, "Repo already exists"
+        except Exception as e:
+            return False, f"Failed to update authz: {e}"
+
+    try:
+        # Create the repository
+        result = subprocess.run(
+            ["svnadmin", "create", str(repo_path)],
+            capture_output=True,
+            text=True,
+        )
+
+        if result.returncode != 0:
+            return False, f"svnadmin create failed: {result.stderr}"
+
+        # Create default authz file BEFORE chown
+        ensure_authz(repo_path, email)
+
+        # Set ownership to www-data (Apache user) AFTER writing authz
+        subprocess.run(
+            ["sudo", "chown", "-R", "www-data:www-data", str(repo_path)],
+            check=True,
+        )
+
+        return True, "Repo created successfully"
+
+    except Exception as e:
+        return False, str(e)
+
+
+@app.route("/")
+def index():
+    return "<h1>Claude Connect</h1><p><a href='/login'>Login with Google</a></p>"
+
+
+@app.route("/login")
+def login():
+    # Store where to redirect after auth (localhost for daemon)
+    redirect_uri = request.args.get("redirect_uri", "")
+    session["daemon_redirect"] = redirect_uri
+
+    callback_url = url_for("callback", _external=True)
+    # Request offline access to get refresh token
+    return google.authorize_redirect(
+        callback_url,
+        access_type="offline",
+        prompt="consent",
+    )
+
+
+@app.route("/callback")
+def callback():
+    token = google.authorize_access_token()
+
+    # Get the tokens we need
+    id_token = token.get("id_token")
+    refresh_token = token.get("refresh_token", "")
+
+    if not id_token:
+        return "Failed to get id_token", 400
+
+    # Redirect to daemon with Google's tokens
+    daemon_redirect = session.pop("daemon_redirect", "")
+    if daemon_redirect:
+        params = urlencode({
+            "id_token": id_token,
+            "refresh_token": refresh_token,
+        })
+        return redirect(f"{daemon_redirect}?{params}")
+
+    # No daemon redirect, just show success
+    return f"<h1>Logged in!</h1><p>id_token: {id_token[:50]}...</p>"
+
+
+@app.route("/refresh")
+def refresh():
+    """Exchange refresh token for new id_token."""
+    refresh_token = request.args.get("refresh_token")
+    if not refresh_token:
+        return {"error": "Missing refresh_token"}, 400
+
+    try:
+        response = httpx.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "client_id": os.environ.get("GOOGLE_CLIENT_ID"),
+                "client_secret": os.environ.get("GOOGLE_CLIENT_SECRET"),
+                "refresh_token": refresh_token,
+                "grant_type": "refresh_token",
+            },
+        )
+        response.raise_for_status()
+        data = response.json()
+        return {
+            "id_token": data.get("id_token"),
+            "expires_in": data.get("expires_in"),
+        }
+    except Exception as e:
+        return {"error": str(e)}, 400
+
+
+@app.route("/api/ensure-repo", methods=["POST"])
+def ensure_repo():
+    """
+    Ensure user's repo exists, creating if needed.
+
+    Expects Authorization header with Bearer id_token.
+
+    Returns:
+        JSON with repo name and URL.
+    """
+    # Get token from Authorization header
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return jsonify({"error": "Missing Authorization header"}), 401
+
+    id_token = auth_header[7:]  # Strip "Bearer "
+
+    # Verify token and get email
+    valid, email_or_error = verify_id_token(id_token)
+    if not valid:
+        return jsonify({"error": email_or_error}), 401
+
+    email = email_or_error
+    repo_name = email_to_repo_name(email)
+
+    # Create repo if needed
+    success, message = create_svn_repo(repo_name, email)
+    if not success:
+        return jsonify({"error": message}), 500
+
+    return jsonify({
+        "repo": repo_name,
+        "url": f"https://claudeconnect.io/svn/{repo_name}",
+        "email": email,
+        "created": message == "Repo created successfully",
+    })
+
+
+@app.route("/api/svn-token", methods=["POST"])
+def get_svn_token():
+    """
+    Exchange Google JWT for a short Fernet token for SVN auth.
+
+    Expects Authorization header with Bearer id_token.
+    Returns a Fernet-encrypted token containing email and expiry.
+    """
+    if not fernet:
+        return jsonify({"error": "SVN tokens not configured"}), 500
+
+    # Get token from Authorization header
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return jsonify({"error": "Missing Authorization header"}), 401
+
+    id_token = auth_header[7:]  # Strip "Bearer "
+
+    # Verify token and get email
+    valid, email_or_error = verify_id_token(id_token)
+    if not valid:
+        return jsonify({"error": email_or_error}), 401
+
+    email = email_or_error
+
+    # Create Fernet token with email and expiry (24 hours)
+    expiry = int(time.time()) + (24 * 3600)
+    payload = f"{email}|{expiry}"
+    svn_token = fernet.encrypt(payload.encode()).decode()
+
+    return jsonify({
+        "svn_token": svn_token,
+        "email": email,
+        "expires_in": 24 * 3600,
+    })
+
+
+@app.route("/api/verify-svn-token", methods=["POST"])
+def verify_svn_token():
+    """
+    Verify a Fernet SVN token and return the email.
+
+    Used by Apache mod_authnz_external for auth.
+    Expects JSON body with "token" field.
+    """
+    if not fernet:
+        return jsonify({"error": "SVN tokens not configured"}), 500
+
+    data = request.get_json() or {}
+    token = data.get("token", "")
+
+    if not token:
+        return jsonify({"valid": False, "error": "Missing token"}), 400
+
+    try:
+        # Decrypt and parse
+        payload = fernet.decrypt(token.encode()).decode()
+        email, expiry_str = payload.rsplit("|", 1)
+        expiry = int(expiry_str)
+
+        # Check expiry
+        if expiry < time.time():
+            return jsonify({"valid": False, "error": "Token expired"}), 401
+
+        return jsonify({"valid": True, "email": email})
+
+    except InvalidToken:
+        return jsonify({"valid": False, "error": "Invalid token"}), 401
+    except Exception as e:
+        return jsonify({"valid": False, "error": str(e)}), 400
+
+
+if __name__ == "__main__":
+    app.run(host="127.0.0.1", port=5000, debug=True)
