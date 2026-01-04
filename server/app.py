@@ -1,6 +1,7 @@
 """Claude Connect Flask application.
 
 Handles OAuth flow and repo management.
+Friending is handled entirely via SVN (friend_requests folder) and authz files.
 """
 
 import os
@@ -33,6 +34,7 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 
 # Paths
 SVN_REPOS_DIR = Path("/var/svn/repos")
+
 
 # OAuth setup
 oauth = OAuth(app)
@@ -101,28 +103,36 @@ def verify_id_token(id_token: str) -> tuple[bool, str]:
         return False, str(e)
 
 
-def ensure_authz(repo_path: Path, email: str, use_sudo: bool = False) -> None:
-    """
-    Ensure authz file exists and has correct permissions for the user.
-
-    Args:
-        repo_path: Path to the SVN repository
-        email: User's email for authz
-        use_sudo: If True, use sudo tee to write (for existing repos owned by www-data)
-    """
-    # Note: SVN authz only supports 'r' or 'rw', not write-only 'w'
-    # friend_requests is world-readable/writable so anyone can send requests
-    authz_content = f"""[/]
+def generate_authz_content(email: str) -> str:
+    """Generate initial authz file content for a new user."""
+    return f"""[/]
 {email} = rw
 
 [/friend_requests]
 * = rw
 {email} = rw
 """
+
+
+def ensure_authz(repo_path: Path, email: str, use_sudo: bool = False) -> None:
+    """
+    Ensure authz file exists and has correct base permissions.
+    Does NOT modify friend permissions - those are managed by Claude via the protocol.
+
+    Args:
+        repo_path: Path to the SVN repository
+        email: User's email for authz
+        use_sudo: If True, use sudo tee to write (for existing repos owned by www-data)
+    """
     authz_path = repo_path / "conf" / "authz"
 
+    # Only write if authz doesn't exist (don't overwrite friend permissions)
+    if authz_path.exists():
+        return
+
+    authz_content = generate_authz_content(email)
+
     if use_sudo:
-        # Use sudo tee to write when repo is owned by www-data
         subprocess.run(
             ["sudo", "tee", str(authz_path)],
             input=authz_content.encode(),
@@ -135,7 +145,7 @@ def ensure_authz(repo_path: Path, email: str, use_sudo: bool = False) -> None:
 
 def create_svn_repo(repo_name: str, email: str) -> tuple[bool, str]:
     """
-    Create an SVN repository with default structure, or ensure existing repo has correct authz.
+    Create an SVN repository, or confirm existing repo.
 
     Args:
         repo_name: Name for the repo (sanitized email)
@@ -147,17 +157,7 @@ def create_svn_repo(repo_name: str, email: str) -> tuple[bool, str]:
     repo_path = SVN_REPOS_DIR / repo_name
 
     if repo_path.exists():
-        # Repo exists - ensure authz is correct (use sudo since owned by www-data)
-        try:
-            ensure_authz(repo_path, email, use_sudo=True)
-            # Fix ownership in case authz was created by wrong user
-            subprocess.run(
-                ["sudo", "chown", "-R", "www-data:www-data", str(repo_path)],
-                check=True,
-            )
-            return True, "Repo already exists"
-        except Exception as e:
-            return False, f"Failed to update authz: {e}"
+        return True, "Repo already exists"
 
     try:
         # Create the repository
@@ -364,6 +364,31 @@ def verify_svn_token():
         return jsonify({"valid": False, "error": "Invalid token"}), 401
     except Exception as e:
         return jsonify({"valid": False, "error": str(e)}), 400
+
+
+@app.route("/api/lookup-repo", methods=["GET"])
+def lookup_repo():
+    """
+    Look up a user's repo URL by email.
+
+    Used by clients to find where to send friend requests.
+    Query param: email
+    """
+    email = request.args.get("email", "").strip().lower()
+    if not email:
+        return jsonify({"error": "Missing email parameter"}), 400
+
+    repo_name = email_to_repo_name(email)
+    repo_path = SVN_REPOS_DIR / repo_name
+
+    if not repo_path.exists():
+        return jsonify({"error": "User not found"}), 404
+
+    return jsonify({
+        "email": email,
+        "repo": repo_name,
+        "url": f"https://claudeconnect.io/svn/{repo_name}",
+    })
 
 
 if __name__ == "__main__":
