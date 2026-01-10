@@ -112,6 +112,40 @@ def ensure_repo(token: str) -> dict:
     return response.json()
 
 
+def generate_authz_content(email: str) -> str:
+    """Generate initial authz file content for a new user."""
+    return f"""[/]
+{email} = rw
+
+[/friend_requests]
+* = rw
+{email} = rw
+"""
+
+
+def ensure_authz_exists(context_dir: Path, svn: "SvnClient", email: str) -> None:
+    """
+    Ensure authz file exists in the context directory.
+
+    If authz doesn't exist (older repos), create and commit it.
+    """
+    authz_path = context_dir / "authz"
+
+    if authz_path.exists():
+        return
+
+    print("  Creating authz file (missing from repo)...")
+    authz_content = generate_authz_content(email)
+    authz_path.write_text(authz_content)
+
+    try:
+        svn.add([authz_path])
+        svn.commit("Add authz file")
+        print("  Created and committed authz")
+    except Exception as e:
+        print(f"  Warning: Could not commit authz: {e}")
+
+
 def init_context_dir(context_dir: Path, repo_url: str, svn_token: str, email: str) -> bool:
     """
     Initialize a context directory with SVN checkout.
@@ -157,6 +191,7 @@ def init_context_dir(context_dir: Path, repo_url: str, svn_token: str, email: st
         try:
             svn.checkout()
             print("  Checked out empty repository")
+            ensure_authz_exists(context_dir, svn, email)
             return True
         except SvnError as e:
             print(f"  Checkout failed: {e}")
@@ -216,6 +251,7 @@ def init_context_dir(context_dir: Path, repo_url: str, svn_token: str, email: st
             rev = svn.commit("Initial sync from claudeconnect")
             if rev:
                 print(f"  Committed initial sync (revision {rev})")
+            ensure_authz_exists(context_dir, svn, email)
             return True
         except SvnError as e:
             print(f"  Initial commit failed: {e}")
