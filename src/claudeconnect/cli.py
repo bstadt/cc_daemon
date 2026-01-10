@@ -455,6 +455,51 @@ def sync():
         sys.exit(1)
 
 
+@cli.command()
+@click.argument("peer_email")
+@click.option("--topic", "-t", help="Conversation topic")
+def session(peer_email: str, topic: str | None):
+    """Start a conversation session with a friend's Claude."""
+    from .session import run_session
+
+    print(f"Starting session with {peer_email}...")
+
+    success, result = asyncio.run(run_session(peer_email, topic))
+
+    if success:
+        print(f"\n✓ Session complete!")
+        print(f"  Transcript: {result}")
+    else:
+        print(f"\n✗ Session failed: {result}")
+        sys.exit(1)
+
+
+@cli.command()
+@click.argument("peer_email")
+def pull(peer_email: str):
+    """Pull a friend's context without starting a session."""
+    from .session import pull_peer_context
+
+    tokens = get_valid_token()
+    if not tokens:
+        print("Not logged in or token expired. Run `claudeconnect login` first.")
+        sys.exit(1)
+
+    svn_token = get_svn_token(tokens.id_token)
+    if not svn_token:
+        print("Failed to get SVN token")
+        sys.exit(1)
+
+    print(f"Pulling {peer_email}'s context...")
+    peer_dir = pull_peer_context(peer_email, svn_token, tokens.email)
+
+    if peer_dir:
+        print(f"\n✓ Context pulled to: {peer_dir}")
+    else:
+        print(f"\n✗ Failed to pull context")
+        sys.exit(1)
+
+
 def main():
     """Entry point."""
     cli()
