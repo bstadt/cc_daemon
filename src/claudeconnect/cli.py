@@ -536,6 +536,103 @@ def pull(peer_email: str):
         sys.exit(1)
 
 
+@cli.command()
+@click.argument("peer_email")
+@click.option("--message", "-m", default="Hi! I'd like to connect our Claude instances.", help="Message to include")
+def friend(peer_email: str, message: str):
+    """Send a friend request to another user.
+
+    This command:
+    1. Updates your authz to grant them read access
+    2. Sends a friend request to their repo
+    """
+    tokens = get_valid_token()
+    if not tokens:
+        print("Not logged in or token expired. Run `claudeconnect login` first.")
+        sys.exit(1)
+
+    config = get_config()
+    if not config.context_dir:
+        print("No context directory configured. Run `claudeconnect init` first.")
+        sys.exit(1)
+
+    peer_email = peer_email.strip().lower()
+    my_email = tokens.email
+
+    if peer_email == my_email:
+        print("Cannot friend yourself.")
+        sys.exit(1)
+
+    print(f"Sending friend request to {peer_email}...")
+
+    # Step 1: Update local authz to grant them read access
+    context_dir = Path(config.context_dir)
+    authz_path = context_dir / "authz"
+
+    if not authz_path.exists():
+        print("Error: authz file not found. Run `claudeconnect init` first.")
+        sys.exit(1)
+
+    authz_content = authz_path.read_text()
+
+    # Check if they already have access
+    if f"{peer_email} = r" in authz_content or f"{peer_email} = rw" in authz_content:
+        print(f"  {peer_email} already has access in your authz")
+    else:
+        # Add them to the [/] section
+        # Find the [/] section and add after the owner line
+        lines = authz_content.split('\n')
+        new_lines = []
+        added = False
+        for line in lines:
+            new_lines.append(line)
+            # Add after the owner's rw line in [/] section
+            if not added and '= rw' in line and my_email in line:
+                new_lines.append(f"{peer_email} = r")
+                added = True
+
+        if added:
+            authz_path.write_text('\n'.join(new_lines))
+            print(f"  Added {peer_email} to your authz")
+        else:
+            print("  Warning: Could not auto-update authz. Please add manually.")
+
+    # Step 2: Sync to commit authz changes
+    svn_token = get_svn_token(tokens.id_token)
+    if not svn_token:
+        print("Failed to get SVN token")
+        sys.exit(1)
+
+    repo_url = repo_url_for_email(my_email)
+    print("  Syncing authz changes...")
+    sync_once(context_dir, repo_url, svn_token, my_email)
+
+    # Step 3: Send friend request via API
+    print("  Sending friend request...")
+    try:
+        response = httpx.post(
+            f"{SERVER_URL}/api/friend-request",
+            headers={"Authorization": f"Bearer {tokens.id_token}"},
+            json={"to": peer_email, "message": message},
+            timeout=30,
+        )
+
+        if response.status_code == 200:
+            print(f"\n✓ Friend request sent to {peer_email}")
+            print(f"  They will see your request in their friend_requests/ folder.")
+        elif response.status_code == 404:
+            print(f"\n✗ User {peer_email} not found on ClaudeConnect")
+            sys.exit(1)
+        else:
+            data = response.json()
+            print(f"\n✗ Failed to send request: {data.get('error', 'Unknown error')}")
+            sys.exit(1)
+
+    except Exception as e:
+        print(f"\n✗ Error sending request: {e}")
+        sys.exit(1)
+
+
 def main():
     """Entry point."""
     cli()
