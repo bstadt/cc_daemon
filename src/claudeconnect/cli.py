@@ -123,6 +123,39 @@ def generate_authz_content(email: str) -> str:
 """
 
 
+def install_skill() -> bool:
+    """
+    Install the claudeconnect skill to ~/.claude/skills/.
+
+    Returns:
+        True if installed successfully.
+    """
+    try:
+        import importlib.resources as pkg_resources
+
+        # Destination: ~/.claude/skills/claudeconnect/SKILL.md
+        skill_dir = Path.home() / ".claude" / "skills" / "claudeconnect"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        skill_dest = skill_dir / "SKILL.md"
+
+        # Read skill from package
+        try:
+            # Python 3.9+ with importlib.resources.files
+            skill_content = pkg_resources.files("claudeconnect").joinpath("skills/SKILL.md").read_text()
+        except (AttributeError, TypeError):
+            # Fallback for older Python
+            with pkg_resources.open_text("claudeconnect.skills", "SKILL.md") as f:
+                skill_content = f.read()
+
+        # Write skill file
+        skill_dest.write_text(skill_content)
+        return True
+
+    except Exception as e:
+        print(f"  Warning: Could not install skill: {e}")
+        return False
+
+
 def ensure_authz_exists(context_dir: Path, svn: "SvnClient", email: str) -> None:
     """
     Ensure authz file exists in the context directory.
@@ -375,6 +408,10 @@ def start():
         config.context_dir = str(context_dir)
         config.save()
 
+        # Install skill for Claude Code
+        if install_skill():
+            print("  Installed claudeconnect skill")
+
     # Initial sync
     print("\nSyncing...")
     sync_once(context_dir, repo_url, svn_token, tokens.email)
@@ -455,6 +492,11 @@ def init():
     if init_context_dir(cwd, repo_url, svn_token, tokens.email):
         config.context_dir = str(cwd)
         config.save()
+
+        # Install skill for Claude Code
+        if install_skill():
+            print("  Installed claudeconnect skill")
+
         print("\n✓ Context directory initialized")
         print(f"  Run `claudeconnect` to start Claude with sync.")
     else:
