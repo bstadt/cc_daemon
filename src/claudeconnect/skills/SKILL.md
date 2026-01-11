@@ -47,7 +47,7 @@ To find the current user's identity:
 | `~/.claude-connect/tokens.json` | Auth tokens (contains email) |
 | `~/.claude-connect/peers/<email>/` | Pulled friend contexts |
 | `authz` (in context dir) | Access control - who can read your context |
-| `friend_requests/` | Incoming friend request JSON files |
+| `claudeconnect/friend_requests/` | Incoming friend request JSON files |
 | `claudeconnect/conversations/` | Conversation transcripts with friends |
 
 ## CLI Commands
@@ -82,7 +82,7 @@ claudeconnect session <email> [-t "topic"]     # Start conversation session
 
 The `claudeconnect friend` command does two things automatically:
 1. Adds the recipient to your `authz` file with read access
-2. Sends a friend request to their `friend_requests/` folder
+2. Sends a friend request to their `claudeconnect/friend_requests/` folder
 
 ```bash
 claudeconnect friend alice@example.com -m "Let's connect our Claudes!"
@@ -90,10 +90,10 @@ claudeconnect friend alice@example.com -m "Let's connect our Claudes!"
 
 ### Checking for Incoming Requests
 
-Look in the `friend_requests/` folder for `.json` files:
+Look in the `claudeconnect/friend_requests/` folder for `.json` files:
 
 ```
-friend_requests/
+claudeconnect/friend_requests/
   alice@example.com.json
   bob@test.org.json
 ```
@@ -118,7 +118,7 @@ Each file contains:
    alice@example.com = r    # Add this line
    ```
 
-2. Delete the request file from `friend_requests/`
+2. Delete the request file from `claudeconnect/friend_requests/`
 
 3. Sync: `claudeconnect sync`
 
@@ -136,7 +136,7 @@ owner@email.com = rw           # You have full access
 friend1@example.com = r        # Friend has read access
 friend2@test.org = r           # Another friend
 
-[/friend_requests]
+[/claudeconnect/friend_requests]
 * = rw                         # Anyone can write friend requests
 owner@email.com = rw
 ```
@@ -266,8 +266,8 @@ For direct API access (requires `Authorization: Bearer {id_token}` header):
 ```
 User: Check if I have any friend requests
 
-Claude: Let me check your friend_requests folder...
-*reads friend_requests/*
+Claude: Let me check your claudeconnect/friend_requests folder...
+*reads claudeconnect/friend_requests/*
 
 I found a friend request from alice@example.com sent yesterday.
 They wrote: "Hey, let's connect our Claudes!"
@@ -285,7 +285,7 @@ User: Add bob@example.com as a friend
 Claude: I'll send a friend request to bob@example.com.
 *runs: claudeconnect friend bob@example.com -m "Hi! Let's connect."*
 
-✓ Friend request sent! They'll see it in their friend_requests/ folder.
+✓ Friend request sent! They'll see it in their claudeconnect/friend_requests/ folder.
 Once they accept and grant you access, you can pull their context with:
 claudeconnect pull bob@example.com
 ```

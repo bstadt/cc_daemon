@@ -108,7 +108,7 @@ def generate_authz_content(email: str) -> str:
     return f"""[/]
 {email} = rw
 
-[/friend_requests]
+[/claudeconnect/friend_requests]
 * = rw
 {email} = rw
 """
@@ -389,6 +389,99 @@ def lookup_repo():
         "repo": repo_name,
         "url": f"https://claudeconnect.io/svn/{repo_name}",
     })
+
+
+@app.route("/api/friend-request", methods=["POST"])
+def send_friend_request():
+    """
+    Send a friend request to another user.
+
+    Expects:
+        - Authorization header with Bearer id_token
+        - JSON body with "to" (target email) and optional "message"
+
+    This endpoint commits a friend request file to the target's repo.
+    """
+    import tempfile
+    from datetime import datetime
+
+    # Authenticate sender
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return jsonify({"error": "Missing Authorization header"}), 401
+
+    id_token = auth_header[7:]
+    valid, email_or_error = verify_id_token(id_token)
+    if not valid:
+        return jsonify({"error": email_or_error}), 401
+
+    sender_email = email_or_error
+
+    # Get target email from body
+    data = request.get_json() or {}
+    target_email = data.get("to", "").strip().lower()
+    message = data.get("message", "Hi! I'd like to connect our Claude instances.")
+
+    if not target_email:
+        return jsonify({"error": "Missing 'to' field"}), 400
+
+    if target_email == sender_email:
+        return jsonify({"error": "Cannot send friend request to yourself"}), 400
+
+    # Look up target repo
+    target_repo_name = email_to_repo_name(target_email)
+    target_repo_path = SVN_REPOS_DIR / target_repo_name
+
+    if not target_repo_path.exists():
+        return jsonify({"error": f"User {target_email} not found"}), 404
+
+    # Create friend request JSON
+    request_content = {
+        "from": sender_email,
+        "to": target_email,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "message": message
+    }
+
+    # Commit to target's claudeconnect/friend_requests folder using svnmucc
+    request_json = json.dumps(request_content, indent=2)
+
+    # Write to temp file
+    temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False)
+    temp_file.write(request_json)
+    temp_file.close()
+
+    # Make temp file readable (default is 0600 which blocks svnmucc)
+    os.chmod(temp_file.name, 0o644)
+
+    try:
+        # Use svnmucc to put the file
+        repo_url = f"file:///var/svn/repos/{target_repo_name}"
+        filename = f"{sender_email.replace('@', '-').replace('.', '-')}.json"
+
+        result = subprocess.run(
+            [
+                "sudo", "-u", "www-data", "svnmucc",
+                "-U", repo_url,
+                "put", temp_file.name, f"claudeconnect/friend_requests/{filename}",
+                "-m", f"Friend request from {sender_email}"
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        if result.returncode != 0:
+            return jsonify({"error": f"Failed to send request: {result.stderr}"}), 500
+
+        return jsonify({
+            "success": True,
+            "message": f"Friend request sent to {target_email}",
+            "from": sender_email,
+            "to": target_email
+        })
+
+    finally:
+        os.unlink(temp_file.name)
 
 
 if __name__ == "__main__":

@@ -117,7 +117,7 @@ def generate_authz_content(email: str) -> str:
     return f"""[/]
 {email} = rw
 
-[/friend_requests]
+[/claudeconnect/friend_requests]
 * = rw
 {email} = rw
 """
@@ -661,7 +661,7 @@ def friend(peer_email: str, message: str):
 
         if response.status_code == 200:
             print(f"\n✓ Friend request sent to {peer_email}")
-            print(f"  They will see your request in their friend_requests/ folder.")
+            print(f"  They will see your request in their claudeconnect/friend_requests/ folder.")
         elif response.status_code == 404:
             print(f"\n✗ User {peer_email} not found on ClaudeConnect")
             sys.exit(1)
