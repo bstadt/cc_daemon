@@ -38,6 +38,16 @@ class SvnError(Exception):
     pass
 
 
+class SvnLockError(SvnError):
+    """SVN working copy is locked."""
+    pass
+
+
+def is_lock_error(stderr: str) -> bool:
+    """Check if an SVN error is a working copy lock error."""
+    return "E155004" in stderr or "is already locked" in stderr
+
+
 class SvnClient:
     """SVN client for Claude Connect operations."""
 
@@ -114,7 +124,7 @@ class SvnClient:
         Raises:
             SvnError: If update fails.
         """
-        result = self._run(["update", "--accept", "postpone"])
+        result = self._with_cleanup_retry("update", ["update", "--accept", "postpone"])
 
         if result.returncode != 0:
             raise SvnError(f"Update failed: {result.stderr}")
@@ -135,7 +145,7 @@ class SvnClient:
         Returns:
             SvnStatus object with categorized file lists.
         """
-        result = self._run(["status"])
+        result = self._with_cleanup_retry("status", ["status"])
 
         if result.returncode != 0:
             raise SvnError(f"Status failed: {result.stderr}")
@@ -252,7 +262,7 @@ class SvnClient:
         Raises:
             SvnError: If commit fails.
         """
-        result = self._run(["commit", "-m", message])
+        result = self._with_cleanup_retry("commit", ["commit", "-m", message])
 
         if result.returncode != 0:
             if "nothing to commit" in result.stderr.lower():
@@ -322,6 +332,40 @@ class SvnClient:
     def is_working_copy(self) -> bool:
         """Check if the working directory is an SVN working copy."""
         return self.info() is not None
+
+    def cleanup(self) -> bool:
+        """
+        Clean up the working copy, removing stale locks.
+
+        Returns:
+            True if successful.
+        """
+        result = self._run(["cleanup"])
+        return result.returncode == 0
+
+    def _with_cleanup_retry(self, operation: str, args: list[str], cwd: Optional[Path] = None) -> subprocess.CompletedProcess:
+        """
+        Run an SVN command with automatic cleanup retry on lock errors.
+
+        Args:
+            operation: Human-readable operation name for error messages.
+            args: SVN command arguments.
+            cwd: Working directory override.
+
+        Returns:
+            CompletedProcess result.
+
+        Raises:
+            SvnError: If operation fails even after cleanup retry.
+        """
+        result = self._run(args, cwd)
+
+        if result.returncode != 0 and is_lock_error(result.stderr):
+            # Working copy is locked - try cleanup and retry once
+            self.cleanup()
+            result = self._run(args, cwd)
+
+        return result
 
 
 def email_to_repo_name(email: str) -> str:

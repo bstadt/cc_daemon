@@ -79,6 +79,9 @@ class SyncLoop:
         # Run SVN operations in thread pool to avoid blocking
         loop = asyncio.get_event_loop()
 
+        # Clean up any stale locks before operations
+        await loop.run_in_executor(None, self.svn.cleanup)
+
         # Pull remote changes
         try:
             updated = await loop.run_in_executor(None, self.svn.update)
@@ -155,6 +158,9 @@ def sync_once(context_dir: Path, repo_url: str, svn_token: str, email: str) -> b
     svn = SvnClient(context_dir, repo_url, svn_token, email)
 
     try:
+        # Clean up any stale locks from previous sessions
+        svn.cleanup()
+
         # Pull updates
         updated = svn.update()
         if updated:
