@@ -131,6 +131,10 @@ def generate_authz_content(email: str, private_files: list[str] | None = None) -
         "[/claudeconnect/friend_requests]",
         "* = rw",
         f"{email} = rw",
+        "",
+        "# Friends can write conversations to your repo",
+        "[/claudeconnect/conversations]",
+        f"{email} = rw",
     ]
 
     # Add private file sections - only owner has access
@@ -679,6 +683,114 @@ def pull(peer_email: str):
         sys.exit(1)
 
 
+def add_friend_to_authz(authz_path: Path, my_email: str, peer_email: str) -> bool:
+    """
+    Add a friend to the authz file with appropriate permissions.
+
+    Grants:
+    - Read access to [/] (can read your context)
+    - Write access to [/claudeconnect/conversations] (can push conversations to you)
+
+    Args:
+        authz_path: Path to authz file
+        my_email: Owner's email
+        peer_email: Friend's email to add
+
+    Returns:
+        True if changes were made, False if friend already has access.
+    """
+    authz_content = authz_path.read_text()
+    lines = authz_content.split('\n')
+    new_lines = []
+    changes_made = False
+
+    # Track which sections we've seen
+    current_section = None
+    added_to_root = False
+    added_to_conversations = False
+    conversations_section_exists = False
+
+    # Check if friend already has access
+    has_root_access = f"{peer_email} = r" in authz_content or f"{peer_email} = rw" in authz_content
+    has_conv_access = False
+
+    # Check conversations section specifically
+    in_conv_section = False
+    for line in lines:
+        if line.strip().startswith('['):
+            in_conv_section = '[/claudeconnect/conversations]' in line
+            if in_conv_section:
+                conversations_section_exists = True
+        elif in_conv_section and peer_email in line:
+            has_conv_access = True
+
+    # Process lines and add friend where needed
+    for i, line in enumerate(lines):
+        new_lines.append(line)
+
+        # Track current section
+        if line.strip().startswith('['):
+            current_section = line.strip()
+
+        # Add read access after owner's rw line in [/] section
+        if (current_section == '[/]' and
+            not added_to_root and
+            not has_root_access and
+            '= rw' in line and
+            my_email in line):
+            new_lines.append(f"{peer_email} = r")
+            added_to_root = True
+            changes_made = True
+            print(f"  Added {peer_email} read access to [/]")
+
+        # Add write access after owner's rw line in [/claudeconnect/conversations] section
+        if (current_section == '[/claudeconnect/conversations]' and
+            not added_to_conversations and
+            not has_conv_access and
+            '= rw' in line and
+            my_email in line):
+            new_lines.append(f"{peer_email} = rw")
+            added_to_conversations = True
+            changes_made = True
+            print(f"  Added {peer_email} write access to [/claudeconnect/conversations]")
+
+    # If conversations section doesn't exist, add it
+    if not conversations_section_exists:
+        new_lines.append("")
+        new_lines.append("# Friends can write conversations to your repo")
+        new_lines.append("[/claudeconnect/conversations]")
+        new_lines.append(f"{my_email} = rw")
+        new_lines.append(f"{peer_email} = rw")
+        changes_made = True
+        print(f"  Created [/claudeconnect/conversations] section")
+        print(f"  Added {peer_email} write access to [/claudeconnect/conversations]")
+    elif not added_to_conversations and not has_conv_access:
+        # Section exists but we didn't find owner's line - append to end of section
+        # Find the conversations section and add after it
+        final_lines = []
+        in_conv = False
+        added = False
+        for line in new_lines:
+            final_lines.append(line)
+            if '[/claudeconnect/conversations]' in line:
+                in_conv = True
+            elif in_conv and not added:
+                # Add after first line of section
+                final_lines.append(f"{peer_email} = rw")
+                added = True
+                changes_made = True
+                print(f"  Added {peer_email} write access to [/claudeconnect/conversations]")
+                in_conv = False
+        new_lines = final_lines
+
+    if changes_made:
+        authz_path.write_text('\n'.join(new_lines))
+    else:
+        print(f"  {peer_email} already has access in your authz")
+
+    return changes_made
+
+
 @cli.command()
 @click.argument("peer_email")
 @click.option("--message", "-m", default="Hi! I'd like to connect our Claude instances.", help="Message to include")
@@ -686,7 +798,7 @@ def friend(peer_email: str, message: str):
     """Send a friend request to another user.
 
     This command:
-    1. Updates your authz to grant them read access
+    1. Updates your authz to grant them read access + conversation write access
     2. Sends a friend request to their repo
     """
     tokens = get_valid_token()
@@ -708,7 +820,7 @@ def friend(peer_email: str, message: str):
 
     print(f"Sending friend request to {peer_email}...")
 
-    # Step 1: Update local authz to grant them read access
+    # Step 1: Update local authz to grant them appropriate access
     context_dir = Path(config.context_dir)
     authz_path = context_dir / "authz"
 
@@ -716,29 +828,7 @@ def friend(peer_email: str, message: str):
         print("Error: authz file not found. Run `claudeconnect init` first.")
         sys.exit(1)
 
-    authz_content = authz_path.read_text()
-
-    # Check if they already have access
-    if f"{peer_email} = r" in authz_content or f"{peer_email} = rw" in authz_content:
-        print(f"  {peer_email} already has access in your authz")
-    else:
-        # Add them to the [/] section
-        # Find the [/] section and add after the owner line
-        lines = authz_content.split('\n')
-        new_lines = []
-        added = False
-        for line in lines:
-            new_lines.append(line)
-            # Add after the owner's rw line in [/] section
-            if not added and '= rw' in line and my_email in line:
-                new_lines.append(f"{peer_email} = r")
-                added = True
-
-        if added:
-            authz_path.write_text('\n'.join(new_lines))
-            print(f"  Added {peer_email} to your authz")
-        else:
-            print("  Warning: Could not auto-update authz. Please add manually.")
+    add_friend_to_authz(authz_path, my_email, peer_email)
 
     # Step 2: Sync to commit authz changes
     svn_token = get_svn_token(tokens.id_token)
@@ -763,6 +853,7 @@ def friend(peer_email: str, message: str):
         if response.status_code == 200:
             print(f"\n✓ Friend request sent to {peer_email}")
             print(f"  They will see your request in their claudeconnect/friend_requests/ folder.")
+            print(f"  Once they accept, they can send you conversations.")
         elif response.status_code == 404:
             print(f"\n✗ User {peer_email} not found on ClaudeConnect")
             sys.exit(1)
