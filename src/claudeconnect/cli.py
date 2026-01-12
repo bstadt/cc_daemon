@@ -113,15 +113,38 @@ def ensure_repo(token: str) -> dict:
     return response.json()
 
 
-def generate_authz_content(email: str) -> str:
-    """Generate initial authz file content for a new user."""
-    return f"""[/]
-{email} = rw
+def generate_authz_content(email: str, private_files: list[str] | None = None) -> str:
+    """
+    Generate initial authz file content for a new user.
 
-[/claudeconnect/friend_requests]
-* = rw
-{email} = rw
-"""
+    Args:
+        email: User's email (SVN username)
+        private_files: List of file paths (relative to repo root) to make private
+
+    Returns:
+        authz file content string
+    """
+    lines = [
+        "[/]",
+        f"{email} = rw",
+        "",
+        "[/claudeconnect/friend_requests]",
+        "* = rw",
+        f"{email} = rw",
+    ]
+
+    # Add private file sections - only owner has access
+    if private_files:
+        lines.append("")
+        lines.append("# Private files (contain sensitive information)")
+        for file_path in sorted(set(private_files)):
+            # Ensure path starts with /
+            if not file_path.startswith("/"):
+                file_path = "/" + file_path
+            lines.append(f"[{file_path}]")
+            lines.append(f"{email} = rw")
+
+    return "\n".join(lines) + "\n"
 
 
 def install_skill() -> bool:
@@ -157,19 +180,34 @@ def install_skill() -> bool:
         return False
 
 
-def ensure_authz_exists(context_dir: Path, svn: "SvnClient", email: str) -> None:
+def ensure_authz_exists(
+    context_dir: Path,
+    svn: "SvnClient",
+    email: str,
+    private_files: list[str] | None = None,
+) -> None:
     """
     Ensure authz file exists in the context directory.
 
     If authz doesn't exist (older repos), create and commit it.
+    If private_files is provided and authz doesn't exist, include private sections.
+
+    Args:
+        context_dir: The context directory
+        svn: SVN client instance
+        email: User's email
+        private_files: Optional list of file paths to make private
     """
     authz_path = context_dir / "authz"
 
     if authz_path.exists():
+        # If authz exists but we have new private files, update it
+        if private_files:
+            update_authz_with_private_files(authz_path, email, private_files)
         return
 
-    print("  Creating authz file (missing from repo)...")
-    authz_content = generate_authz_content(email)
+    print("  Creating authz file...")
+    authz_content = generate_authz_content(email, private_files)
     authz_path.write_text(authz_content)
 
     try:
@@ -178,6 +216,38 @@ def ensure_authz_exists(context_dir: Path, svn: "SvnClient", email: str) -> None
         print("  Created and committed authz")
     except Exception as e:
         print(f"  Warning: Could not commit authz: {e}")
+
+
+def update_authz_with_private_files(authz_path: Path, email: str, private_files: list[str]) -> None:
+    """
+    Update existing authz file to add private file sections.
+
+    Args:
+        authz_path: Path to authz file
+        email: User's email
+        private_files: List of file paths to make private
+    """
+    content = authz_path.read_text()
+
+    # Check which files are already marked private
+    new_private = []
+    for file_path in private_files:
+        if not file_path.startswith("/"):
+            file_path = "/" + file_path
+        if f"[{file_path}]" not in content:
+            new_private.append(file_path)
+
+    if not new_private:
+        return  # All files already private
+
+    # Append new private sections
+    lines = ["\n# Private files (contain sensitive information)"]
+    for file_path in sorted(set(new_private)):
+        lines.append(f"[{file_path}]")
+        lines.append(f"{email} = rw")
+
+    authz_path.write_text(content.rstrip() + "\n" + "\n".join(lines) + "\n")
+    print(f"  Updated authz with {len(new_private)} private file(s)")
 
 
 def init_context_dir(context_dir: Path, repo_url: str, svn_token: str, email: str) -> bool:
@@ -209,6 +279,7 @@ def init_context_dir(context_dir: Path, repo_url: str, svn_token: str, email: st
 
     # Check if directory has markdown files to import
     md_files = list(context_dir.glob("**/*.md"))
+    private_files: list[str] = []  # Files to mark private in authz
 
     if md_files:
         print(f"  Found {len(md_files)} markdown files to sync")
@@ -218,23 +289,27 @@ def init_context_dir(context_dir: Path, repo_url: str, svn_token: str, email: st
         report = scan_directory(context_dir, markdown_only=True)
 
         if report.has_issues:
-            print(f"\n  WARNING: Potential sensitive information detected!\n")
+            # Collect unique files with sensitive content
+            sensitive_files = set()
+            for match in report.matches:
+                try:
+                    rel_path = match.file_path.relative_to(context_dir)
+                    sensitive_files.add(str(rel_path))
+                except ValueError:
+                    sensitive_files.add(str(match.file_path))
+
+            private_files = list(sensitive_files)
+
+            # Inform user - files will be auto-privatized, not blocked
+            print(f"\n  Found sensitive content in {len(private_files)} file(s)")
+            print(f"  These files will be marked PRIVATE (only you can see them):\n")
+            for f in sorted(private_files):
+                print(f"    - {f}")
+            print()
             print(report.format_report(context_dir))
-
-            if report.has_high_severity:
-                print("  High-severity items found (credentials, SSN, etc.)")
-                print("  These files will be synced to the ClaudeConnect server.\n")
-                if not click.confirm("  Proceed with initialization anyway?", default=False):
-                    print("\n  Initialization cancelled.")
-                    print("  Please review and remove sensitive data before re-running.")
-                    return False
-            else:
-                print("  Review the items above - they will be synced to the server.\n")
-                if not click.confirm("  Continue with initialization?", default=True):
-                    print("\n  Initialization cancelled.")
-                    return False
-
-            print()  # Blank line after confirmation
+            print("  Files with sensitive content are automatically private.")
+            print("  Friends will not be able to see these files.")
+            print("  You can change this later by editing your authz file.\n")
         else:
             print("  No sensitive information detected")
 
@@ -250,7 +325,7 @@ def init_context_dir(context_dir: Path, repo_url: str, svn_token: str, email: st
         try:
             svn.checkout()
             print("  Checked out empty repository")
-            ensure_authz_exists(context_dir, svn, email)
+            ensure_authz_exists(context_dir, svn, email, private_files)
             return True
         except SvnError as e:
             print(f"  Checkout failed: {e}")
@@ -310,7 +385,7 @@ def init_context_dir(context_dir: Path, repo_url: str, svn_token: str, email: st
             rev = svn.commit("Initial sync from claudeconnect")
             if rev:
                 print(f"  Committed initial sync (revision {rev})")
-            ensure_authz_exists(context_dir, svn, email)
+            ensure_authz_exists(context_dir, svn, email, private_files)
             return True
         except SvnError as e:
             print(f"  Initial commit failed: {e}")
