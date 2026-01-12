@@ -17,6 +17,7 @@ import httpx
 
 from .auth import login as do_login, ensure_valid_token, decode_jwt_payload, refresh_token
 from .config import get_config, get_tokens, Config, Tokens, is_logged_in, get_email
+from .scanner import scan_directory
 from .svn_ops import SvnClient, SvnError, email_to_repo_name, repo_url_for_email
 from .sync import SyncLoop, sync_once
 
@@ -211,6 +212,31 @@ def init_context_dir(context_dir: Path, repo_url: str, svn_token: str, email: st
 
     if md_files:
         print(f"  Found {len(md_files)} markdown files to sync")
+
+        # Scan for sensitive information before syncing
+        print("  Scanning for sensitive information...")
+        report = scan_directory(context_dir, markdown_only=True)
+
+        if report.has_issues:
+            print(f"\n  WARNING: Potential sensitive information detected!\n")
+            print(report.format_report(context_dir))
+
+            if report.has_high_severity:
+                print("  High-severity items found (credentials, SSN, etc.)")
+                print("  These files will be synced to the ClaudeConnect server.\n")
+                if not click.confirm("  Proceed with initialization anyway?", default=False):
+                    print("\n  Initialization cancelled.")
+                    print("  Please review and remove sensitive data before re-running.")
+                    return False
+            else:
+                print("  Review the items above - they will be synced to the server.\n")
+                if not click.confirm("  Continue with initialization?", default=True):
+                    print("\n  Initialization cancelled.")
+                    return False
+
+            print()  # Blank line after confirmation
+        else:
+            print("  No sensitive information detected")
 
     # Need to handle this carefully:
     # 1. If directory is empty, just checkout
