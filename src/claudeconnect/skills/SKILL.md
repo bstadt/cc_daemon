@@ -226,6 +226,85 @@ svn delete --keep-local <path>
 - Private journal entries
 - Work confidential information
 
+## Sensitive Content Review (LLM Pass)
+
+ClaudeConnect includes a regex-based scanner that catches obvious patterns (API keys, SSNs, etc.) during `claudeconnect init`. However, **you should also offer to do a deeper contextual review** that patterns can't catch.
+
+### When to Offer a Review
+
+**Proactively offer** a sensitive content review when:
+1. The user just ran `claudeconnect init` for the first time
+2. The user asks about privacy or what's being shared
+3. The user is about to add a new friend
+4. The user seems uncertain about what they're sharing
+
+### How to Conduct the Review
+
+When reviewing, read through the markdown files that will be synced and flag content that:
+
+**Relationship & Personal:**
+- Specific names of people with context that could be embarrassing or private
+- Dating/romantic details the user might not want shared
+- Family conflicts or sensitive family information
+- Mental health struggles, therapy notes, or emotional processing
+- Substance use or addiction references
+
+**Professional & Strategic:**
+- Business strategies or competitive information
+- Salary, equity, or compensation details
+- Negative opinions about colleagues or employers
+- Confidential work projects or client information
+- Job search activity (if currently employed)
+
+**Financial:**
+- Specific account balances or net worth
+- Investment positions or strategies
+- Debt details
+- Tax information
+
+**Health:**
+- Medical diagnoses or conditions
+- Medication names and dosages
+- Doctor names or appointment details
+- Mental health specifics beyond general wellness
+
+**Security & Access:**
+- Server IPs, hostnames, or infrastructure details
+- Access patterns or security procedures
+- Physical addresses or location patterns
+
+### Review Output Format
+
+Present findings clearly:
+
+```
+## Sensitive Content Review
+
+I reviewed your context files. Here's what I'd recommend considering before sharing:
+
+### High Priority (Recommend Removing/Redacting)
+- `life/health.md:15-20` - Specific medication names and dosages
+- `work/current.md:45` - Client name and project details (likely under NDA)
+- `context/finances.md` - Full account balances visible
+
+### Medium Priority (Consider)
+- `journal/2026-01-10.md` - Processing about [specific person] that's quite personal
+- `profile/edges.md` - Detailed mental health patterns
+
+### Low Priority (Awareness)
+- `relationships/friends.md` - Names real people; they'd know you're sharing context about them
+
+Would you like me to help redact any of these, or add files/folders to svn:ignore?
+```
+
+### Important Guidelines
+
+1. **Always ask permission** before reading through personal files for review
+2. **Be tactful** - Don't quote sensitive content back verbatim, summarize
+3. **Respect autonomy** - Present findings but let the user decide what to share
+4. **Offer solutions** - Suggest svn:ignore, redaction, or restructuring
+5. **Don't be paranoid** - The point is informed sharing, not preventing all sharing
+
 ## Troubleshooting
 
 ### "SQLite compiled for X, but running with Y"
@@ -300,4 +379,56 @@ Claude: Let me pull Brandon's latest context...
 *reads ~/.claude-connect/peers/brandon-example-com/work/current.md*
 
 Based on Brandon's context, he's currently working on...
+```
+
+### User just initialized ClaudeConnect
+```
+User: I just ran claudeconnect init
+
+Claude: Great! Your context is now set up to sync. Before you add any friends,
+would you like me to do a quick review of your files to flag anything you might
+not want to share? I can catch things the automatic scanner might miss - like
+personal relationship details, strategic work info, or health specifics.
+
+User: Yeah, go ahead
+
+Claude: *reads through context directory files*
+
+## Sensitive Content Review
+
+I looked through your context files. Here's what stood out:
+
+### High Priority (Recommend Removing/Redacting)
+- `life/finances.md:12-18` - Your full monthly budget with account numbers
+- `work/current.md:34` - Details about the acquisition talks (likely confidential)
+
+### Medium Priority (Consider)
+- `journal/2026-01-08.md` - You wrote candidly about frustrations with [coworker]
+- `relationships/romantic.md` - Fairly detailed dating history
+
+### Low Priority (Awareness)
+- `profile/edges.md` - Mentions therapy and specific patterns you're working on
+
+None of this is "wrong" to share - it depends on who you're connecting with.
+Want me to help move any of these to svn:ignore, or redact specific sections?
+```
+
+### User asks what they're sharing
+```
+User: What can my friends actually see?
+
+Claude: Anyone you've added to your authz file can read all your synced markdown
+files. Let me check what's currently being shared...
+
+*runs: svn list -R*
+
+You have 47 markdown files synced across these folders:
+- journal/ (23 files)
+- context/ (5 files)
+- profile/ (8 files)
+- life/ (6 files)
+- work/ (3 files)
+- philosophy/ (2 files)
+
+Would you like me to review these for sensitive content before you add more friends?
 ```
