@@ -278,7 +278,9 @@ def ensure_authz_exists(
 
     if needs_commit and files_to_add:
         try:
-            svn.add(files_to_add)
+            for file_path in files_to_add:
+                rel_path = file_path.relative_to(context_dir)
+                svn.add(rel_path, parents=True)
             svn.commit("Initialize authz and claudeconnect directories")
             print("  Created authz and claudeconnect directories")
         except Exception as e:
