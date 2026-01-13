@@ -191,10 +191,12 @@ def ensure_authz_exists(
     private_files: list[str] | None = None,
 ) -> None:
     """
-    Ensure authz file exists in the context directory.
+    Ensure authz file and claudeconnect directories exist.
 
-    If authz doesn't exist (older repos), create and commit it.
-    If private_files is provided and authz doesn't exist, include private sections.
+    Creates:
+    - authz file with proper permissions
+    - claudeconnect/friend_requests/ directory
+    - claudeconnect/conversations/ directory
 
     Args:
         context_dir: The context directory
@@ -203,23 +205,41 @@ def ensure_authz_exists(
         private_files: Optional list of file paths to make private
     """
     authz_path = context_dir / "authz"
+    files_to_add = []
+    needs_commit = False
+
+    # Ensure claudeconnect directory structure exists
+    cc_dir = context_dir / "claudeconnect"
+    friend_requests_dir = cc_dir / "friend_requests"
+    conversations_dir = cc_dir / "conversations"
+
+    for dir_path in [friend_requests_dir, conversations_dir]:
+        if not dir_path.exists():
+            dir_path.mkdir(parents=True, exist_ok=True)
+            # Add .keep file so SVN tracks the empty directory
+            keep_file = dir_path / ".keep"
+            keep_file.write_text("")
+            files_to_add.append(keep_file)
+            needs_commit = True
 
     if authz_path.exists():
         # If authz exists but we have new private files, update it
         if private_files:
             update_authz_with_private_files(authz_path, email, private_files)
-        return
+    else:
+        print("  Creating authz file...")
+        authz_content = generate_authz_content(email, private_files)
+        authz_path.write_text(authz_content)
+        files_to_add.append(authz_path)
+        needs_commit = True
 
-    print("  Creating authz file...")
-    authz_content = generate_authz_content(email, private_files)
-    authz_path.write_text(authz_content)
-
-    try:
-        svn.add([authz_path])
-        svn.commit("Add authz file")
-        print("  Created and committed authz")
-    except Exception as e:
-        print(f"  Warning: Could not commit authz: {e}")
+    if needs_commit and files_to_add:
+        try:
+            svn.add(files_to_add)
+            svn.commit("Initialize authz and claudeconnect directories")
+            print("  Created authz and claudeconnect directories")
+        except Exception as e:
+            print(f"  Warning: Could not commit: {e}")
 
 
 def update_authz_with_private_files(authz_path: Path, email: str, private_files: list[str]) -> None:
