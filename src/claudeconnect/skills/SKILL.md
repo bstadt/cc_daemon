@@ -3,7 +3,7 @@ name: claudeconnect
 description: Manages ClaudeConnect for sharing context between Claude instances. Use for syncing files, managing friends, pulling friend context, starting conversations, and handling friend requests.
 metadata:
   author: theexgenesis
-  version: "1.0"
+  version: "1.1"
 ---
 
 # ClaudeConnect Skill
@@ -81,7 +81,7 @@ claudeconnect session <email> [-t "topic"]     # Start conversation session
 ### Sending a Friend Request
 
 The `claudeconnect friend` command does two things automatically:
-1. Adds the recipient to your `authz` file with read access
+1. Adds the recipient to your `authz` file with read access to `/` and write access to `/claudeconnect/conversations`
 2. Sends a friend request to their `claudeconnect/friend_requests/` folder
 
 ```bash
@@ -111,16 +111,22 @@ Each file contains:
 
 ### Accepting a Friend Request
 
-1. Add them to your `authz` file:
+1. Add them to your `authz` file with TWO permissions:
    ```
    [/]
    owner@email.com = rw
-   alice@example.com = r    # Add this line
+   alice@example.com = r    # Can read your context
+
+   [/claudeconnect/conversations]
+   owner@email.com = rw
+   alice@example.com = rw   # Can write conversations to you
    ```
 
 2. Delete the request file from `claudeconnect/friend_requests/`
 
 3. Sync: `claudeconnect sync`
+
+**Important:** The `[/claudeconnect/conversations]` write access allows friends to push conversation transcripts to your repo when they initiate a session with you.
 
 ### Rejecting a Request
 
@@ -128,20 +134,26 @@ Simply delete the request file without updating authz, then sync.
 
 ## The authz File
 
-Controls who can read your context:
+Controls who can read your context and write conversations:
 
 ```
 [/]
 owner@email.com = rw           # You have full access
-friend1@example.com = r        # Friend has read access
+friend1@example.com = r        # Friend can read your context
 friend2@test.org = r           # Another friend
 
 [/claudeconnect/friend_requests]
 * = rw                         # Anyone can write friend requests
 owner@email.com = rw
+
+# Friends can write conversations to your repo
+[/claudeconnect/conversations]
+owner@email.com = rw
+friend1@example.com = rw       # Friend can push conversations to you
+friend2@test.org = rw          # Another friend
 ```
 
-To remove a friend: delete their line from `[/]` and sync.
+To remove a friend: delete their lines from both `[/]` and `[/claudeconnect/conversations]`, then sync.
 
 ## Reading Friend Context
 
@@ -171,9 +183,13 @@ This:
 1. Pulls their latest context
 2. Runs Claude with both contexts loaded
 3. Generates a conversation transcript
-4. Commits transcript to both repos
+4. Commits transcript to both repos (yours and theirs)
 
-Transcripts are saved to: `claudeconnect/conversations/with-<email>/<session-id>.md`
+Transcripts are saved to:
+- Your repo: `claudeconnect/conversations/with-<friend>/<session-id>.md`
+- Friend's repo: `claudeconnect/conversations/with-<you>/<session-id>.md`
+
+**Note:** For the friend's repo commit to succeed, they must have granted you write access to `[/claudeconnect/conversations]` in their authz.
 
 ## Excluding Files from Sync
 
@@ -211,7 +227,7 @@ svn delete --keep-local <path>
 
 ## Privacy Considerations
 
-**What friends can see:** Everything committed to your SVN repo.
+**What friends can see:** Everything committed to your SVN repo (except private files in authz).
 
 **Best practices:**
 1. **Never commit credentials** - API keys, passwords, tokens
@@ -328,6 +344,14 @@ claudeconnect sync                   # Re-sync
 ### "No context directory configured"
 Run `claudeconnect init` in your context directory first.
 
+### "Failed to commit to peer's repo"
+This means the peer hasn't granted you write access to their conversations folder.
+Ask them to add to their authz:
+```
+[/claudeconnect/conversations]
+your@email.com = rw
+```
+
 ## API Endpoints (Advanced)
 
 For direct API access (requires `Authorization: Bearer {id_token}` header):
@@ -352,7 +376,7 @@ I found a friend request from alice@example.com sent yesterday.
 They wrote: "Hey, let's connect our Claudes!"
 
 Would you like me to:
-1. Accept (I'll update your authz and sync)
+1. Accept (I'll update your authz with read + conversation write access and sync)
 2. Reject (I'll delete the request)
 3. Ignore for now
 ```
@@ -365,8 +389,9 @@ Claude: I'll send a friend request to bob@example.com.
 *runs: claudeconnect friend bob@example.com -m "Hi! Let's connect."*
 
 ✓ Friend request sent! They'll see it in their claudeconnect/friend_requests/ folder.
-Once they accept and grant you access, you can pull their context with:
-claudeconnect pull bob@example.com
+Once they accept and grant you conversation write access, you can:
+- Pull their context: claudeconnect pull bob@example.com
+- Start a session: claudeconnect session bob@example.com
 ```
 
 ### User asks to see a friend's context
