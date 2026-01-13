@@ -708,24 +708,24 @@ def sync():
 @cli.command()
 @click.argument("peer_email")
 @click.option("--topic", "-t", help="Conversation topic")
-@click.option("--dual", is_flag=True, help="Use dual-instance mode (two separate Claude instances)")
-@click.option("--turns", default=6, help="Max conversation turns for dual mode (default: 6)")
-def session(peer_email: str, topic: str | None, dual: bool, turns: int):
+@click.option("--single", is_flag=True, help="Use single-instance mode (one Claude simulates both sides)")
+@click.option("--turns", default=6, help="Max conversation turns (default: 6)")
+def session(peer_email: str, topic: str | None, single: bool, turns: int):
     """Start a conversation session with a friend's Claude.
 
-    By default, runs a single Claude instance that simulates both sides.
-    Use --dual for two separate Claude instances (each only sees their own context).
+    By default, runs two separate Claude instances (each only sees their own context).
+    Use --single to have one Claude simulate both sides (legacy mode).
     """
     print(f"Starting session with {peer_email}...")
 
-    if dual:
-        from .session import run_dual_session
-        print("  Mode: Dual-instance (separate Claude per user)")
-        success, result = asyncio.run(run_dual_session(peer_email, topic, turns))
-    else:
+    if single:
         from .session import run_session
         print("  Mode: Single-instance (simulated conversation)")
         success, result = asyncio.run(run_session(peer_email, topic))
+    else:
+        from .session import run_dual_session
+        print("  Mode: Dual-instance (separate Claude per user)")
+        success, result = asyncio.run(run_dual_session(peer_email, topic, turns))
 
     if success:
         print(f"\n✓ Session complete!")
