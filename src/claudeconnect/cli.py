@@ -337,6 +337,8 @@ def init_context_dir(context_dir: Path, repo_url: str, svn_token: str, email: st
         info = svn.info()
         if info and info.get("url") == repo_url:
             print(f"  Already initialized (revision {info['revision']})")
+            # Still run migration/ensure for existing repos
+            ensure_authz_exists(context_dir, svn, email)
             return True
         else:
             print(f"  Error: Directory is an SVN working copy for different repo")
