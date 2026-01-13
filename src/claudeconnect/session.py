@@ -311,3 +311,259 @@ async def run_session(
         print(f"  (This is expected if you don't have write access to their conversations folder)")
 
     return True, str(our_transcript_path)
+
+
+def generate_instance_prompt(
+    context_dir: Path,
+    my_email: str,
+    peer_email: str,
+    topic: Optional[str] = None,
+    is_initiator: bool = True,
+) -> str:
+    """
+    Generate system prompt for one Claude instance in a dual-instance conversation.
+
+    Each instance only sees their own user's context and knows they're talking
+    to the other user's Claude instance.
+    """
+    my_name = my_email.split("@")[0]
+    peer_name = peer_email.split("@")[0]
+
+    prompt = f"""You are {my_name}'s Claude instance, participating in a ClaudeConnect conversation with {peer_name}'s Claude instance.
+
+## Your Identity
+- You represent {my_name} ({my_email})
+- Your context directory: {context_dir}
+- Read CLAUDE.md and relevant context files to understand {my_name}'s perspective, values, and current projects
+
+## The Conversation
+- You are talking to {peer_name}'s Claude (a separate instance with their own context)
+- You do NOT have access to {peer_name}'s private files - only what they choose to share in conversation
+- Be authentic to {my_name}'s perspective and values
+- Be helpful, curious, and constructive
+
+## Response Format
+- Respond naturally as {my_name}'s Claude would
+- Keep responses focused and substantive (1-3 paragraphs typically)
+- You can reference {my_name}'s context/projects when relevant
+- Don't roleplay as {peer_name} - you're only {my_name}'s Claude
+
+"""
+    if topic:
+        prompt += f"## Topic\nThe conversation topic is: {topic}\n\n"
+
+    if is_initiator:
+        prompt += f"## Your Role\nYou are initiating this conversation. Start with a thoughtful opening that relates to the topic and {my_name}'s current context.\n"
+    else:
+        prompt += f"## Your Role\nYou are responding to {peer_name}'s Claude. Read their message and respond authentically from {my_name}'s perspective.\n"
+
+    return prompt
+
+
+def run_claude_instance(
+    context_dir: Path,
+    system_prompt: str,
+    user_message: str,
+    timeout: int = 120,
+) -> tuple[bool, str]:
+    """
+    Run a single Claude instance and get a response.
+
+    Args:
+        context_dir: Directory to run Claude in (provides context)
+        system_prompt: System prompt for this instance
+        user_message: The user/conversation message to respond to
+        timeout: Timeout in seconds
+
+    Returns:
+        Tuple of (success, response or error message)
+    """
+    try:
+        # Combine system prompt and user message
+        full_prompt = f"{system_prompt}\n\n---\n\n{user_message}"
+
+        result = subprocess.run(
+            [
+                "claude",
+                "--print",
+                "--dangerously-skip-permissions",
+            ],
+            input=full_prompt,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=context_dir,
+        )
+
+        if result.returncode != 0:
+            error_msg = result.stderr or result.stdout or "Unknown error"
+            return False, f"Claude failed: {error_msg}"
+
+        return True, result.stdout.strip()
+
+    except subprocess.TimeoutExpired:
+        return False, "Response timed out"
+    except FileNotFoundError:
+        return False, "Claude CLI not found"
+    except Exception as e:
+        return False, f"Error: {e}"
+
+
+async def run_dual_session(
+    peer_email: str,
+    topic: Optional[str] = None,
+    max_turns: int = 6,
+) -> tuple[bool, str | None]:
+    """
+    Run a conversation session with two separate Claude instances.
+
+    Unlike run_session which has one Claude simulate both sides, this function
+    runs two actual Claude instances that only see their own user's context.
+
+    Args:
+        peer_email: The peer's email address
+        topic: Optional conversation topic
+        max_turns: Maximum conversation turns (each turn = 2 messages)
+
+    Returns:
+        Tuple of (success, transcript_path or error message)
+    """
+    from .cli import get_valid_token, get_svn_token as cli_get_svn_token
+
+    # Get our credentials
+    tokens = get_valid_token()
+    if not tokens:
+        return False, "Not logged in"
+
+    config = get_config()
+    if not config.context_dir:
+        return False, "No context directory configured"
+
+    our_context_dir = Path(config.context_dir)
+    our_email = tokens.email
+
+    # Get SVN token
+    svn_token = cli_get_svn_token(tokens.id_token)
+    if not svn_token:
+        return False, "Failed to get SVN token"
+
+    # Pull peer's context
+    print(f"\nPreparing dual-instance session with {peer_email}...")
+    peer_context_dir = pull_peer_context(peer_email, svn_token, our_email)
+    if not peer_context_dir:
+        return False, f"Failed to pull {peer_email}'s context"
+
+    # Generate session ID
+    session_id = datetime.now().strftime("%Y-%m-%d") + "_" + uuid4().hex[:8]
+
+    # Generate prompts for each instance
+    our_prompt = generate_instance_prompt(
+        our_context_dir, our_email, peer_email, topic, is_initiator=True
+    )
+    peer_prompt = generate_instance_prompt(
+        peer_context_dir, peer_email, our_email, topic, is_initiator=False
+    )
+
+    our_name = our_email.split("@")[0]
+    peer_name = peer_email.split("@")[0]
+
+    # Build conversation
+    transcript_lines = []
+    conversation_history = ""
+
+    print("\nStarting dual-instance conversation...")
+    print(f"  {our_name}'s Claude <-> {peer_name}'s Claude")
+    print(f"  Max turns: {max_turns}")
+    print()
+
+    for turn in range(max_turns):
+        # Our Claude's turn
+        print(f"  Turn {turn + 1}/{max_turns}: {our_name}'s Claude thinking...")
+
+        if turn == 0:
+            our_message = f"Start the conversation about: {topic or 'whatever feels natural based on context'}"
+        else:
+            our_message = f"Conversation so far:\n\n{conversation_history}\n\nRespond to continue the conversation."
+
+        success, our_response = run_claude_instance(
+            our_context_dir, our_prompt, our_message
+        )
+
+        if not success:
+            print(f"    Error: {our_response}")
+            break
+
+        transcript_lines.append(f"**{our_name}'s Claude**: {our_response}")
+        conversation_history += f"**{our_name}'s Claude**: {our_response}\n\n"
+        print(f"    {our_name}'s Claude responded ({len(our_response)} chars)")
+
+        # Peer's Claude's turn
+        print(f"  Turn {turn + 1}/{max_turns}: {peer_name}'s Claude thinking...")
+
+        peer_message = f"Conversation so far:\n\n{conversation_history}\n\nRespond to continue the conversation."
+
+        success, peer_response = run_claude_instance(
+            peer_context_dir, peer_prompt, peer_message
+        )
+
+        if not success:
+            print(f"    Error: {peer_response}")
+            break
+
+        transcript_lines.append(f"**{peer_name}'s Claude**: {peer_response}")
+        conversation_history += f"**{peer_name}'s Claude**: {peer_response}\n\n"
+        print(f"    {peer_name}'s Claude responded ({len(peer_response)} chars)")
+
+        # Check for natural ending signals
+        lower_response = peer_response.lower()
+        if any(phrase in lower_response for phrase in [
+            "goodbye", "talk soon", "until next time", "take care",
+            "that's all for now", "let's wrap up"
+        ]):
+            print("  (Natural conversation ending detected)")
+            break
+
+    if not transcript_lines:
+        return False, "No conversation generated"
+
+    # Create transcript
+    header = create_transcript_header(our_email, peer_email, session_id, topic)
+    transcript = header + "\n\n".join(transcript_lines)
+
+    # Create conversation directories if needed
+    our_conv_dir = our_context_dir / "claudeconnect" / "conversations" / f"with-{email_to_repo_name(peer_email)}"
+    our_conv_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save transcript locally
+    transcript_filename = f"{session_id}.md"
+    our_transcript_path = our_conv_dir / transcript_filename
+    our_transcript_path.write_text(transcript)
+    print(f"\nSaved transcript: {our_transcript_path}")
+
+    # Commit to our repo
+    print("\nCommitting to your repo...")
+    our_svn = SvnClient(our_context_dir, repo_url_for_email(our_email), svn_token, our_email)
+    try:
+        our_svn.add(our_transcript_path.relative_to(our_context_dir), parents=True)
+        our_svn.commit(f"Dual session with {peer_email}: {session_id}")
+        print("  Committed to your repo")
+    except SvnError as e:
+        print(f"  Warning: Failed to commit to your repo: {e}")
+
+    # Commit to peer's repo
+    print(f"\nCommitting to {peer_email}'s repo...")
+    peer_conv_dir = peer_context_dir / "claudeconnect" / "conversations" / f"with-{email_to_repo_name(our_email)}"
+    peer_conv_dir.mkdir(parents=True, exist_ok=True)
+    peer_transcript_path = peer_conv_dir / transcript_filename
+    peer_transcript_path.write_text(transcript)
+
+    peer_svn = SvnClient(peer_context_dir, repo_url_for_email(peer_email), svn_token, our_email)
+    try:
+        peer_svn.add(peer_transcript_path.relative_to(peer_context_dir), parents=True)
+        peer_svn.commit(f"Dual session with {our_email}: {session_id}")
+        print(f"  Committed to {peer_email}'s repo")
+    except SvnError as e:
+        print(f"  Warning: Failed to commit to peer's repo: {e}")
+        print(f"  (This is expected if you don't have write access to their conversations folder)")
+
+    return True, str(our_transcript_path)
