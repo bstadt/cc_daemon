@@ -184,6 +184,46 @@ def install_skill() -> bool:
         return False
 
 
+def migrate_authz_paths(authz_path: Path, email: str) -> bool:
+    """
+    Migrate old authz paths to new claudeconnect/ prefix.
+
+    Migrates:
+    - [/friend_requests] -> [/claudeconnect/friend_requests]
+
+    Also ensures [/claudeconnect/conversations] section exists.
+
+    Args:
+        authz_path: Path to authz file
+        email: User's email
+
+    Returns:
+        True if changes were made, False otherwise.
+    """
+    content = authz_path.read_text()
+    original_content = content
+    changes_made = False
+
+    # Migrate [/friend_requests] to [/claudeconnect/friend_requests]
+    if "[/friend_requests]" in content and "[/claudeconnect/friend_requests]" not in content:
+        content = content.replace("[/friend_requests]", "[/claudeconnect/friend_requests]")
+        changes_made = True
+        print("  Migrated [/friend_requests] -> [/claudeconnect/friend_requests]")
+
+    # Ensure [/claudeconnect/conversations] section exists
+    if "[/claudeconnect/conversations]" not in content:
+        # Add the section at the end
+        content = content.rstrip() + "\n\n# Friends can write conversations to your repo\n"
+        content += f"[/claudeconnect/conversations]\n{email} = rw\n"
+        changes_made = True
+        print("  Added [/claudeconnect/conversations] section")
+
+    if changes_made:
+        authz_path.write_text(content)
+
+    return changes_made
+
+
 def ensure_authz_exists(
     context_dir: Path,
     svn: "SvnClient",
@@ -223,6 +263,9 @@ def ensure_authz_exists(
             needs_commit = True
 
     if authz_path.exists():
+        # Migrate old authz format if needed
+        if migrate_authz_paths(authz_path, email):
+            needs_commit = True
         # If authz exists but we have new private files, update it
         if private_files:
             update_authz_with_private_files(authz_path, email, private_files)
