@@ -156,7 +156,7 @@ def generate_authz_content(email: str) -> str:
 """
 
 
-def ensure_authz(repo_path: Path, email: str, use_sudo: bool = False) -> None:
+def ensure_authz(repo_path: Path, email: str, use_sudo: bool = False, force: bool = False) -> None:
     """
     Ensure authz file exists and has correct base permissions.
     Does NOT modify friend permissions - those are managed by Claude via the protocol.
@@ -165,11 +165,13 @@ def ensure_authz(repo_path: Path, email: str, use_sudo: bool = False) -> None:
         repo_path: Path to the SVN repository
         email: User's email for authz
         use_sudo: If True, use sudo tee to write (for existing repos owned by www-data)
+        force: If True, overwrite existing authz file (use for new repos to replace svnadmin default)
     """
     authz_path = repo_path / "conf" / "authz"
 
     # Only write if authz doesn't exist (don't overwrite friend permissions)
-    if authz_path.exists():
+    # Unless force=True (for newly created repos where we need to replace the default template)
+    if authz_path.exists() and not force:
         return
 
     authz_content = generate_authz_content(email)
@@ -213,7 +215,8 @@ def create_svn_repo(repo_name: str, email: str) -> tuple[bool, str]:
             return False, f"svnadmin create failed: {result.stderr}"
 
         # Create default authz file BEFORE chown
-        ensure_authz(repo_path, email)
+        # Use force=True to replace svnadmin's default template
+        ensure_authz(repo_path, email, force=True)
 
         # Set ownership to www-data (Apache user) AFTER writing authz
         subprocess.run(

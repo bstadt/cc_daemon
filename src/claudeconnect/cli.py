@@ -548,12 +548,29 @@ def login():
 @cli.command()
 def status():
     """Show current status."""
-    tokens = get_tokens()
+    tokens = get_valid_token()
     config = get_config()
 
     if not tokens:
         print("Not logged in. Run `claudeconnect login` first.")
         return
+
+    # Check for test user mode
+    test_user_email = get_test_user_email()
+    if test_user_email:
+        creds = get_test_user_credentials(test_user_email)
+        if creds:
+            print(f"[Test User Mode]")
+            print(f"Email: {creds.email}")
+            print(f"Repo: {creds.repo_url}")
+            expires_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(creds.expires_at))
+            if creds.expires_at < int(time.time()):
+                print(f"Status: EXPIRED (was {expires_str})")
+            else:
+                print(f"Expires: {expires_str}")
+            if creds.context_dir:
+                print(f"Context directory: {creds.context_dir}")
+            return
 
     print(f"Logged in as: {tokens.email}")
     print(f"Repo: {email_to_repo_name(tokens.email)}")
@@ -562,16 +579,18 @@ def status():
         print(f"Context directory: {config.context_dir}")
 
         # Check if it's a valid working copy
-        svn = SvnClient(
-            Path(config.context_dir),
-            repo_url_for_email(tokens.email),
-            tokens.id_token,
-        )
-        info = svn.info()
-        if info:
-            print(f"SVN revision: {info['revision']}")
-        else:
-            print("SVN status: Not initialized")
+        svn_token = get_svn_token(tokens.id_token)
+        if svn_token:
+            svn = SvnClient(
+                Path(config.context_dir),
+                repo_url_for_email(tokens.email),
+                svn_token,
+            )
+            info = svn.info()
+            if info:
+                print(f"SVN revision: {info['revision']}")
+            else:
+                print("SVN status: Not initialized")
     else:
         print("Context directory: Not set")
 
