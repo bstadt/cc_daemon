@@ -198,12 +198,6 @@ class TestTestUserDeleteAll:
 class TestTestUserExpiry:
     """Tests for test user expiration."""
 
-    def test_expired_user_shows_expired_status(self):
-        """Verify expired users show expired status."""
-        # This is hard to test without waiting, so we skip detailed expiry testing
-        # The expiry logic is enforced server-side anyway
-        pytest.skip("Expiry testing requires waiting for actual expiration")
-
     def test_test_user_can_operate_before_expiry(self, test_context):
         """Verify test user can perform operations before expiry."""
         context_dir, test_user = test_context
