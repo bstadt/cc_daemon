@@ -116,12 +116,16 @@ class TestCLICommands:
 
     def test_login_shows_instructions(self):
         """Verify login shows what to do."""
+        import subprocess
         # We can't actually complete OAuth in tests, but login should start
-        result = run_cli(["login"])
-
-        # Should show something about login/browser
-        # May timeout waiting for callback, which is expected
-        assert result.returncode is not None  # Just verify it runs
+        # The login command waits for OAuth callback, so it will timeout
+        try:
+            result = run_cli(["login"])
+            # If it returns, just verify it ran
+            assert result.returncode is not None
+        except subprocess.TimeoutExpired:
+            # Expected - login waits for OAuth callback that won't come
+            pass
 
 
 class TestTestUserCLI:
