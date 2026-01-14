@@ -16,7 +16,11 @@ import click
 import httpx
 
 from .auth import login as do_login, ensure_valid_token, decode_jwt_payload, refresh_token
-from .config import get_config, get_tokens, Config, Tokens, is_logged_in, get_email
+from .config import (
+    get_config, get_tokens, Config, Tokens, is_logged_in, get_email,
+    get_test_user_email, get_test_user_credentials, list_test_users,
+    TestUserCredentials, TEST_USERS_DIR,
+)
 from .scanner import scan_directory
 from .svn_ops import SvnClient, SvnError, email_to_repo_name, repo_url_for_email
 from .sync import SyncLoop, sync_once
@@ -29,12 +33,23 @@ def get_svn_token(id_token: str) -> str | None:
     """
     Exchange Google JWT for a short Fernet token for SVN auth.
 
+    For test users (CC_TEST_USER env), returns the stored SVN token directly.
+
     Args:
-        id_token: Google OAuth id_token
+        id_token: Google OAuth id_token (ignored for test users)
 
     Returns:
         Fernet token string, or None on failure.
     """
+    # Check for test user mode
+    test_user_email = get_test_user_email()
+    if test_user_email:
+        creds = get_test_user_credentials(test_user_email)
+        if creds:
+            return creds.svn_token
+        return None
+
+    # Normal OAuth flow
     try:
         response = httpx.post(
             f"{SERVER_URL}/api/svn-token",
@@ -59,9 +74,32 @@ def get_valid_token() -> Tokens | None:
     """
     Get a valid (non-expired) token, refreshing if needed.
 
+    Checks for test user mode first (CC_TEST_USER env var).
+
     Returns:
         Valid Tokens, or None if not logged in or refresh fails.
     """
+    # Check for test user mode
+    test_user_email = get_test_user_email()
+    if test_user_email:
+        creds = get_test_user_credentials(test_user_email)
+        if creds:
+            # Check if test user token is expired
+            if creds.expires_at < int(time.time()):
+                print(f"Test user {test_user_email} has expired.")
+                return None
+            # Return a Tokens-like object for compatibility
+            return Tokens(
+                id_token="",  # Not used for test users
+                refresh_token="",  # Not used for test users
+                email=creds.email,
+            )
+        else:
+            print(f"Test user {test_user_email} not found locally.")
+            print("Run `claudeconnect test-user list` to see available test users.")
+            return None
+
+    # Normal OAuth flow
     tokens = get_tokens()
     if not tokens:
         return None
@@ -91,8 +129,10 @@ def ensure_repo(token: str) -> dict:
     """
     Ensure user's repo exists on server.
 
+    For test users (CC_TEST_USER env), returns stored repo info directly.
+
     Args:
-        token: OAuth id_token
+        token: OAuth id_token (ignored for test users)
 
     Returns:
         Dict with 'repo', 'url', 'email' keys.
@@ -100,6 +140,20 @@ def ensure_repo(token: str) -> dict:
     Raises:
         Exception on failure.
     """
+    # Check for test user mode
+    test_user_email = get_test_user_email()
+    if test_user_email:
+        creds = get_test_user_credentials(test_user_email)
+        if creds:
+            return {
+                "repo": email_to_repo_name(creds.email),
+                "url": creds.repo_url,
+                "email": creds.email,
+                "created": False,  # Already created on server
+            }
+        raise Exception(f"Test user {test_user_email} not found locally")
+
+    # Normal OAuth flow
     response = httpx.post(
         f"{SERVER_URL}/api/ensure-repo",
         headers={"Authorization": f"Bearer {token}"},
@@ -943,6 +997,224 @@ def friend(peer_email: str, message: str):
     except Exception as e:
         print(f"\n✗ Error sending request: {e}")
         sys.exit(1)
+
+
+# =============================================================================
+# Test User Commands
+# =============================================================================
+
+def parse_ttl(ttl: str) -> int:
+    """
+    Parse TTL string to hours.
+
+    Examples: "1h" -> 1, "24h" -> 24, "7d" -> 168, "2d" -> 48
+    """
+    ttl = ttl.lower().strip()
+    if ttl.endswith("h"):
+        return int(ttl[:-1])
+    elif ttl.endswith("d"):
+        return int(ttl[:-1]) * 24
+    else:
+        # Assume hours if no suffix
+        return int(ttl)
+
+
+@cli.group("test-user")
+def test_user():
+    """Manage ephemeral test users for development and testing."""
+    pass
+
+
+@test_user.command("create")
+@click.option("--ttl", default="24h", help="Time to live (e.g., 1h, 24h, 7d)")
+def test_user_create(ttl: str):
+    """Create an ephemeral test user.
+
+    Requires admin access (must be logged in as an admin email).
+    """
+    from datetime import datetime
+
+    # Need to be logged in as admin
+    tokens = get_valid_token()
+    if not tokens:
+        print("Not logged in. Run `claudeconnect login` first.")
+        sys.exit(1)
+
+    ttl_hours = parse_ttl(ttl)
+
+    print(f"Creating test user (TTL: {ttl_hours}h)...")
+
+    try:
+        response = httpx.post(
+            f"{SERVER_URL}/api/test-user/create",
+            headers={"Authorization": f"Bearer {tokens.id_token}"},
+            json={"ttl_hours": ttl_hours},
+            timeout=30,
+        )
+
+        if response.status_code == 403:
+            print("✗ Admin access required to create test users.")
+            sys.exit(1)
+
+        if response.status_code != 200:
+            data = response.json()
+            print(f"✗ Failed to create test user: {data.get('error', 'Unknown error')}")
+            sys.exit(1)
+
+        data = response.json()
+
+        # Save locally
+        creds = TestUserCredentials(
+            email=data["email"],
+            svn_token=data["svn_token"],
+            repo_url=data["repo_url"],
+            expires_at=data["expires_at"],
+        )
+        creds.save()
+
+        expires_str = datetime.fromtimestamp(data["expires_at"]).strftime("%Y-%m-%d %H:%M:%S")
+
+        print(f"\n✓ Created test user: {data['email']}")
+        print(f"  Repo: {data['repo_url']}")
+        print(f"  Expires: {expires_str}")
+        print(f"\n  To use this test user:")
+        print(f"    CC_TEST_USER={data['email']} claudeconnect init")
+
+    except Exception as e:
+        print(f"✗ Error creating test user: {e}")
+        sys.exit(1)
+
+
+@test_user.command("list")
+def test_user_list():
+    """List local test users."""
+    from datetime import datetime
+
+    users = list_test_users()
+
+    if not users:
+        print("No test users found locally.")
+        print("Create one with: claudeconnect test-user create")
+        return
+
+    print(f"Found {len(users)} test user(s):\n")
+
+    now = int(time.time())
+    for email in sorted(users):
+        creds = get_test_user_credentials(email)
+        if creds:
+            expired = creds.expires_at < now
+            expires_str = datetime.fromtimestamp(creds.expires_at).strftime("%Y-%m-%d %H:%M:%S")
+            status = " (EXPIRED)" if expired else ""
+
+            print(f"  {email}{status}")
+            print(f"    Repo: {creds.repo_url}")
+            print(f"    Expires: {expires_str}")
+            if creds.context_dir:
+                print(f"    Context: {creds.context_dir}")
+            print()
+
+
+@test_user.command("delete")
+@click.argument("email")
+@click.option("--keep-local", is_flag=True, help="Keep local working copy")
+@click.option("--local-only", is_flag=True, help="Only delete local credentials (don't call server)")
+def test_user_delete(email: str, keep_local: bool, local_only: bool):
+    """Delete a test user (remote repo + local credentials)."""
+    import shutil
+
+    # Check if we have local credentials
+    creds = get_test_user_credentials(email)
+    if not creds:
+        print(f"No local credentials for {email}")
+        return
+
+    # Delete server-side unless local-only
+    if not local_only:
+        tokens = get_valid_token()
+        if not tokens:
+            print("Not logged in. Use --local-only to just delete local credentials.")
+            sys.exit(1)
+
+        print(f"Deleting test user {email}...")
+
+        try:
+            response = httpx.post(
+                f"{SERVER_URL}/api/test-user/delete",
+                headers={"Authorization": f"Bearer {tokens.id_token}"},
+                json={"email": email},
+                timeout=30,
+            )
+
+            if response.status_code == 403:
+                print("✗ Admin access required to delete test users.")
+                print("  Use --local-only to just delete local credentials.")
+                sys.exit(1)
+
+            if response.status_code == 404:
+                print("  Server: Test user not found (may already be deleted)")
+            elif response.status_code != 200:
+                data = response.json()
+                print(f"  Server error: {data.get('error', 'Unknown error')}")
+            else:
+                print("  Deleted server repo")
+
+        except Exception as e:
+            print(f"  Server error: {e}")
+            print("  Continuing with local deletion...")
+
+    # Delete local context if we have one and not keeping it
+    if creds.context_dir and not keep_local:
+        ctx_dir = Path(creds.context_dir)
+        if ctx_dir.exists():
+            if click.confirm(f"  Delete local working copy at {ctx_dir}?"):
+                shutil.rmtree(ctx_dir)
+                print(f"  Deleted: {ctx_dir}")
+
+    # Delete local credentials
+    creds.delete()
+    print(f"  Deleted local credentials")
+    print(f"\n✓ Deleted test user: {email}")
+
+
+@test_user.command("delete-all")
+@click.confirmation_option(prompt="Delete ALL local test users?")
+def test_user_delete_all():
+    """Delete all local test users."""
+    users = list_test_users()
+
+    if not users:
+        print("No test users found locally.")
+        return
+
+    tokens = get_valid_token()
+
+    for email in users:
+        creds = get_test_user_credentials(email)
+        if not creds:
+            continue
+
+        print(f"Deleting {email}...")
+
+        # Try server deletion if logged in
+        if tokens:
+            try:
+                response = httpx.post(
+                    f"{SERVER_URL}/api/test-user/delete",
+                    headers={"Authorization": f"Bearer {tokens.id_token}"},
+                    json={"email": email},
+                    timeout=30,
+                )
+                if response.status_code == 200:
+                    print("  Deleted server repo")
+            except Exception:
+                pass
+
+        # Delete local
+        creds.delete()
+        print("  Deleted local credentials")
+
+    print(f"\n✓ Deleted {len(users)} test user(s)")
 
 
 def main():

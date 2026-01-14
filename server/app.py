@@ -10,6 +10,7 @@ import subprocess
 import base64
 import json
 import time
+from functools import wraps
 from pathlib import Path
 from flask import Flask, redirect, request, session, url_for, jsonify
 from authlib.integrations.flask_client import OAuth
@@ -20,6 +21,9 @@ import httpx
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(32))
+
+# Admin emails for test user management
+ADMIN_EMAILS = {"brandon@calcifercomputing.com"}
 
 # Fernet key for SVN tokens - must be 32 url-safe base64-encoded bytes
 # Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
@@ -34,6 +38,44 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 
 # Paths
 SVN_REPOS_DIR = Path("/var/svn/repos")
+EPHEMERAL_USERS_FILE = Path("/var/svn/ephemeral-users.json")
+
+
+def load_ephemeral_users() -> dict:
+    """Load ephemeral users tracking file."""
+    if not EPHEMERAL_USERS_FILE.exists():
+        return {}
+    try:
+        return json.loads(EPHEMERAL_USERS_FILE.read_text())
+    except (json.JSONDecodeError, IOError):
+        return {}
+
+
+def save_ephemeral_users(users: dict) -> None:
+    """Save ephemeral users tracking file."""
+    EPHEMERAL_USERS_FILE.write_text(json.dumps(users, indent=2))
+
+
+def require_admin(f):
+    """Decorator for admin-only endpoints."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return jsonify({"error": "Missing Authorization header"}), 401
+
+        id_token = auth_header[7:]
+        valid, email_or_error = verify_id_token(id_token)
+        if not valid:
+            return jsonify({"error": email_or_error}), 401
+
+        if email_or_error not in ADMIN_EMAILS:
+            return jsonify({"error": "Admin access required"}), 403
+
+        # Store admin email for use in endpoint
+        request.admin_email = email_or_error
+        return f(*args, **kwargs)
+    return decorated
 
 
 # OAuth setup
@@ -482,6 +524,177 @@ def send_friend_request():
 
     finally:
         os.unlink(temp_file.name)
+
+
+# =============================================================================
+# Ephemeral Test User Endpoints
+# =============================================================================
+
+@app.route("/api/test-user/create", methods=["POST"])
+@require_admin
+def create_test_user():
+    """
+    Create an ephemeral test user.
+
+    Requires admin authentication via Bearer token.
+    Body: {"ttl_hours": 24}
+
+    Returns:
+        JSON with email, svn_token, repo_url, expires_at
+    """
+    if not fernet:
+        return jsonify({"error": "SVN tokens not configured"}), 500
+
+    data = request.get_json() or {}
+    ttl_hours = data.get("ttl_hours", 24)
+
+    # Generate ephemeral identity
+    user_id = secrets.token_hex(8)
+    email = f"test-{user_id}@ephemeral.claudeconnect.io"
+    repo_name = email_to_repo_name(email)
+
+    # Create repo
+    success, msg = create_svn_repo(repo_name, email)
+    if not success:
+        return jsonify({"error": msg}), 500
+
+    # Generate long-lived SVN token (TTL-based)
+    expiry = int(time.time()) + (ttl_hours * 3600)
+    payload = f"{email}|{expiry}"
+    svn_token = fernet.encrypt(payload.encode()).decode()
+
+    # Track for cleanup
+    users = load_ephemeral_users()
+    users[email] = {
+        "repo": repo_name,
+        "expiry": expiry,
+        "created": int(time.time()),
+        "created_by": request.admin_email,
+    }
+    save_ephemeral_users(users)
+
+    return jsonify({
+        "email": email,
+        "svn_token": svn_token,
+        "repo_url": f"https://claudeconnect.io/svn/{repo_name}",
+        "expires_at": expiry,
+        "ttl_hours": ttl_hours,
+    })
+
+
+@app.route("/api/test-user/delete", methods=["POST"])
+@require_admin
+def delete_test_user():
+    """
+    Delete an ephemeral test user and their SVN repo.
+
+    Requires admin authentication.
+    Body: {"email": "test-xxx@ephemeral.claudeconnect.io"}
+    """
+    data = request.get_json() or {}
+    email = data.get("email", "").strip().lower()
+
+    if not email:
+        return jsonify({"error": "Missing email"}), 400
+
+    # Safety check: only allow deleting ephemeral users
+    if not email.endswith("@ephemeral.claudeconnect.io"):
+        return jsonify({"error": "Can only delete ephemeral test users"}), 400
+
+    # Load ephemeral users tracking
+    users = load_ephemeral_users()
+    if email not in users:
+        return jsonify({"error": "Test user not found"}), 404
+
+    repo_name = users[email]["repo"]
+    repo_path = SVN_REPOS_DIR / repo_name
+
+    # Delete SVN repo
+    if repo_path.exists():
+        result = subprocess.run(
+            ["sudo", "rm", "-rf", str(repo_path)],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            return jsonify({"error": f"Failed to delete repo: {result.stderr}"}), 500
+
+    # Remove from tracking
+    del users[email]
+    save_ephemeral_users(users)
+
+    return jsonify({
+        "success": True,
+        "deleted": email,
+        "repo": repo_name,
+    })
+
+
+@app.route("/api/test-user/cleanup", methods=["POST"])
+@require_admin
+def cleanup_test_users():
+    """
+    Clean up expired ephemeral test users.
+
+    Called by cron or manually. Deletes repos whose TTL has passed.
+    """
+    users = load_ephemeral_users()
+    now = int(time.time())
+    deleted = []
+
+    for email, data in list(users.items()):
+        if data["expiry"] < now:
+            repo_path = SVN_REPOS_DIR / data["repo"]
+            if repo_path.exists():
+                result = subprocess.run(
+                    ["sudo", "rm", "-rf", str(repo_path)],
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode == 0:
+                    deleted.append(email)
+                    del users[email]
+            else:
+                # Repo already gone, just remove tracking
+                deleted.append(email)
+                del users[email]
+
+    save_ephemeral_users(users)
+
+    return jsonify({
+        "success": True,
+        "deleted": deleted,
+        "remaining": len(users),
+    })
+
+
+@app.route("/api/test-user/list", methods=["GET"])
+@require_admin
+def list_test_users():
+    """
+    List all ephemeral test users.
+
+    Requires admin authentication.
+    """
+    users = load_ephemeral_users()
+    now = int(time.time())
+
+    result = []
+    for email, data in users.items():
+        result.append({
+            "email": email,
+            "repo": data["repo"],
+            "created": data["created"],
+            "created_by": data.get("created_by", "unknown"),
+            "expires_at": data["expiry"],
+            "expired": data["expiry"] < now,
+            "ttl_remaining": max(0, data["expiry"] - now),
+        })
+
+    return jsonify({
+        "users": result,
+        "total": len(result),
+    })
 
 
 if __name__ == "__main__":
