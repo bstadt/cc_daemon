@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass, asdict
@@ -11,6 +12,7 @@ from dataclasses import dataclass, asdict
 CONFIG_DIR = Path.home() / ".claude-connect"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 TOKENS_FILE = CONFIG_DIR / "tokens.json"
+TEST_USERS_DIR = CONFIG_DIR / "test-users"
 
 
 @dataclass
@@ -83,3 +85,64 @@ def get_email() -> Optional[str]:
     """Get logged-in user's email."""
     tokens = get_tokens()
     return tokens.email if tokens else None
+
+
+# =============================================================================
+# Test User Credentials
+# =============================================================================
+
+@dataclass
+class TestUserCredentials:
+    """Credentials for an ephemeral test user."""
+    email: str
+    svn_token: str
+    repo_url: str
+    expires_at: int
+    context_dir: Optional[str] = None
+
+    def save(self) -> None:
+        """Save test user credentials to disk."""
+        user_dir = TEST_USERS_DIR / self.email
+        user_dir.mkdir(parents=True, exist_ok=True)
+        creds_file = user_dir / "credentials.json"
+        creds_file.write_text(json.dumps(asdict(self), indent=2))
+        creds_file.chmod(0o600)
+
+    @classmethod
+    def load(cls, email: str) -> Optional["TestUserCredentials"]:
+        """Load test user credentials from disk."""
+        creds_file = TEST_USERS_DIR / email / "credentials.json"
+        if not creds_file.exists():
+            return None
+        try:
+            data = json.loads(creds_file.read_text())
+            return cls(**data)
+        except (json.JSONDecodeError, TypeError, KeyError):
+            return None
+
+    def delete(self) -> None:
+        """Delete test user credentials from disk."""
+        import shutil
+        user_dir = TEST_USERS_DIR / self.email
+        if user_dir.exists():
+            shutil.rmtree(user_dir)
+
+
+def get_test_user_email() -> Optional[str]:
+    """Get test user email from environment variable."""
+    return os.environ.get("CC_TEST_USER")
+
+
+def list_test_users() -> list[str]:
+    """List all local test user emails."""
+    if not TEST_USERS_DIR.exists():
+        return []
+    return [
+        d.name for d in TEST_USERS_DIR.iterdir()
+        if d.is_dir() and (d / "credentials.json").exists()
+    ]
+
+
+def get_test_user_credentials(email: str) -> Optional[TestUserCredentials]:
+    """Get credentials for a specific test user."""
+    return TestUserCredentials.load(email)
