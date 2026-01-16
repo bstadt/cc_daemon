@@ -989,7 +989,10 @@ def friend(peer_email: str, message: str):
 
     repo_url = repo_url_for_email(my_email)
     print("  Syncing authz changes...")
-    sync_once(context_dir, repo_url, svn_token, my_email)
+    if not sync_once(context_dir, repo_url, svn_token, my_email):
+        print("  Failed to sync authz changes to server")
+        print("  Friend request NOT sent. Please try again.")
+        sys.exit(1)
 
     # Step 3: Send friend request via API
     print("  Sending friend request...")
