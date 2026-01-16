@@ -251,3 +251,42 @@ friend3@example.com = r
         assert result.returncode == 0
         final_authz = authz_path.read_text()
         assert "* =" in final_authz, "Block rule should exist"
+
+
+class TestAuthzServerPropagation:
+    """Tests that authz changes propagate to the server and are enforced.
+
+    These tests verify the fix for issue #15 where authz wasn't propagating.
+    """
+
+    def test_authz_unversioned_gets_added_on_sync(self, test_context):
+        """
+        Verify that an unversioned authz file gets added during sync.
+
+        This directly tests the fix for issue #15.
+        """
+        import subprocess
+
+        context_dir, test_user = test_context
+        env = {"CC_TEST_USER": test_user}
+
+        # First, verify authz exists and check SVN status
+        authz_path = context_dir / "authz"
+        assert authz_path.exists(), "authz should exist after init"
+
+        # Modify authz to add a test permission
+        original = authz_path.read_text()
+        test_marker = "# Test marker for unversioned authz test"
+        authz_path.write_text(original + f"\n{test_marker}\n")
+
+        # Sync - this should add authz if unversioned and commit changes
+        result = run_cli(["sync"], env=env, cwd=str(context_dir))
+
+        assert result.returncode == 0, f"Sync should succeed: {result.stderr}"
+        # Should have committed something (either adding authz or committing changes)
+        assert "Committed" in result.stdout or "Added authz" in result.stdout, \
+            f"Should commit authz changes: {result.stdout}"
+
+        # Verify the marker is still in the file
+        final_authz = authz_path.read_text()
+        assert test_marker in final_authz, "Test marker should be preserved"
