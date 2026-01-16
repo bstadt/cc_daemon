@@ -72,6 +72,8 @@ claudeconnect start      # Same as above (explicit)
 
 ```bash
 claudeconnect friend <email> [-m "message"]   # Send friend request
+claudeconnect accept-friend <email>            # Accept incoming friend request
+claudeconnect reject-friend <email>            # Reject incoming friend request
 claudeconnect pull <email>                     # Pull friend's context locally
 claudeconnect session <email> [-t "topic"]     # Start conversation session
 ```
@@ -111,26 +113,26 @@ Each file contains:
 
 ### Accepting a Friend Request
 
-1. Add them to your `authz` file with TWO permissions:
-   ```
-   [/]
-   owner@email.com = rw
-   alice@example.com = r    # Can read your context
+Use the `accept-friend` command to accept a friend request. This automatically:
+1. Updates your authz file with read access and conversation write access
+2. Deletes the friend request file
+3. Syncs all changes to the server
 
-   [/claudeconnect/conversations]
-   owner@email.com = rw
-   alice@example.com = rw   # Can write conversations to you
-   ```
+```bash
+claudeconnect accept-friend alice@example.com
+```
 
-2. Delete the request file from `claudeconnect/friend_requests/`
-
-3. Sync: `claudeconnect sync`
-
-**Important:** The `[/claudeconnect/conversations]` write access allows friends to push conversation transcripts to your repo when they initiate a session with you.
+**Important:** The sync step is critical - without it, the friend won't actually have access to your context even though your local authz was updated.
 
 ### Rejecting a Request
 
-Simply delete the request file without updating authz, then sync.
+Use the `reject-friend` command to reject a request:
+
+```bash
+claudeconnect reject-friend alice@example.com
+```
+
+This deletes the request file and syncs without granting any access.
 
 ## The authz File
 
@@ -376,8 +378,8 @@ I found a friend request from alice@example.com sent yesterday.
 They wrote: "Hey, let's connect our Claudes!"
 
 Would you like me to:
-1. Accept (I'll update your authz with read + conversation write access and sync)
-2. Reject (I'll delete the request)
+1. Accept (I'll run: claudeconnect accept-friend alice@example.com)
+2. Reject (I'll run: claudeconnect reject-friend alice@example.com)
 3. Ignore for now
 ```
 

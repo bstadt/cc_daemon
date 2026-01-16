@@ -1018,6 +1018,133 @@ def friend(peer_email: str, message: str):
         sys.exit(1)
 
 
+@cli.command("accept-friend")
+@click.argument("peer_email")
+def accept_friend(peer_email: str):
+    """Accept a pending friend request.
+
+    This command:
+    1. Updates your authz to grant them read access + conversation write access
+    2. Deletes the friend request file
+    3. Syncs changes to the server so they can access your context
+    """
+    tokens = get_valid_token()
+    if not tokens:
+        print("Not logged in or token expired. Run `claudeconnect login` first.")
+        sys.exit(1)
+
+    config = get_config()
+    if not config.context_dir:
+        print("No context directory configured. Run `claudeconnect init` first.")
+        sys.exit(1)
+
+    peer_email = peer_email.strip().lower()
+    my_email = tokens.email
+
+    if peer_email == my_email:
+        print("Cannot accept friend request from yourself.")
+        sys.exit(1)
+
+    context_dir = Path(config.context_dir)
+
+    # Check if friend request exists
+    friend_requests_dir = context_dir / "claudeconnect" / "friend_requests"
+    request_file = friend_requests_dir / f"{peer_email}.json"
+
+    if not request_file.exists():
+        print(f"No friend request found from {peer_email}")
+        print(f"  Checked: {request_file}")
+        sys.exit(1)
+
+    print(f"Accepting friend request from {peer_email}...")
+
+    # Step 1: Update local authz to grant them appropriate access
+    authz_path = context_dir / "authz"
+
+    if not authz_path.exists():
+        print("Error: authz file not found. Run `claudeconnect init` first.")
+        sys.exit(1)
+
+    add_friend_to_authz(authz_path, my_email, peer_email)
+
+    # Step 2: Delete the friend request file
+    try:
+        request_file.unlink()
+        print(f"  Removed friend request file")
+    except Exception as e:
+        print(f"  Warning: Could not delete request file: {e}")
+
+    # Step 3: Sync to commit authz changes and request deletion
+    svn_token = get_svn_token(tokens.id_token)
+    if not svn_token:
+        print("Failed to get SVN token")
+        sys.exit(1)
+
+    repo_url = repo_url_for_email(my_email)
+    print("  Syncing changes to server...")
+    sync_once(context_dir, repo_url, svn_token, my_email)
+
+    print(f"\n✓ Friend request accepted!")
+    print(f"  {peer_email} can now read your context and send you conversations.")
+    print(f"  Pull their context with: claudeconnect pull {peer_email}")
+
+
+@cli.command("reject-friend")
+@click.argument("peer_email")
+def reject_friend(peer_email: str):
+    """Reject a pending friend request.
+
+    This command:
+    1. Deletes the friend request file without granting access
+    2. Syncs changes to the server
+    """
+    tokens = get_valid_token()
+    if not tokens:
+        print("Not logged in or token expired. Run `claudeconnect login` first.")
+        sys.exit(1)
+
+    config = get_config()
+    if not config.context_dir:
+        print("No context directory configured. Run `claudeconnect init` first.")
+        sys.exit(1)
+
+    peer_email = peer_email.strip().lower()
+    my_email = tokens.email
+
+    context_dir = Path(config.context_dir)
+
+    # Check if friend request exists
+    friend_requests_dir = context_dir / "claudeconnect" / "friend_requests"
+    request_file = friend_requests_dir / f"{peer_email}.json"
+
+    if not request_file.exists():
+        print(f"No friend request found from {peer_email}")
+        print(f"  Checked: {request_file}")
+        sys.exit(1)
+
+    print(f"Rejecting friend request from {peer_email}...")
+
+    # Delete the friend request file
+    try:
+        request_file.unlink()
+        print(f"  Removed friend request file")
+    except Exception as e:
+        print(f"  Error: Could not delete request file: {e}")
+        sys.exit(1)
+
+    # Sync to commit the deletion
+    svn_token = get_svn_token(tokens.id_token)
+    if not svn_token:
+        print("Failed to get SVN token")
+        sys.exit(1)
+
+    repo_url = repo_url_for_email(my_email)
+    print("  Syncing changes to server...")
+    sync_once(context_dir, repo_url, svn_token, my_email)
+
+    print(f"\n✓ Friend request rejected.")
+
+
 # =============================================================================
 # Test User Commands
 # =============================================================================
