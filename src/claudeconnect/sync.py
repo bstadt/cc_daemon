@@ -104,6 +104,14 @@ class SyncLoop:
         if added:
             logger.info(f"Added {len(added)} new files: {added}")
 
+        # Ensure authz file is tracked (it's not a .md file so add_all_markdown won't catch it)
+        authz_path = self.context_dir / "authz"
+        if authz_path.exists():
+            authz_added = await loop.run_in_executor(None, self.svn.add, Path("authz"))
+            if authz_added:
+                added.append(Path("authz"))
+                logger.info("Added authz file")
+
         # Delete missing files (removed from filesystem)
         deleted = await loop.run_in_executor(None, self.svn.delete_missing)
         if deleted:
@@ -170,6 +178,12 @@ def sync_once(context_dir: Path, repo_url: str, svn_token: str, email: str) -> b
         added = svn.add_all_markdown()
         if added:
             print(f"  Added {len(added)} files")
+
+        # Ensure authz file is tracked (it's not a .md file so add_all_markdown won't catch it)
+        authz_path = context_dir / "authz"
+        if authz_path.exists() and svn.add(Path("authz")):
+            added.append(Path("authz"))
+            print(f"  Added authz file")
 
         # Delete missing files
         deleted = svn.delete_missing()
