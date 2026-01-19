@@ -193,3 +193,105 @@ class TestDirectoryStructure:
         root_section = authz_content[:root_section_end]
         assert f"{test_user} = rw" in root_section, \
             "User should have rw on root section"
+
+
+class TestVerifyInitStructure:
+    """Tests for the verify_init_structure function."""
+
+    def test_verify_passes_after_valid_init(self, test_context):
+        """Verify that verify_init_structure returns no errors after valid init."""
+        context_dir, test_user = test_context
+
+        # Import the verification function
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+        from claudeconnect.cli import verify_init_structure
+
+        errors = verify_init_structure(context_dir)
+
+        # Should have no errors (except possibly skill, which is tested separately)
+        dir_errors = [e for e in errors if "SKILL.md" not in e]
+        assert len(dir_errors) == 0, f"Unexpected errors: {dir_errors}"
+
+    def test_verify_detects_missing_svn(self, tmp_path):
+        """Verify detection of missing .svn directory."""
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+        from claudeconnect.cli import verify_init_structure
+
+        # Create a directory without .svn
+        context_dir = tmp_path / "no_svn"
+        context_dir.mkdir()
+
+        errors = verify_init_structure(context_dir)
+
+        assert any(".svn" in e for e in errors), "Should detect missing .svn"
+
+    def test_verify_detects_missing_claudeconnect_dir(self, tmp_path):
+        """Verify detection of missing claudeconnect directory."""
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+        from claudeconnect.cli import verify_init_structure
+
+        # Create directory with .svn but no claudeconnect/
+        context_dir = tmp_path / "no_cc"
+        context_dir.mkdir()
+        (context_dir / ".svn").mkdir()
+
+        errors = verify_init_structure(context_dir)
+
+        assert any("claudeconnect/" in e for e in errors), "Should detect missing claudeconnect dir"
+
+    def test_verify_detects_missing_friend_requests(self, tmp_path):
+        """Verify detection of missing friend_requests directory."""
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+        from claudeconnect.cli import verify_init_structure
+
+        # Create directory structure missing friend_requests
+        context_dir = tmp_path / "no_fr"
+        context_dir.mkdir()
+        (context_dir / ".svn").mkdir()
+        (context_dir / "claudeconnect").mkdir()
+        (context_dir / "claudeconnect" / "conversations").mkdir()
+        (context_dir / "authz").write_text("[/]\ntest@test.com = rw\n")
+
+        errors = verify_init_structure(context_dir)
+
+        assert any("friend_requests" in e for e in errors), "Should detect missing friend_requests"
+
+    def test_verify_detects_missing_conversations(self, tmp_path):
+        """Verify detection of missing conversations directory."""
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+        from claudeconnect.cli import verify_init_structure
+
+        # Create directory structure missing conversations
+        context_dir = tmp_path / "no_conv"
+        context_dir.mkdir()
+        (context_dir / ".svn").mkdir()
+        (context_dir / "claudeconnect").mkdir()
+        (context_dir / "claudeconnect" / "friend_requests").mkdir()
+        (context_dir / "authz").write_text("[/]\ntest@test.com = rw\n")
+
+        errors = verify_init_structure(context_dir)
+
+        assert any("conversations" in e for e in errors), "Should detect missing conversations"
+
+    def test_verify_detects_missing_authz(self, tmp_path):
+        """Verify detection of missing authz file."""
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+        from claudeconnect.cli import verify_init_structure
+
+        # Create directory structure without authz
+        context_dir = tmp_path / "no_authz"
+        context_dir.mkdir()
+        (context_dir / ".svn").mkdir()
+        (context_dir / "claudeconnect").mkdir()
+        (context_dir / "claudeconnect" / "friend_requests").mkdir()
+        (context_dir / "claudeconnect" / "conversations").mkdir()
+
+        errors = verify_init_structure(context_dir)
+
+        assert any("authz" in e for e in errors), "Should detect missing authz"

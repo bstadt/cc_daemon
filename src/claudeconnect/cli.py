@@ -238,6 +238,50 @@ def install_skill() -> bool:
         return False
 
 
+def verify_init_structure(context_dir: Path) -> list[str]:
+    """
+    Verify that init created all expected directories and files.
+
+    Args:
+        context_dir: The context directory to verify
+
+    Returns:
+        List of error messages for missing/invalid components.
+        Empty list if everything is correct.
+    """
+    errors = []
+
+    # Check SVN working copy
+    svn_dir = context_dir / ".svn"
+    if not svn_dir.is_dir():
+        errors.append(".svn directory missing - not a valid SVN working copy")
+
+    # Check claudeconnect directory structure
+    cc_dir = context_dir / "claudeconnect"
+    if not cc_dir.is_dir():
+        errors.append("claudeconnect/ directory missing")
+    else:
+        fr_dir = cc_dir / "friend_requests"
+        if not fr_dir.is_dir():
+            errors.append("claudeconnect/friend_requests/ directory missing")
+
+        conv_dir = cc_dir / "conversations"
+        if not conv_dir.is_dir():
+            errors.append("claudeconnect/conversations/ directory missing")
+
+    # Check authz file
+    authz_file = context_dir / "authz"
+    if not authz_file.is_file():
+        errors.append("authz file missing")
+
+    # Check skill installation
+    skill_file = Path.home() / ".claude" / "skills" / "claudeconnect" / "SKILL.md"
+    if not skill_file.is_file():
+        errors.append("SKILL.md not installed at ~/.claude/skills/claudeconnect/")
+
+    return errors
+
+
 def migrate_authz_paths(authz_path: Path, email: str) -> bool:
     """
     Migrate old authz paths to new claudeconnect/ prefix.
@@ -741,6 +785,17 @@ def init():
         # Install skill for Claude Code
         if install_skill():
             print("  Installed claudeconnect skill")
+        else:
+            print("  Warning: Could not install claudeconnect skill")
+            print("    You may need to manually copy SKILL.md to ~/.claude/skills/claudeconnect/")
+
+        # Verify directory structure was created correctly
+        verification_errors = verify_init_structure(cwd)
+        if verification_errors:
+            print("\n⚠ Warning: Some components were not set up correctly:")
+            for error in verification_errors:
+                print(f"    - {error}")
+            print("  You may need to run `claudeconnect init` again or create these manually.")
 
         print("\n✓ Context directory initialized")
         print(f"  Run `claudeconnect` to start Claude with sync.")
