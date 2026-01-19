@@ -74,6 +74,15 @@ User (Google OAuth) → ClaudeConnect Server → SVN Repository
 
 ```python
 def get_valid_token() -> Tokens | None:
+    # Check for test user mode first (CC_TEST_USER env var)
+    test_user_email = get_test_user_email()
+    if test_user_email:
+        creds = get_test_user_credentials(test_user_email)
+        if creds and creds.expires_at >= int(time.time()):
+            return Tokens(id_token="", refresh_token="", email=creds.email)
+        return None
+
+    # Normal OAuth flow
     tokens = get_tokens()
     if not tokens:
         return None
@@ -84,8 +93,10 @@ def get_valid_token() -> Tokens | None:
 
     if exp < int(time.time()):
         # Expired - try refresh
-        new_tokens = refresh_token(tokens.refresh_token)
-        return new_tokens
+        if tokens.refresh_token:
+            new_tokens = refresh_token(tokens.refresh_token)
+            return new_tokens
+        return None
 
     return tokens
 ```
@@ -116,8 +127,8 @@ Wraps SVN CLI commands with authentication and error handling.
 SvnClient(
     working_dir: Path,      # Local working copy path
     repo_url: str,          # SVN repository URL
-    token: str,             # Fernet SVN token (password)
-    username: str = None,   # Email (SVN username)
+    password: str,          # Fernet SVN token (used as password)
+    username: str = "oauth" # SVN username (default: "oauth", typically set to email)
 )
 ```
 
@@ -140,13 +151,31 @@ SvnClient(
 
 #### Error Handling
 
-All operations raise `SvnError` on failure. The `_with_cleanup_retry()` decorator automatically retries after cleanup if lock errors occur:
+All operations raise `SvnError` on failure. There is also `SvnLockError` for working copy lock errors.
 
 ```python
-@_with_cleanup_retry
-def update(self) -> list[Path]:
-    ...
+class SvnError(Exception):
+    """SVN operation failed."""
+    pass
+
+class SvnLockError(SvnError):
+    """SVN working copy is locked."""
+    pass
 ```
+
+The `_with_cleanup_retry()` method automatically retries operations after cleanup if lock errors occur:
+
+```python
+def _with_cleanup_retry(self, operation: str, args: list[str], cwd: Path = None):
+    """Run SVN command with automatic cleanup retry on lock errors."""
+    result = self._run(args, cwd)
+    if result.returncode != 0 and is_lock_error(result.stderr):
+        self.cleanup()
+        result = self._run(args, cwd)
+    return result
+```
+
+Methods like `update()`, `status()`, and `commit()` use this internally for resilience.
 
 #### Email to Repository Name Conversion
 
@@ -365,14 +394,32 @@ async def _handle_conflict(self, path: Path):
 Synchronous single-sync function for CLI use:
 
 ```python
-def sync_once(context_dir, repo_url, svn_token, email) -> bool:
+def sync_once(context_dir: Path, repo_url: str, svn_token: str, email: str) -> bool:
     svn = SvnClient(context_dir, repo_url, svn_token, email)
+
+    # Clean up any stale locks
     svn.cleanup()
+
+    # Pull updates
     updated = svn.update()
+
+    # Add new markdown files
     added = svn.add_all_markdown()
+
+    # Ensure authz file is tracked (not a .md file)
+    authz_path = context_dir / "authz"
+    if authz_path.exists():
+        svn.add(Path("authz"))
+
+    # Delete missing files
     deleted = svn.delete_missing()
+
+    # Commit if changes
+    status = svn.status()
     if status.has_changes or added or deleted:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         svn.commit(f"Auto-sync {timestamp}")
+
     return True
 ```
 
@@ -521,9 +568,15 @@ owner@email.com = rw
 | `claudeconnect init` | Initialize current directory as context |
 | `claudeconnect sync` | Manual sync |
 | `claudeconnect friend <email>` | Send friend request |
+| `claudeconnect accept-friend <email>` | Accept a pending friend request |
+| `claudeconnect reject-friend <email>` | Reject a pending friend request |
 | `claudeconnect pull <email>` | Pull friend's context |
 | `claudeconnect session <email>` | Start conversation session |
 | `claudeconnect start` | Explicit start (same as no subcommand) |
+| `claudeconnect test-user create` | Create ephemeral test user (admin only) |
+| `claudeconnect test-user list` | List local test users |
+| `claudeconnect test-user delete <email>` | Delete a test user |
+| `claudeconnect test-user delete-all` | Delete all local test users |
 
 ### Session Command Options
 
@@ -545,6 +598,69 @@ Options:
   -m, --message TEXT  Message to include with request
 ```
 
+### Accept/Reject Friend Commands
+
+```
+claudeconnect accept-friend <email>
+```
+
+Accepts a pending friend request:
+1. Updates authz to grant read access + conversation write access
+2. Deletes the friend request file from `claudeconnect/friend_requests/`
+3. Syncs changes to server
+
+```
+claudeconnect reject-friend <email>
+```
+
+Rejects a pending friend request:
+1. Deletes the friend request file (no access granted)
+2. Syncs changes to server
+
+### Test User Commands
+
+Test users are ephemeral accounts for development and testing. Requires admin access to create.
+
+```
+claudeconnect test-user create [OPTIONS]
+
+Options:
+  --ttl TEXT  Time to live (e.g., "1h", "24h", "7d") [default: 24h]
+```
+
+Creates a test user on the server and saves credentials locally. Returns the email to use with `CC_TEST_USER` env var.
+
+```
+claudeconnect test-user list
+```
+
+Lists all locally cached test users with their expiration status.
+
+```
+claudeconnect test-user delete <email> [OPTIONS]
+
+Options:
+  --keep-local    Keep local working copy
+  --local-only    Only delete local credentials (don't call server)
+```
+
+Deletes a test user from server and removes local credentials.
+
+```
+claudeconnect test-user delete-all
+```
+
+Deletes all local test users (with confirmation prompt).
+
+#### Using Test Users
+
+Set the `CC_TEST_USER` environment variable to use a test user:
+
+```bash
+CC_TEST_USER=test-abc123@claudeconnect.io claudeconnect init
+CC_TEST_USER=test-abc123@claudeconnect.io claudeconnect sync
+```
+
 ---
 
 ## Configuration & Storage
@@ -556,6 +672,7 @@ Options:
 | `~/.claude-connect/config.json` | Configuration |
 | `~/.claude-connect/tokens.json` | Auth tokens |
 | `~/.claude-connect/peers/<email>/` | Pulled friend contexts |
+| `~/.claude-connect/test-users/<email>/credentials.json` | Test user credentials |
 | `~/.claude/skills/claudeconnect/SKILL.md` | Claude skill file |
 
 ### Config File Format (`config.py`)
@@ -582,31 +699,84 @@ Options:
 @dataclass
 class Config:
     context_dir: str | None = None
+    svn_username: str | None = None  # Optional override
+    svn_password: str | None = None  # Optional override
 
     def save(self):
-        CONFIG_FILE.write_text(json.dumps(asdict(self), indent=2))
+        config_file = _get_config_file()  # Respects CC_CONFIG_DIR env var
+        config_file.write_text(json.dumps(asdict(self), indent=2))
 
     @classmethod
     def load(cls) -> "Config":
-        if CONFIG_FILE.exists():
-            data = json.loads(CONFIG_FILE.read_text())
+        config_file = _get_config_file()
+        if config_file.exists():
+            data = json.loads(config_file.read_text())
             return cls(**data)
         return cls()
+```
+
+### TestUserCredentials Class
+
+Credentials for ephemeral test users, stored in `~/.claude-connect/test-users/<email>/credentials.json`:
+
+```python
+@dataclass
+class TestUserCredentials:
+    email: str              # Test user email (e.g., test-abc123@claudeconnect.io)
+    svn_token: str          # Fernet token for SVN auth
+    repo_url: str           # SVN repository URL
+    expires_at: int         # Unix timestamp when credentials expire
+    context_dir: str | None = None  # Optional associated context directory
+
+    def save(self) -> None:
+        """Save credentials to ~/.claude-connect/test-users/<email>/credentials.json"""
+        ...
+
+    @classmethod
+    def load(cls, email: str) -> "TestUserCredentials" | None:
+        """Load credentials for a test user."""
+        ...
+
+    def delete(self) -> None:
+        """Delete credentials from disk."""
+        ...
+```
+
+Helper functions:
+
+```python
+def get_test_user_email() -> str | None:
+    """Get test user email from CC_TEST_USER environment variable."""
+    return os.environ.get("CC_TEST_USER")
+
+def list_test_users() -> list[str]:
+    """List all locally cached test user emails."""
+    ...
+
+def get_test_user_credentials(email: str) -> TestUserCredentials | None:
+    """Get credentials for a specific test user."""
+    ...
 ```
 
 ---
 
 ## Error Handling
 
-### SvnError
+### SVN Exceptions
 
-Custom exception for SVN operations:
+Custom exceptions for SVN operations:
 
 ```python
 class SvnError(Exception):
     """SVN operation failed."""
     pass
+
+class SvnLockError(SvnError):
+    """SVN working copy is locked."""
+    pass
 ```
+
+The `is_lock_error()` helper detects lock errors from SVN stderr output.
 
 ### Common Error Scenarios
 
@@ -624,9 +794,10 @@ class SvnError(Exception):
 SVN locks can become stale. The system auto-cleans before operations:
 
 ```python
-def cleanup(self) -> None:
-    """Clean up stale locks."""
-    self._run_svn(["cleanup", "--remove-locks"])
+def cleanup(self) -> bool:
+    """Clean up the working copy, removing stale locks."""
+    result = self._run(["cleanup"])
+    return result.returncode == 0
 ```
 
 ---
@@ -639,6 +810,8 @@ def cleanup(self) -> None:
 | `/api/svn-token` | POST | Bearer | Exchange JWT for SVN Fernet token |
 | `/api/lookup-repo` | GET | None | Find user's repo URL by email |
 | `/api/friend-request` | POST | Bearer | Send friend request to another user |
+| `/api/test-user/create` | POST | Bearer (admin) | Create ephemeral test user |
+| `/api/test-user/delete` | POST | Bearer (admin) | Delete test user |
 | `/refresh` | GET | Query param | Refresh id_token using refresh_token |
 
 ### Response Formats
@@ -667,6 +840,41 @@ def cleanup(self) -> None:
 }
 ```
 
+#### `/api/test-user/create`
+
+Request:
+```json
+{
+  "ttl_hours": 24
+}
+```
+
+Response:
+```json
+{
+  "email": "test-abc123@claudeconnect.io",
+  "svn_token": "gAAAAAB...",
+  "repo_url": "https://claudeconnect.io/svn/test-abc123-claudeconnect-io",
+  "expires_at": 1705276800
+}
+```
+
+#### `/api/test-user/delete`
+
+Request:
+```json
+{
+  "email": "test-abc123@claudeconnect.io"
+}
+```
+
+Response:
+```json
+{
+  "deleted": true
+}
+```
+
 ---
 
-*Last updated: 2026-01-13*
+*Last updated: 2026-01-19*
