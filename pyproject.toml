@@ -1,6 +1,6 @@
 [project]
 name = "claudeconnect"
-version = "0.1.0"
+version = "0.2.1"
 description = "Connect contextualized Claude instances"
 requires-python = ">=3.9"
 dependencies = [
