@@ -2,6 +2,7 @@
 Tests for repository management functionality.
 
 Tests init command, directory structure, authz setup, etc.
+Per system2.md specification.
 """
 
 import subprocess
@@ -30,12 +31,13 @@ class TestInit:
         cc_dir = context_dir / "claudeconnect"
         assert cc_dir.is_dir(), "claudeconnect/ directory should exist"
 
-    def test_init_creates_friend_requests_dir(self, test_context):
-        """Verify init creates friend_requests directory."""
+    def test_init_creates_system_messages_dir(self, test_context):
+        """Verify init creates with-claudeconnect-io directory for system messages."""
         context_dir, test_user = test_context
 
-        fr_dir = context_dir / "claudeconnect" / "friend_requests"
-        assert fr_dir.is_dir(), "claudeconnect/friend_requests/ should exist"
+        # Per system2.md, system messages (friend requests, etc.) go in with-claudeconnect-io/
+        system_dir = context_dir / "claudeconnect" / "with-claudeconnect-io"
+        assert system_dir.is_dir(), "claudeconnect/with-claudeconnect-io/ should exist"
 
     def test_init_installs_skill_globally(self, test_context):
         """Verify init installs SKILL.md to ~/.claude/skills/."""
@@ -65,15 +67,25 @@ class TestInit:
         assert f"{test_user} = rw" in authz_content, \
             f"User {test_user} should have rw access on root"
 
-    def test_init_authz_friend_requests_world_writable(self, test_context):
-        """Verify friend_requests path is world-writable."""
+    def test_init_authz_has_system_messages_section(self, test_context):
+        """Verify authz has with-claudeconnect-io section (owner only, not world-writable)."""
         context_dir, test_user = test_context
 
         authz_content = (context_dir / "authz").read_text()
-        assert "[/claudeconnect/friend_requests]" in authz_content, \
-            "friend_requests section should exist in authz"
-        assert "* = rw" in authz_content, \
-            "friend_requests should be world-writable"
+        assert "[/claudeconnect/with-claudeconnect-io]" in authz_content, \
+            "with-claudeconnect-io section should exist in authz"
+
+        # Per system2.md, this section should NOT be world-writable
+        # Server uses admin bypass to write friend requests
+        lines = authz_content.split('\n')
+        in_system_section = False
+        for line in lines:
+            if line.strip() == "[/claudeconnect/with-claudeconnect-io]":
+                in_system_section = True
+            elif line.strip().startswith("["):
+                in_system_section = False
+            elif in_system_section and "* = rw" in line:
+                pytest.fail("with-claudeconnect-io should NOT be world-writable")
 
     def test_init_authz_has_with_section(self, test_context):
         """Verify authz has with-{email} section for conversations."""
@@ -159,19 +171,23 @@ class TestStatus:
 
 
 class TestDirectoryStructure:
-    """Tests for the complete directory structure after init."""
+    """Tests for the complete directory structure after init per system2.md."""
 
     def test_complete_structure(self, test_context):
-        """Verify complete directory structure is created."""
+        """Verify complete directory structure is created per system2.md."""
         context_dir, test_user = test_context
 
-        # Note: skills are installed globally to ~/.claude/skills/, not in context dir
-        # Note: conversation dirs (with-{email}/) are created on-demand, not during init
+        # Per system2.md, the structure should be:
+        # context_dir/
+        # ├── .svn/
+        # ├── authz
+        # └── claudeconnect/
+        #     └── with-claudeconnect-io/
         expected_structure = [
             ".svn",
             "authz",
             "claudeconnect",
-            "claudeconnect/friend_requests",
+            "claudeconnect/with-claudeconnect-io",
         ]
 
         for path in expected_structure:
@@ -179,7 +195,7 @@ class TestDirectoryStructure:
             assert full_path.exists(), f"Expected {path} to exist"
 
     def test_authz_structure(self, test_context):
-        """Verify authz file has correct section structure."""
+        """Verify authz file has correct section structure per system2.md."""
         context_dir, test_user = test_context
 
         authz_content = (context_dir / "authz").read_text()
@@ -187,11 +203,11 @@ class TestDirectoryStructure:
         # Should have root section
         assert "[/]" in authz_content, "Root section should exist"
 
-        # Should have friend_requests section
-        assert "[/claudeconnect/friend_requests]" in authz_content, \
-            "friend_requests section should exist"
+        # Should have with-claudeconnect-io section (system messages)
+        assert "[/claudeconnect/with-claudeconnect-io]" in authz_content, \
+            "with-claudeconnect-io section should exist"
 
-        # Should have with-{email} section (v2 structure)
+        # Should have with-{email} section (conversations)
         user_repo_name = email_to_repo_name(test_user)
         assert f"[/claudeconnect/with-{user_repo_name}]" in authz_content, \
             f"with-{user_repo_name} section should exist"
@@ -252,14 +268,14 @@ class TestVerifyInitStructure:
 
         assert any("claudeconnect/" in e for e in errors), "Should detect missing claudeconnect dir"
 
-    def test_verify_detects_missing_friend_requests(self, tmp_path):
-        """Verify detection of missing friend_requests directory."""
+    def test_verify_detects_missing_system_messages_dir(self, tmp_path):
+        """Verify detection of missing with-claudeconnect-io directory."""
         import sys
         sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
         from claudeconnect.cli import verify_init_structure
 
-        # Create directory structure missing friend_requests
-        context_dir = tmp_path / "no_fr"
+        # Create directory structure missing with-claudeconnect-io
+        context_dir = tmp_path / "no_system"
         context_dir.mkdir()
         (context_dir / ".svn").mkdir()
         (context_dir / "claudeconnect").mkdir()
@@ -267,7 +283,8 @@ class TestVerifyInitStructure:
 
         errors = verify_init_structure(context_dir)
 
-        assert any("friend_requests" in e for e in errors), "Should detect missing friend_requests"
+        assert any("with-claudeconnect-io" in e for e in errors), \
+            "Should detect missing with-claudeconnect-io"
 
     def test_verify_detects_missing_authz(self, tmp_path):
         """Verify detection of missing authz file."""
@@ -280,7 +297,7 @@ class TestVerifyInitStructure:
         context_dir.mkdir()
         (context_dir / ".svn").mkdir()
         (context_dir / "claudeconnect").mkdir()
-        (context_dir / "claudeconnect" / "friend_requests").mkdir()
+        (context_dir / "claudeconnect" / "with-claudeconnect-io").mkdir()
 
         errors = verify_init_structure(context_dir)
 

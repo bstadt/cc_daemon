@@ -171,6 +171,11 @@ def generate_authz_content(email: str, private_files: list[str] | None = None) -
     """
     Generate initial authz file content for a new user.
 
+    Per system2.md, the authz structure is:
+    - [/] - owner has rw
+    - [/claudeconnect/with-claudeconnect-io] - owner only (server uses admin bypass for writes)
+    - [/claudeconnect/with-{owner-email}] - owner rw, friends get rw when added
+
     Args:
         email: User's email (SVN username)
         private_files: List of file paths (relative to repo root) to make private
@@ -183,8 +188,8 @@ def generate_authz_content(email: str, private_files: list[str] | None = None) -
         "[/]",
         f"{email} = rw",
         "",
-        "[/claudeconnect/friend_requests]",
-        "* = rw",
+        "# System messages folder (server writes here using admin bypass)",
+        "[/claudeconnect/with-claudeconnect-io]",
         f"{email} = rw",
         "",
         f"# Friends can write conversations to your with-{email_repo_name} folder",
@@ -241,7 +246,14 @@ def install_skill() -> bool:
 
 def verify_init_structure(context_dir: Path) -> list[str]:
     """
-    Verify that init created all expected directories and files.
+    Verify that init created all expected directories and files per system2.md.
+
+    Expected structure:
+        context_dir/
+        ├── .svn/                           # SVN working copy
+        ├── authz                           # Access control file
+        └── claudeconnect/
+            └── with-claudeconnect-io/      # System messages folder
 
     Args:
         context_dir: The context directory to verify
@@ -262,12 +274,10 @@ def verify_init_structure(context_dir: Path) -> list[str]:
     if not cc_dir.is_dir():
         errors.append("claudeconnect/ directory missing")
     else:
-        fr_dir = cc_dir / "friend_requests"
-        if not fr_dir.is_dir():
-            errors.append("claudeconnect/friend_requests/ directory missing")
-
-        # Note: conversations are now stored directly in claudeconnect/with-{email}/
-        # No separate conversations/ directory needed
+        # with-claudeconnect-io/ is the system messages folder (per system2.md)
+        system_dir = cc_dir / "with-claudeconnect-io"
+        if not system_dir.is_dir():
+            errors.append("claudeconnect/with-claudeconnect-io/ directory missing")
 
     # Check authz file
     authz_file = context_dir / "authz"
@@ -289,11 +299,11 @@ def ensure_authz_exists(
     private_files: list[str] | None = None,
 ) -> None:
     """
-    Ensure authz file and claudeconnect directories exist.
+    Ensure authz file and claudeconnect directories exist per system2.md.
 
     Creates:
     - authz file with proper permissions
-    - claudeconnect/friend_requests/ directory
+    - claudeconnect/with-claudeconnect-io/ directory (system messages folder)
 
     Note: Conversation directories (claudeconnect/with-{email}/) are created
     on-demand when sessions are started, not during init.
@@ -308,16 +318,16 @@ def ensure_authz_exists(
     files_to_add = []
     needs_commit = False
 
-    # Ensure claudeconnect directory structure exists
+    # Ensure claudeconnect directory structure exists per system2.md
     cc_dir = context_dir / "claudeconnect"
-    friend_requests_dir = cc_dir / "friend_requests"
+    system_messages_dir = cc_dir / "with-claudeconnect-io"
 
-    # Only create friend_requests dir during init
+    # Create with-claudeconnect-io/ for system messages (friend requests, notifications)
     # Conversation dirs (with-{email}/) are created on-demand
-    if not friend_requests_dir.exists():
-        friend_requests_dir.mkdir(parents=True, exist_ok=True)
+    if not system_messages_dir.exists():
+        system_messages_dir.mkdir(parents=True, exist_ok=True)
         # Add .keep file so SVN tracks the empty directory
-        keep_file = friend_requests_dir / ".keep"
+        keep_file = system_messages_dir / ".keep"
         keep_file.write_text("")
         files_to_add.append(keep_file)
         needs_commit = True
@@ -1021,7 +1031,7 @@ def friend(peer_email: str, message: str):
 
         if response.status_code == 200:
             print(f"\n✓ Friend request sent to {peer_email}")
-            print(f"  They will see your request in their claudeconnect/friend_requests/ folder.")
+            print(f"  They will see your request in their claudeconnect/with-claudeconnect-io/ folder.")
             print(f"  Once they accept, they can send you conversations.")
         elif response.status_code == 404:
             print(f"\n✗ User {peer_email} not found on ClaudeConnect")
@@ -1065,9 +1075,10 @@ def accept_friend(peer_email: str):
 
     context_dir = Path(config.context_dir)
 
-    # Check if friend request exists
-    friend_requests_dir = context_dir / "claudeconnect" / "friend_requests"
-    request_file = friend_requests_dir / f"{peer_email}.json"
+    # Check if friend request exists in with-claudeconnect-io/ (per system2.md)
+    system_messages_dir = context_dir / "claudeconnect" / "with-claudeconnect-io"
+    # Server writes friend requests as markdown files
+    request_file = system_messages_dir / f"friend-request-{peer_email}.md"
 
     if not request_file.exists():
         print(f"No friend request found from {peer_email}")
@@ -1132,9 +1143,10 @@ def reject_friend(peer_email: str):
 
     context_dir = Path(config.context_dir)
 
-    # Check if friend request exists
-    friend_requests_dir = context_dir / "claudeconnect" / "friend_requests"
-    request_file = friend_requests_dir / f"{peer_email}.json"
+    # Check if friend request exists in with-claudeconnect-io/ (per system2.md)
+    system_messages_dir = context_dir / "claudeconnect" / "with-claudeconnect-io"
+    # Server writes friend requests as markdown files
+    request_file = system_messages_dir / f"friend-request-{peer_email}.md"
 
     if not request_file.exists():
         print(f"No friend request found from {peer_email}")
