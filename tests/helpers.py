@@ -45,7 +45,7 @@ def extract_email_from_output(output: str) -> str:
 def get_repo_url(email: str) -> str:
     """Get SVN repo URL for an email."""
     repo_name = email.lower().replace("@", "-").replace(".", "-")
-    return f"https://claudeconnect.io/svn/{repo_name}"
+    return f"http://3.142.232.180/svn/{repo_name}"
 
 
 def email_to_repo_name(email: str) -> str:

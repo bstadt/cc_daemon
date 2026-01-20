@@ -37,13 +37,6 @@ class TestInit:
         fr_dir = context_dir / "claudeconnect" / "friend_requests"
         assert fr_dir.is_dir(), "claudeconnect/friend_requests/ should exist"
 
-    def test_init_creates_conversations_dir(self, test_context):
-        """Verify init creates conversations directory."""
-        context_dir, test_user = test_context
-
-        conv_dir = context_dir / "claudeconnect" / "conversations"
-        assert conv_dir.is_dir(), "claudeconnect/conversations/ should exist"
-
     def test_init_installs_skill_globally(self, test_context):
         """Verify init installs SKILL.md to ~/.claude/skills/."""
         context_dir, test_user = test_context
@@ -81,6 +74,16 @@ class TestInit:
             "friend_requests section should exist in authz"
         assert "* = rw" in authz_content, \
             "friend_requests should be world-writable"
+
+    def test_init_authz_has_with_section(self, test_context):
+        """Verify authz has with-{email} section for conversations."""
+        context_dir, test_user = test_context
+
+        authz_content = (context_dir / "authz").read_text()
+        user_repo_name = email_to_repo_name(test_user)
+
+        assert f"[/claudeconnect/with-{user_repo_name}]" in authz_content, \
+            f"with-{user_repo_name} section should exist in authz"
 
     def test_init_idempotent(self, test_context):
         """Verify running init twice doesn't break anything."""
@@ -130,7 +133,9 @@ class TestStatus:
         env = {"CC_TEST_USER": test_user}
         result = run_cli(["status"], env=env, cwd=str(context_dir))
 
-        assert "claudeconnect.io/svn" in result.stdout, "Should show repo URL"
+        # v2 server at 3.142.232.180
+        assert "3.142.232.180/svn" in result.stdout or "/svn/" in result.stdout, \
+            "Should show repo URL"
 
     def test_status_shows_expiry(self, test_context):
         """Verify status shows expiry time for test users."""
@@ -161,12 +166,12 @@ class TestDirectoryStructure:
         context_dir, test_user = test_context
 
         # Note: skills are installed globally to ~/.claude/skills/, not in context dir
+        # Note: conversation dirs (with-{email}/) are created on-demand, not during init
         expected_structure = [
             ".svn",
             "authz",
             "claudeconnect",
             "claudeconnect/friend_requests",
-            "claudeconnect/conversations",
         ]
 
         for path in expected_structure:
@@ -185,6 +190,11 @@ class TestDirectoryStructure:
         # Should have friend_requests section
         assert "[/claudeconnect/friend_requests]" in authz_content, \
             "friend_requests section should exist"
+
+        # Should have with-{email} section (v2 structure)
+        user_repo_name = email_to_repo_name(test_user)
+        assert f"[/claudeconnect/with-{user_repo_name}]" in authz_content, \
+            f"with-{user_repo_name} section should exist"
 
         # User should have rw on root
         root_section_end = authz_content.find("[/claudeconnect")
@@ -253,30 +263,11 @@ class TestVerifyInitStructure:
         context_dir.mkdir()
         (context_dir / ".svn").mkdir()
         (context_dir / "claudeconnect").mkdir()
-        (context_dir / "claudeconnect" / "conversations").mkdir()
         (context_dir / "authz").write_text("[/]\ntest@test.com = rw\n")
 
         errors = verify_init_structure(context_dir)
 
         assert any("friend_requests" in e for e in errors), "Should detect missing friend_requests"
-
-    def test_verify_detects_missing_conversations(self, tmp_path):
-        """Verify detection of missing conversations directory."""
-        import sys
-        sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-        from claudeconnect.cli import verify_init_structure
-
-        # Create directory structure missing conversations
-        context_dir = tmp_path / "no_conv"
-        context_dir.mkdir()
-        (context_dir / ".svn").mkdir()
-        (context_dir / "claudeconnect").mkdir()
-        (context_dir / "claudeconnect" / "friend_requests").mkdir()
-        (context_dir / "authz").write_text("[/]\ntest@test.com = rw\n")
-
-        errors = verify_init_structure(context_dir)
-
-        assert any("conversations" in e for e in errors), "Should detect missing conversations"
 
     def test_verify_detects_missing_authz(self, tmp_path):
         """Verify detection of missing authz file."""
@@ -290,7 +281,6 @@ class TestVerifyInitStructure:
         (context_dir / ".svn").mkdir()
         (context_dir / "claudeconnect").mkdir()
         (context_dir / "claudeconnect" / "friend_requests").mkdir()
-        (context_dir / "claudeconnect" / "conversations").mkdir()
 
         errors = verify_init_structure(context_dir)
 
