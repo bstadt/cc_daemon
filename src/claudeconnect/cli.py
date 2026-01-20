@@ -282,102 +282,6 @@ def verify_init_structure(context_dir: Path) -> list[str]:
     return errors
 
 
-def migrate_authz_paths(authz_path: Path, email: str) -> bool:
-    """
-    Migrate old authz paths to new structure.
-
-    Migrates:
-    - [/friend_requests] -> [/claudeconnect/friend_requests]
-    - [/claudeconnect/conversations] -> [/claudeconnect/with-{email}]
-
-    Args:
-        authz_path: Path to authz file
-        email: User's email
-
-    Returns:
-        True if changes were made, False otherwise.
-    """
-    content = authz_path.read_text()
-    changes_made = False
-    email_repo_name = email_to_repo_name(email)
-
-    # Migrate [/friend_requests] to [/claudeconnect/friend_requests]
-    if "[/friend_requests]" in content and "[/claudeconnect/friend_requests]" not in content:
-        content = content.replace("[/friend_requests]", "[/claudeconnect/friend_requests]")
-        changes_made = True
-        print("  Migrated [/friend_requests] -> [/claudeconnect/friend_requests]")
-
-    # Migrate [/claudeconnect/conversations] to [/claudeconnect/with-{email}]
-    if "[/claudeconnect/conversations]" in content:
-        content = content.replace(
-            "[/claudeconnect/conversations]",
-            f"[/claudeconnect/with-{email_repo_name}]"
-        )
-        # Also update the comment if present
-        content = content.replace(
-            "# Friends can write conversations to your repo",
-            f"# Friends can write conversations to your with-{email_repo_name} folder"
-        )
-        changes_made = True
-        print(f"  Migrated [/claudeconnect/conversations] -> [/claudeconnect/with-{email_repo_name}]")
-
-    # Ensure the with-{email} section exists if neither old nor new exists
-    if f"[/claudeconnect/with-{email_repo_name}]" not in content:
-        content = content.rstrip() + f"\n\n# Friends can write conversations to your with-{email_repo_name} folder\n"
-        content += f"[/claudeconnect/with-{email_repo_name}]\n{email} = rw\n"
-        changes_made = True
-        print(f"  Added [/claudeconnect/with-{email_repo_name}] section")
-
-    if changes_made:
-        authz_path.write_text(content)
-
-    return changes_made
-
-
-def migrate_conversation_directories(context_dir: Path) -> bool:
-    """
-    Migrate from old /conversations/ structure to new flat structure.
-
-    Moves:
-    - claudeconnect/conversations/with-{email}/ -> claudeconnect/with-{email}/
-
-    Args:
-        context_dir: The context directory
-
-    Returns:
-        True if migration was performed, False otherwise.
-    """
-    old_conversations_dir = context_dir / "claudeconnect" / "conversations"
-    if not old_conversations_dir.exists():
-        return False
-
-    migrated = False
-    for conv_dir in old_conversations_dir.iterdir():
-        if conv_dir.is_dir() and conv_dir.name.startswith("with-"):
-            new_location = context_dir / "claudeconnect" / conv_dir.name
-            if not new_location.exists():
-                shutil.move(str(conv_dir), str(new_location))
-                print(f"  Migrated {conv_dir.name} to new location")
-                migrated = True
-            else:
-                # Merge contents if destination exists
-                for item in conv_dir.iterdir():
-                    dest = new_location / item.name
-                    if not dest.exists():
-                        shutil.move(str(item), str(dest))
-                # Remove old dir if empty
-                if not any(conv_dir.iterdir()):
-                    conv_dir.rmdir()
-                migrated = True
-
-    # Remove empty conversations directory
-    if old_conversations_dir.exists() and not any(old_conversations_dir.iterdir()):
-        old_conversations_dir.rmdir()
-        print("  Removed empty conversations/ directory")
-
-    return migrated
-
-
 def ensure_authz_exists(
     context_dir: Path,
     svn: "SvnClient",
@@ -418,13 +322,7 @@ def ensure_authz_exists(
         files_to_add.append(keep_file)
         needs_commit = True
 
-    # Migrate old conversation directories if they exist
-    migrate_conversation_directories(context_dir)
-
     if authz_path.exists():
-        # Migrate old authz format if needed
-        if migrate_authz_paths(authz_path, email):
-            needs_commit = True
         # If authz exists but we have new private files, update it
         if private_files:
             update_authz_with_private_files(authz_path, email, private_files)
