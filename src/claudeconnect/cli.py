@@ -6,6 +6,9 @@ Main entry point for the claudeconnect command.
 from __future__ import annotations
 
 import asyncio
+import datetime
+import json
+import os
 import shutil
 import subprocess
 import sys
@@ -14,6 +17,21 @@ from pathlib import Path
 
 import click
 import httpx
+
+
+def get_mock_dir() -> Path | None:
+    """Get mock directory path if CC_MOCK_DIR is set."""
+    mock_dir = os.environ.get("CC_MOCK_DIR")
+    if mock_dir:
+        path = Path(mock_dir)
+        if path.exists():
+            return path
+    return None
+
+
+def is_mock_mode() -> bool:
+    """Check if running in mock/dev mode."""
+    return get_mock_dir() is not None
 
 from .auth import login as do_login, ensure_valid_token, decode_jwt_payload, refresh_token
 from .config import (
@@ -28,19 +46,219 @@ from .sync import SyncLoop, sync_once
 
 SERVER_URL = "https://v2.claudeconnect.io"
 
+# ANSI color codes - matching Claude Code's aesthetic
+CORAL = '\033[38;5;209m'      # Coral/salmon matching Claude Code
+LIME = '\033[38;5;114m'       # Muted lime green for friend Claude
+WHITE = '\033[97m'            # Bright white for main text
+BOLD = '\033[1m'              # Bold text
+DIM = '\033[2m'               # Dim for secondary text
+BLACK = '\033[30m'            # Black for eyes
+BLACK_BG = '\033[40m'         # Black background for transparency
+YELLOW = '\033[38;5;228m'     # Soft yellow for sparkles
+RESET = '\033[0m'
+CLEAR = '\033[2J\033[H'       # Clear screen and move cursor to top
+
+
+def display_startup_banner(context_dir: Path, email: str, clear_screen: bool = True) -> None:
+    """Display ClaudeConnect startup banner with two Claude creatures and status."""
+    # Clear screen for clean display (optional)
+    if clear_screen:
+        print(CLEAR, end='')
+
+    # Two Claude creatures side by side - coral (you) and lime (friend)
+    # Sparkles (✦✦) connect them, black background on semi-transparent chars
+    print()
+    print(f" {CORAL}▐{BLACK_BG}▛███▜{RESET}{CORAL}▌{RESET} {YELLOW}✦{RESET} {LIME}▐{BLACK_BG}▛███▜{RESET}{LIME}▌{RESET}   {WHITE}{BOLD}Claude Connect{RESET}")
+    print(f"{CORAL}▝▜█████▛▘{RESET} {LIME}▝▜█████▛▘{RESET}  {DIM}{email}{RESET}")
+    print(f"  {CORAL}▘▘ ▝▝{RESET}     {LIME}▘▘ ▝▝{RESET}")
+
+    # Show dev mode indicator if using mock directory
+    mock_dir = get_mock_dir()
+    if mock_dir:
+        print(f"                      {DIM}[DEV MODE - Using {mock_dir}]{RESET}")
+
+    print()
+
+    # Check for friend requests and conversations
+    friend_requests_dir = context_dir / "claudeconnect" / "friend_requests"
+    conversations_dir = context_dir / "claudeconnect" / "conversations"
+
+    # Collect friend request notifications (pending requests + accepted notifications)
+    friend_notifications = []  # List of (display_text, is_accepted)
+
+    if friend_requests_dir.exists():
+        for f in friend_requests_dir.glob("*.md"):
+            try:
+                content = f.read_text()
+                # Check for pending requests
+                if "status: pending" in content:
+                    for line in content.split("\n"):
+                        if line.startswith("from:"):
+                            sender = line.split(":", 1)[1].strip()
+                            friend_notifications.append((sender, False))
+                            break
+            except Exception:
+                pass
+
+    # Check conversations for accepted friend requests
+    accepted_friends = []
+    if conversations_dir.exists():
+        for conv_dir in conversations_dir.iterdir():
+            if conv_dir.is_dir() and conv_dir.name.startswith("with-"):
+                # Look for friend-accepted.md file
+                accepted_file = conv_dir / "friend-accepted.md"
+                if accepted_file.exists():
+                    try:
+                        content = accepted_file.read_text()
+                        if "friend-request-accepted" in content.lower():
+                            # Extract email from **From**: line
+                            for line in content.split("\n"):
+                                if "**From**:" in line or "From:" in line:
+                                    email_part = line.split(":", 1)[1].strip()
+                                    # Remove markdown bold if present
+                                    email_part = email_part.replace("**", "").strip()
+                                    accepted_friends.append(email_part)
+                                    break
+                    except Exception:
+                        pass
+
+    # Add accepted friends to notifications
+    for email_addr in accepted_friends:
+        # Extract username from email for shorter display
+        username = email_addr.split("@")[0] if "@" in email_addr else email_addr
+        friend_notifications.append((f"{username} accepted your request!", True))
+
+    # Get recent conversations (last 30 days) with topic preview
+    recent_convos = []  # List of (peer_email, topic_preview, mtime)
+    if conversations_dir.exists():
+        month_ago = datetime.datetime.now().timestamp() - (30 * 24 * 60 * 60)
+        for conv_dir in conversations_dir.iterdir():
+            if conv_dir.is_dir() and conv_dir.name.startswith("with-"):
+                peer_name = conv_dir.name[5:]  # Remove "with-" prefix
+                # Convert back to email format (replace - with . and @)
+                peer_email = peer_name.replace("-", ".")
+                # Fix common email pattern: user.example.com -> user@example.com
+                if peer_email.count(".") >= 2:
+                    parts = peer_email.rsplit(".", 2)
+                    if len(parts) == 3:
+                        peer_email = f"{parts[0]}@{parts[1]}.{parts[2]}"
+
+                latest_file = None
+                latest_time = 0
+                for f in conv_dir.glob("*.md"):
+                    # Skip friend-accepted.md files for conversation listing
+                    if f.name == "friend-accepted.md":
+                        continue
+                    try:
+                        mtime = f.stat().st_mtime
+                        if mtime > latest_time:
+                            latest_time = mtime
+                            latest_file = f
+                    except Exception:
+                        pass
+
+                if latest_file and latest_time > month_ago:
+                    # Extract topic from file
+                    topic = ""
+                    try:
+                        content = latest_file.read_text()
+                        for line in content.split("\n"):
+                            if line.startswith("**Topic**:"):
+                                topic = line.split(":", 1)[1].strip()
+                                break
+                    except Exception:
+                        pass
+                    recent_convos.append((peer_email, topic, latest_time))
+
+        # Sort by most recent
+        recent_convos.sort(key=lambda x: x[2], reverse=True)
+        recent_convos = recent_convos[:5]  # Limit to 5
+
+    # Display boxes side by side if there's activity
+    if friend_notifications or recent_convos:
+        W = 34  # Total box width
+
+        def truncate_with_ellipsis(text: str, max_len: int) -> str:
+            """Truncate text with ellipsis if it exceeds max_len."""
+            if len(text) <= max_len:
+                return text
+            return text[:max_len - 3] + "..."
+
+        def make_box(title: str, items: list[str]) -> list[str]:
+            """Create a box with title and items, exactly W chars wide."""
+            lines = []
+            # Header: ┌─ TITLE ───────┐
+            # Width: 1 + 2 + len(title) + 1 + dashes + 1 = W
+            title_truncated = truncate_with_ellipsis(title, W - 6)
+            dashes = W - 5 - len(title_truncated)
+            lines.append(f"┌─ {title_truncated} " + "─" * dashes + "┐")
+            # Items: │ content      │
+            max_content_len = W - 4  # 2 for "│ " and 2 for " │"
+            for item in items:
+                content = truncate_with_ellipsis(item, max_content_len)
+                padding = max_content_len - len(content)
+                lines.append(f"│ {content}" + " " * padding + " │")
+            # Footer
+            lines.append("└" + "─" * (W - 2) + "┘")
+            return lines
+
+        fr_lines = []
+        if friend_notifications:
+            items = [f"∙ {notif[0]}" for notif in friend_notifications[:5]]
+            total = len(friend_notifications)
+            fr_lines = make_box(f"FRIEND REQUESTS ({total})", items)
+
+        conv_lines = []
+        if recent_convos:
+            items = []
+            for peer_email, topic, _ in recent_convos:
+                # Show email + topic preview
+                username = peer_email.split("@")[0] if "@" in peer_email else peer_email
+                if topic:
+                    items.append(f"∙ {username}: {topic}")
+                else:
+                    items.append(f"∙ {username}")
+            conv_lines = make_box("CONVERSATIONS", items)
+
+        # Print side by side or single
+        if fr_lines and conv_lines:
+            max_lines = max(len(fr_lines), len(conv_lines))
+            empty_space = " " * W
+            for i in range(max_lines):
+                left = fr_lines[i] if i < len(fr_lines) else empty_space
+                right = conv_lines[i] if i < len(conv_lines) else empty_space
+                print(f" {left}  {right}")
+        elif fr_lines:
+            for line in fr_lines:
+                print(f" {line}")
+        elif conv_lines:
+            for line in conv_lines:
+                print(f" {line}")
+
+        print()
+
 
 def get_svn_token(id_token: str) -> str | None:
     """
     Exchange Google JWT for a short Fernet token for SVN auth.
 
-    For test users (CC_TEST_USER env), returns the stored SVN token directly.
+    For mock mode (CC_MOCK_DIR) and test users (CC_TEST_USER), returns a mock/stored token.
 
     Args:
-        id_token: Google OAuth id_token (ignored for test users)
+        id_token: Google OAuth id_token (ignored for mock/test users)
 
     Returns:
         Fernet token string, or None on failure.
     """
+    # Check for mock/dev mode first
+    mock_dir = get_mock_dir()
+    if mock_dir:
+        mock_token_file = mock_dir / ".mock" / "api-svn-token.json"
+        if mock_token_file.exists():
+            data = json.loads(mock_token_file.read_text())
+            return data.get("svn_token", "mock-svn-token")
+        return "mock-svn-token"
+
     # Check for test user mode
     test_user_email = get_test_user_email()
     if test_user_email:
@@ -74,11 +292,29 @@ def get_valid_token() -> Tokens | None:
     """
     Get a valid (non-expired) token, refreshing if needed.
 
-    Checks for test user mode first (CC_TEST_USER env var).
+    Checks for mock mode (CC_MOCK_DIR) and test user mode (CC_TEST_USER) first.
 
     Returns:
         Valid Tokens, or None if not logged in or refresh fails.
     """
+    # Check for mock/dev mode first
+    mock_dir = get_mock_dir()
+    if mock_dir:
+        mock_tokens_file = mock_dir / ".mock" / "config" / "tokens.json"
+        if mock_tokens_file.exists():
+            data = json.loads(mock_tokens_file.read_text())
+            return Tokens(
+                id_token=data.get("id_token", "mock-token"),
+                refresh_token=data.get("refresh_token", "mock-refresh"),
+                email=data.get("email", "dev@example.com"),
+            )
+        # Fallback mock tokens
+        return Tokens(
+            id_token="mock-token",
+            refresh_token="mock-refresh",
+            email="dev@example.com",
+        )
+
     # Check for test user mode
     test_user_email = get_test_user_email()
     if test_user_email:
@@ -129,10 +365,10 @@ def ensure_repo(token: str) -> dict:
     """
     Ensure user's repo exists on server.
 
-    For test users (CC_TEST_USER env), returns stored repo info directly.
+    For mock mode (CC_MOCK_DIR) and test users (CC_TEST_USER), returns mock/stored info.
 
     Args:
-        token: OAuth id_token (ignored for test users)
+        token: OAuth id_token (ignored for mock/test users)
 
     Returns:
         Dict with 'repo', 'url', 'email' keys.
@@ -140,6 +376,20 @@ def ensure_repo(token: str) -> dict:
     Raises:
         Exception on failure.
     """
+    # Check for mock/dev mode first
+    mock_dir = get_mock_dir()
+    if mock_dir:
+        mock_repo_file = mock_dir / ".mock" / "api-ensure-repo.json"
+        if mock_repo_file.exists():
+            return json.loads(mock_repo_file.read_text())
+        # Fallback mock repo info
+        return {
+            "repo": "dev-example-com",
+            "url": str(mock_dir),  # Use mock dir as "repo URL"
+            "email": "dev@example.com",
+            "created": False,
+        }
+
     # Check for test user mode
     test_user_email = get_test_user_email()
     if test_user_email:
@@ -178,7 +428,6 @@ def generate_authz_content(email: str, private_files: list[str] | None = None) -
     Returns:
         authz file content string
     """
-    email_repo_name = email_to_repo_name(email)
     lines = [
         "[/]",
         f"{email} = rw",
@@ -187,8 +436,8 @@ def generate_authz_content(email: str, private_files: list[str] | None = None) -
         "* = rw",
         f"{email} = rw",
         "",
-        f"# Friends can write conversations to your with-{email_repo_name} folder",
-        f"[/claudeconnect/with-{email_repo_name}]",
+        "# Friends can write conversations to your repo",
+        "[/claudeconnect/conversations]",
         f"{email} = rw",
     ]
 
@@ -208,7 +457,7 @@ def generate_authz_content(email: str, private_files: list[str] | None = None) -
 
 def install_skill() -> bool:
     """
-    Install the claudeconnect skill to ~/.claude/skills/.
+    Install the claudeconnect skill and commands to ~/.claude/.
 
     Returns:
         True if installed successfully.
@@ -232,6 +481,20 @@ def install_skill() -> bool:
 
         # Write skill file
         skill_dest.write_text(skill_content)
+
+        # Also install the /cc-status command to ~/.claude/commands/
+        commands_dir = Path.home() / ".claude" / "commands"
+        commands_dir.mkdir(parents=True, exist_ok=True)
+        command_dest = commands_dir / "cc-status.md"
+
+        try:
+            # Python 3.9+ with importlib.resources.files
+            command_content = pkg_resources.files("claudeconnect").joinpath("skills/commands/cc-status.md").read_text()
+            command_dest.write_text(command_content)
+        except Exception:
+            # If command file doesn't exist in package, skip silently
+            pass
+
         return True
 
     except Exception as e:
@@ -266,8 +529,9 @@ def verify_init_structure(context_dir: Path) -> list[str]:
         if not fr_dir.is_dir():
             errors.append("claudeconnect/friend_requests/ directory missing")
 
-        # Note: conversations are now stored directly in claudeconnect/with-{email}/
-        # No separate conversations/ directory needed
+        conv_dir = cc_dir / "conversations"
+        if not conv_dir.is_dir():
+            errors.append("claudeconnect/conversations/ directory missing")
 
     # Check authz file
     authz_file = context_dir / "authz"
@@ -282,6 +546,46 @@ def verify_init_structure(context_dir: Path) -> list[str]:
     return errors
 
 
+def migrate_authz_paths(authz_path: Path, email: str) -> bool:
+    """
+    Migrate old authz paths to new claudeconnect/ prefix.
+
+    Migrates:
+    - [/friend_requests] -> [/claudeconnect/friend_requests]
+
+    Also ensures [/claudeconnect/conversations] section exists.
+
+    Args:
+        authz_path: Path to authz file
+        email: User's email
+
+    Returns:
+        True if changes were made, False otherwise.
+    """
+    content = authz_path.read_text()
+    original_content = content
+    changes_made = False
+
+    # Migrate [/friend_requests] to [/claudeconnect/friend_requests]
+    if "[/friend_requests]" in content and "[/claudeconnect/friend_requests]" not in content:
+        content = content.replace("[/friend_requests]", "[/claudeconnect/friend_requests]")
+        changes_made = True
+        print("  Migrated [/friend_requests] -> [/claudeconnect/friend_requests]")
+
+    # Ensure [/claudeconnect/conversations] section exists
+    if "[/claudeconnect/conversations]" not in content:
+        # Add the section at the end
+        content = content.rstrip() + "\n\n# Friends can write conversations to your repo\n"
+        content += f"[/claudeconnect/conversations]\n{email} = rw\n"
+        changes_made = True
+        print("  Added [/claudeconnect/conversations] section")
+
+    if changes_made:
+        authz_path.write_text(content)
+
+    return changes_made
+
+
 def ensure_authz_exists(
     context_dir: Path,
     svn: "SvnClient",
@@ -294,9 +598,7 @@ def ensure_authz_exists(
     Creates:
     - authz file with proper permissions
     - claudeconnect/friend_requests/ directory
-
-    Note: Conversation directories (claudeconnect/with-{email}/) are created
-    on-demand when sessions are started, not during init.
+    - claudeconnect/conversations/ directory
 
     Args:
         context_dir: The context directory
@@ -311,18 +613,21 @@ def ensure_authz_exists(
     # Ensure claudeconnect directory structure exists
     cc_dir = context_dir / "claudeconnect"
     friend_requests_dir = cc_dir / "friend_requests"
+    conversations_dir = cc_dir / "conversations"
 
-    # Only create friend_requests dir during init
-    # Conversation dirs (with-{email}/) are created on-demand
-    if not friend_requests_dir.exists():
-        friend_requests_dir.mkdir(parents=True, exist_ok=True)
-        # Add .keep file so SVN tracks the empty directory
-        keep_file = friend_requests_dir / ".keep"
-        keep_file.write_text("")
-        files_to_add.append(keep_file)
-        needs_commit = True
+    for dir_path in [friend_requests_dir, conversations_dir]:
+        if not dir_path.exists():
+            dir_path.mkdir(parents=True, exist_ok=True)
+            # Add .keep file so SVN tracks the empty directory
+            keep_file = dir_path / ".keep"
+            keep_file.write_text("")
+            files_to_add.append(keep_file)
+            needs_commit = True
 
     if authz_path.exists():
+        # Migrate old authz format if needed
+        if migrate_authz_paths(authz_path, email):
+            needs_commit = True
         # If authz exists but we have new private files, update it
         if private_files:
             update_authz_with_private_files(authz_path, email, private_files)
@@ -599,9 +904,78 @@ def status():
 
 
 @cli.command()
+def dashboard():
+    """Show the ClaudeConnect dashboard with friend requests and conversations."""
+    # Check for mock/dev mode
+    mock_dir = get_mock_dir()
+    if mock_dir:
+        context_dir = mock_dir
+        # Get email from mock tokens
+        mock_tokens_file = mock_dir / ".mock" / "config" / "tokens.json"
+        if mock_tokens_file.exists():
+            data = json.loads(mock_tokens_file.read_text())
+            email = data.get("email", "dev@example.com")
+        else:
+            email = "dev@example.com"
+    else:
+        # Normal mode
+        tokens = get_valid_token()
+        if not tokens:
+            print("Not logged in. Run `claudeconnect login` first.")
+            sys.exit(1)
+
+        config = get_config()
+        if not config.context_dir:
+            print("Context directory not set. Run `claudeconnect init` first.")
+            sys.exit(1)
+
+        context_dir = Path(config.context_dir)
+        email = tokens.email
+
+    # Display the dashboard (without clearing screen)
+    display_startup_banner(context_dir, email, clear_screen=False)
+
+
+@cli.command()
 def start():
     """Start Claude with sync enabled (default command)."""
-    # Check login and token validity
+    # Check for mock/dev mode first
+    mock_dir = get_mock_dir()
+    if mock_dir:
+        # In mock mode, use mock_dir as context and skip server operations
+        tokens = get_valid_token()  # Returns mock tokens
+        if not tokens:
+            print("Mock tokens not found. Run `CC_MOCK_DIR=... claudeconnect init` first.")
+            sys.exit(1)
+
+        context_dir = mock_dir
+        print(f"{DIM}[DEV MODE]{RESET} Starting with mock environment...")
+        print(f"  Context: {context_dir}")
+        print(f"  User: {tokens.email}")
+
+        # Check if mock env is initialized
+        if not (context_dir / "claudeconnect").exists():
+            print(f"\nMock environment not initialized.")
+            print(f"Run: CC_MOCK_DIR={mock_dir} claudeconnect init")
+            sys.exit(1)
+
+        # Display banner and start Claude (no sync in mock mode)
+        display_startup_banner(context_dir, tokens.email)
+
+        print(f"{DIM}[DEV MODE] Sync disabled - using static mock data{RESET}\n")
+
+        # Start Claude without sync
+        try:
+            subprocess.run(
+                ["claude"],
+                cwd=context_dir,
+            )
+        except KeyboardInterrupt:
+            pass
+        print("\nGoodbye!")
+        return
+
+    # Normal mode - check login and token validity
     tokens = get_valid_token()
     if not tokens:
         print("Not logged in or token expired. Run `claudeconnect login` first.")
@@ -627,8 +1001,7 @@ def start():
     print(f"Connecting as {tokens.email}...")
     try:
         repo_info = ensure_repo(tokens.id_token)
-        # Always compute repo_url locally for consistency
-        repo_url = repo_url_for_email(tokens.email)
+        repo_url = repo_info["url"]
 
         if repo_info.get("created"):
             print(f"  Created new repo: {repo_info['repo']}")
@@ -679,6 +1052,9 @@ async def run_with_sync(context_dir: Path, repo_url: str, token: str, email: str
     sync_loop = SyncLoop(context_dir, repo_url, token, email, interval=30)
     await sync_loop.start()
 
+    # Display ClaudeConnect banner before launching Claude
+    display_startup_banner(context_dir, email)
+
     try:
         # Run Claude Code
         # Use subprocess to run claude, streaming output
@@ -706,6 +1082,15 @@ async def run_with_sync(context_dir: Path, repo_url: str, token: str, email: str
 @cli.command()
 def init():
     """Initialize current directory as context directory."""
+    # Check for mock/dev mode
+    mock_dir = get_mock_dir()
+    if mock_dir:
+        print(f"{DIM}[DEV MODE]{RESET} Initializing mock environment...")
+        _init_mock_environment(mock_dir)
+        print(f"\n✓ Mock environment initialized at {mock_dir}")
+        print(f"  Run `CC_MOCK_DIR={mock_dir} claudeconnect` to start.")
+        return
+
     tokens = get_valid_token()
     if not tokens:
         print("Not logged in or token expired. Run `claudeconnect login` first.")
@@ -725,8 +1110,7 @@ def init():
     print(f"Connecting as {tokens.email}...")
     try:
         repo_info = ensure_repo(tokens.id_token)
-        # Always compute repo_url locally for consistency
-        repo_url = repo_url_for_email(tokens.email)
+        repo_url = repo_info["url"]
     except Exception as e:
         print(f"  Error: {e}")
         sys.exit(1)
@@ -762,6 +1146,132 @@ def init():
         print(f"  Run `claudeconnect` to start Claude with sync.")
     else:
         sys.exit(1)
+
+
+def _init_mock_environment(mock_dir: Path) -> None:
+    """Initialize mock environment with sample data for UX development."""
+    # Create directory structure
+    (mock_dir / "claudeconnect" / "friend_requests").mkdir(parents=True, exist_ok=True)
+    (mock_dir / "claudeconnect" / "conversations" / "with-alice-example-com").mkdir(parents=True, exist_ok=True)
+    (mock_dir / "claudeconnect" / "conversations" / "with-bob-example-com").mkdir(parents=True, exist_ok=True)
+    (mock_dir / "notes").mkdir(parents=True, exist_ok=True)
+    (mock_dir / ".mock" / "config").mkdir(parents=True, exist_ok=True)
+
+    print("  Creating directory structure...")
+
+    # Create authz file
+    (mock_dir / "authz").write_text("""[/]
+dev@example.com = rw
+alice@example.com = r
+bob@example.com = r
+
+[/claudeconnect/with-dev-example-com]
+dev@example.com = rw
+alice@example.com = rw
+bob@example.com = rw
+""")
+
+    # Create privacy.md
+    (mock_dir / "privacy.md").write_text("""# Privacy Policy
+
+This file defines what information should be kept private vs. shared with friends.
+
+## Always Private (Never Share)
+- Credentials & Secrets: API keys, passwords, tokens
+- Financial Information: Bank accounts, credit cards
+
+## OK to Share (Public by Default)
+- General Notes: Ideas, learning notes, recipes
+- Public Projects: Open source work, shared hobbies
+""")
+
+    # Create friend requests
+    print("  Creating mock friend requests...")
+    (mock_dir / "claudeconnect" / "friend_requests" / "carol@example.com.md").write_text("""# Friend Request
+
+from: carol@example.com
+date: 2026-01-20T10:00:00Z
+status: pending
+
+Hi! I'd like to connect our Claude instances.
+""")
+
+    (mock_dir / "claudeconnect" / "friend_requests" / "david@example.com.md").write_text("""# Friend Request
+
+from: david@example.com
+date: 2026-01-19T15:30:00Z
+status: pending
+
+Hey! Let's connect on ClaudeConnect!
+""")
+
+    # Create conversations
+    print("  Creating mock conversations...")
+    (mock_dir / "claudeconnect" / "conversations" / "with-alice-example-com" / "2026-01-15_abc12345.md").write_text("""# Conversation: Dev <-> Alice
+
+**Session ID**: 2026-01-15_abc12345
+**Date**: 2026-01-15T14:30:00
+**Topic**: API Design Discussion
+
+---
+
+**Dev's Claude**: What are your thoughts on REST vs GraphQL?
+
+**Alice's Claude**: Alice has been exploring GraphQL lately. She likes the flexibility.
+""")
+
+    (mock_dir / "claudeconnect" / "conversations" / "with-alice-example-com" / "2026-01-19_def67890.md").write_text("""# Conversation: Dev <-> Alice
+
+**Session ID**: 2026-01-19_def67890
+**Date**: 2026-01-19T08:00:00
+**Topic**: Project Planning
+**New**: true
+
+---
+
+**Alice's Claude**: Hey! Following up on our API discussion.
+
+**Dev's Claude**: Great! What did you find?
+""")
+
+    (mock_dir / "claudeconnect" / "conversations" / "with-bob-example-com" / "friend-accepted.md").write_text("""# Friend Request Accepted
+
+**From**: bob@example.com
+**Date**: 2026-01-19T14:00:00Z
+**Type**: friend-request-accepted
+
+Bob has accepted your friend request. You are now connected!
+""")
+
+    # Create sample note
+    (mock_dir / "notes" / "sample-note.md").write_text("""# Sample Note
+
+This is a sample note in the mock environment.
+
+## Ideas
+- Test the ClaudeConnect UX
+- Try different notification scenarios
+""")
+
+    # Create mock API responses
+    print("  Creating mock API responses...")
+    (mock_dir / ".mock" / "api-svn-token.json").write_text('{"svn_token": "mock-svn-token-for-dev"}')
+    (mock_dir / ".mock" / "api-ensure-repo.json").write_text(json.dumps({
+        "repo": "dev-example-com",
+        "url": str(mock_dir),
+        "email": "dev@example.com",
+        "created": False,
+    }))
+    (mock_dir / ".mock" / "config" / "tokens.json").write_text(json.dumps({
+        "id_token": "mock-id-token",
+        "refresh_token": "mock-refresh-token",
+        "email": "dev@example.com",
+    }))
+
+    print("  Mock data created:")
+    print("    - 2 pending friend requests (carol@, david@)")
+    print("    - 1 accepted notification (bob@)")
+    print("    - 2 conversations with alice@")
 
 
 @cli.command()
@@ -856,7 +1366,7 @@ def add_friend_to_authz(authz_path: Path, my_email: str, peer_email: str) -> boo
 
     Grants:
     - Read access to [/] (can read your context)
-    - Write access to [/claudeconnect/with-{my_email}] (can push conversations to you)
+    - Write access to [/claudeconnect/conversations] (can push conversations to you)
 
     Args:
         authz_path: Path to authz file
@@ -871,28 +1381,25 @@ def add_friend_to_authz(authz_path: Path, my_email: str, peer_email: str) -> boo
     new_lines = []
     changes_made = False
 
-    my_email_repo_name = email_to_repo_name(my_email)
-    my_with_section = f"[/claudeconnect/with-{my_email_repo_name}]"
-
     # Track which sections we've seen
     current_section = None
     added_to_root = False
-    added_to_with = False
-    with_section_exists = False
+    added_to_conversations = False
+    conversations_section_exists = False
 
     # Check if friend already has access
     has_root_access = f"{peer_email} = r" in authz_content or f"{peer_email} = rw" in authz_content
-    has_with_access = False
+    has_conv_access = False
 
-    # Check with-{email} section specifically
-    in_with_section = False
+    # Check conversations section specifically
+    in_conv_section = False
     for line in lines:
         if line.strip().startswith('['):
-            in_with_section = my_with_section in line
-            if in_with_section:
-                with_section_exists = True
-        elif in_with_section and peer_email in line:
-            has_with_access = True
+            in_conv_section = '[/claudeconnect/conversations]' in line
+            if in_conv_section:
+                conversations_section_exists = True
+        elif in_conv_section and peer_email in line:
+            has_conv_access = True
 
     # Process lines and add friend where needed
     for i, line in enumerate(lines):
@@ -913,43 +1420,44 @@ def add_friend_to_authz(authz_path: Path, my_email: str, peer_email: str) -> boo
             changes_made = True
             print(f"  Added {peer_email} read access to [/]")
 
-        # Add write access after owner's rw line in [/claudeconnect/with-{my_email}] section
-        if (current_section == my_with_section and
-            not added_to_with and
-            not has_with_access and
+        # Add write access after owner's rw line in [/claudeconnect/conversations] section
+        if (current_section == '[/claudeconnect/conversations]' and
+            not added_to_conversations and
+            not has_conv_access and
             '= rw' in line and
             my_email in line):
             new_lines.append(f"{peer_email} = rw")
-            added_to_with = True
+            added_to_conversations = True
             changes_made = True
-            print(f"  Added {peer_email} write access to {my_with_section}")
+            print(f"  Added {peer_email} write access to [/claudeconnect/conversations]")
 
-    # If with-{email} section doesn't exist, add it
-    if not with_section_exists:
+    # If conversations section doesn't exist, add it
+    if not conversations_section_exists:
         new_lines.append("")
-        new_lines.append(f"# Friends can write conversations to your with-{my_email_repo_name} folder")
-        new_lines.append(my_with_section)
+        new_lines.append("# Friends can write conversations to your repo")
+        new_lines.append("[/claudeconnect/conversations]")
         new_lines.append(f"{my_email} = rw")
         new_lines.append(f"{peer_email} = rw")
         changes_made = True
-        print(f"  Created {my_with_section} section")
-        print(f"  Added {peer_email} write access to {my_with_section}")
-    elif not added_to_with and not has_with_access:
+        print(f"  Created [/claudeconnect/conversations] section")
+        print(f"  Added {peer_email} write access to [/claudeconnect/conversations]")
+    elif not added_to_conversations and not has_conv_access:
         # Section exists but we didn't find owner's line - append to end of section
+        # Find the conversations section and add after it
         final_lines = []
-        in_with = False
+        in_conv = False
         added = False
         for line in new_lines:
             final_lines.append(line)
-            if my_with_section in line:
-                in_with = True
-            elif in_with and not added:
+            if '[/claudeconnect/conversations]' in line:
+                in_conv = True
+            elif in_conv and not added:
                 # Add after first line of section
                 final_lines.append(f"{peer_email} = rw")
                 added = True
                 changes_made = True
-                print(f"  Added {peer_email} write access to {my_with_section}")
-                in_with = False
+                print(f"  Added {peer_email} write access to [/claudeconnect/conversations]")
+                in_conv = False
         new_lines = final_lines
 
     if changes_made:
@@ -1229,14 +1737,11 @@ def test_user_create(ttl: str):
 
         data = response.json()
 
-        # Always compute repo_url locally for consistency
-        computed_repo_url = repo_url_for_email(data["email"])
-
         # Save locally
         creds = TestUserCredentials(
             email=data["email"],
             svn_token=data["svn_token"],
-            repo_url=computed_repo_url,
+            repo_url=data["repo_url"],
             expires_at=data["expires_at"],
         )
         creds.save()
@@ -1244,7 +1749,7 @@ def test_user_create(ttl: str):
         expires_str = datetime.fromtimestamp(data["expires_at"]).strftime("%Y-%m-%d %H:%M:%S")
 
         print(f"\n✓ Created test user: {data['email']}")
-        print(f"  Repo: {computed_repo_url}")
+        print(f"  Repo: {data['repo_url']}")
         print(f"  Expires: {expires_str}")
         print(f"\n  To use this test user:")
         print(f"    CC_TEST_USER={data['email']} claudeconnect init")
