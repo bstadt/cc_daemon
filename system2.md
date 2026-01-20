@@ -100,15 +100,22 @@ For beta launch, we will only support mac OSX and installs w/ homebrew
 | Path | Purpose |
 |------|---------|
 | `/opt/homebrew/bin/claudeconnect` | CLI binary (Apple Silicon) |
+| `/opt/homebrew/bin/cc` | CLI shortcut symlink (Apple Silicon) |
 | `/usr/local/bin/claudeconnect` | CLI binary (Intel Mac) |
+| `/usr/local/bin/cc` | CLI shortcut symlink (Intel Mac) |
 | `~/.claude-connect/` | Configuration directory |
 | `~/.claude/skills/claudeconnect/SKILL.md` | Claude skill file |
 
 ### CLI Commands
 
+All commands can be invoked with either `claudeconnect` or the shortcut `cc`:
+
 ```bash
 claudeconnect --help    # Show available commands
+cc --help               # Same as above (shortcut)
+
 claudeconnect --version # Show version
+cc --version            # Same as above (shortcut)
 ```
 
 ### Cross-Platform Support
@@ -159,7 +166,7 @@ User's Context Directory (plaintext)         ~/.claude-connect/svn-staging/<emai
 │  notes.md          (plaintext)     │       │  .svn/                             │
 │  journal/daily.md  (plaintext)     │       │  notes.md          (encrypted)    │
 │  privacy.md        (plaintext)     │  ◄──► │  journal/daily.md  (encrypted)    │
-│  authz             (plaintext)     │ sync  │  privacy.md        (plaintext)    │
+│  authz             (plaintext)     │ sync  │  privacy.md        (encrypted)    │
 │                                    │       │  authz             (plaintext)    │
 │  ← Claude reads/writes here        │       │  ← SVN operations happen here     │
 │  ← User edits here                 │       │  ← Never touched by user/Claude   │
@@ -198,7 +205,7 @@ User's Context Directory (plaintext)         ~/.claude-connect/svn-staging/<emai
 ├── svn-staging/
 │   └── <email>/                       # SVN working copy (encrypted files)
 │       ├── .svn/                      # SVN metadata
-│       ├── privacy.md                 # Plaintext (no sensitive content)
+│       ├── privacy.md                 # Encrypted (may contain custom privacy rules)
 │       ├── authz                      # Plaintext (access control)
 │       ├── claudeconnect/
 │       │   └── with-claudeconnect-io/
@@ -322,7 +329,6 @@ ClaudeConnect uses Google KMS to enable zero-trust context sharing. User content
 
 **Files that are NOT encrypted:**
 - `authz` — must be readable by SVN for access control
-- `privacy.md` — contains no sensitive user content
 - `.keep` files — empty placeholder files
 
 ### Step 6: First Sync
@@ -346,7 +352,7 @@ OUTBOUND (context dir → shadow dir → SVN server):
 │    a. Read plaintext from context dir                              │
 │    b. Encrypt using KMS key                                        │
 │    c. Write encrypted content to shadow dir                        │
-│ 3. Copy authz and privacy.md to shadow dir (no encryption)         │
+│ 3. Copy authz to shadow dir (no encryption)                        │
 │ 4. SVN add any new files in shadow dir                             │
 │ 5. SVN commit from shadow dir                                      │
 └─────────────────────────────────────────────────────────────────────┘
@@ -359,7 +365,7 @@ INBOUND (SVN server → shadow dir → context dir):
 │    a. Read encrypted content from shadow dir                       │
 │    b. Decrypt using KMS key                                        │
 │    c. Overwrite plaintext file in context dir                      │
-│ 4. Copy authz and privacy.md to context dir (no decryption)        │
+│ 4. Copy authz to context dir (no decryption)                       │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -421,6 +427,8 @@ User:   Accept it.
 Claude: Done! You're now connected with Alice. Let me know if you'd like to 
         start a conversation with her Claude.
 ```
+> **Note:** Improved startup UX for friend request notifications is in development—xiq is working on a more seamless experience.
+
 
 **Example: User-initiated check**
 ```
@@ -678,13 +686,7 @@ Claude: Sure! I'll have an autonomous conversation with Bob's Claude about the
 3. **Create system prompts** for each instance → `session.py:generate_instance_prompt()`
    - Each Claude only sees their own user's context
    - Knows they're talking to the other user's Claude
-4. **Run conversation loop:**
-   ```python
-   for turn in range(max_turns):
-       our_response = run_claude_instance(our_context, our_prompt, message)
-       peer_response = run_claude_instance(peer_context, peer_prompt, our_response)
-       # Check for natural ending signals
-   ```
+4. **Run conversation loop**
 5. **Generate transcript** with header
 6. **Commit transcript to both repos:**
    - Local: `claudeconnect/with-{peer-email}/{session-id}.md`
@@ -804,7 +806,7 @@ This section documents the internal structure of the ClaudeConnect daemon, organ
 
 ### cli.py - Command-Line Interface
 
-Main entry point and orchestration logic.
+Main entry point and orchestration logic. All commands can be invoked with either `claudeconnect` or the shortcut `cc`.
 
 #### Commands
 
@@ -868,7 +870,7 @@ Response: {"svn_token": "..."}
 
 **`init_context_dir(context_dir: Path, repo_url: str, svn_token: str, email: str)`**
 
-Initializes a directory as an SVN working copy. Handles both empty directories and directories with existing files.
+Registers a directory as the user's context directory and creates the shadow directory (`~/.claude-connect/svn-staging/<email>/`) as the SVN working copy. The user's context directory itself has no `.svn/` folder.
 
 **`generate_authz_content(email: str, private_files: list[str] | None = None) -> str`**
 
@@ -884,7 +886,7 @@ Migrates old authz format to new `claudeconnect/` prefix structure.
 
 **`delete_file(file_path: str) -> bool`**
 
-Deletes a file from the context directory and SVN.
+Deletes a file from the context directory.
 
 ```bash
 claudeconnect delete <file_path>
@@ -893,13 +895,11 @@ claudeconnect delete <file_path>
 **Flow:**
 1. Validate user is logged in
 2. Resolve file path relative to context directory
-3. Delete local file
-4. Mark file as deleted in SVN → `svn_ops.py:SvnClient.delete()`
-5. Sync to commit deletion → `sync.py:sync_once()`
-6. If file had private authz entry, remove it from authz
+3. Delete file from context directory
+4. Next sync will detect deletion and propagate to shadow directory → SVN
+5. If file had private authz entry, remove it from authz
 
 **Options:**
-- `--keep-local`: Delete from SVN but keep local copy
 - `--force`: Skip confirmation prompt
 
 ---
@@ -940,13 +940,13 @@ Decodes JWT payload without verification (verification done server-side).
 
 ### svn_ops.py - SVN Operations
 
-SVN client wrapper with authentication and error handling.
+SVN client wrapper with authentication and error handling. All SVN operations work on the shadow directory (`~/.claude-connect/svn-staging/<email>/`), not the user's context directory.
 
 #### SvnClient Class
 
 ```python
 SvnClient(
-    working_dir: Path,      # Local working copy path
+    working_dir: Path,      # Shadow directory path (SVN working copy)
     repo_url: str,          # SVN repository URL
     password: str,          # Fernet SVN token
     username: str = "oauth" # Typically set to email
@@ -1004,29 +1004,36 @@ Detects SVN lock errors from stderr output.
 
 ### sync.py - Synchronization
 
-Background sync loop and manual sync function.
+Background sync loop and manual sync function. Uses the shadow directory architecture where the user's context directory (plaintext) syncs with the shadow directory (encrypted SVN working copy).
 
 #### SyncLoop Class
 
 ```python
 SyncLoop(
-    context_dir: Path,
+    context_dir: Path,       # User's plaintext context directory
+    shadow_dir: Path,        # ~/.claude-connect/svn-staging/<email>/
     repo_url: str,
     token: str,
     email: str,
-    interval: int = 30,  # seconds
+    kms_key_id: str,
+    interval: int = 30,      # seconds
 )
 ```
 
 **`_sync_once()`**
 
 Single sync cycle:
-1. Cleanup stale locks
-2. Update (pull remote changes)
+1. **Outbound** (context → shadow → SVN):
+   - Detect changed files in context directory
+   - Encrypt changed `.md` files → write to shadow directory
+   - Copy `authz` to shadow (no encryption)
+   - SVN add/commit from shadow directory
+2. **Inbound** (SVN → shadow → context):
+   - SVN update in shadow directory
+   - Detect files updated from remote
+   - Decrypt updated `.md` files → write to context directory
+   - Copy `authz` to context (no decryption)
 3. Handle conflicts (keep local, save remote as `.theirs.md`)
-4. Add new markdown files
-5. Delete missing files
-6. Commit if changes exist
 
 **`_handle_conflict(path: Path)`**
 
@@ -1034,7 +1041,7 @@ Conflict resolution strategy: keep local version, save remote as backup.
 
 #### Standalone Function
 
-**`sync_once(context_dir, repo_url, svn_token, email) -> bool`**
+**`sync_once(context_dir, shadow_dir, repo_url, svn_token, email, kms_key_id) -> bool`**
 
 Synchronous single-sync for CLI use. Same logic as `_sync_once()`.
 
@@ -1042,28 +1049,36 @@ Synchronous single-sync for CLI use. Same logic as `_sync_once()`.
 
 ### session.py - Conversation Sessions
 
-Manages conversations between Claude instances.
+Manages conversations between Claude instances. Supports both autonomous (two Claudes talk) and interactive (user chats with friend's Claude) modes.
 
 #### Key Functions
 
-**`run_dual_session(our_context, peer_context, our_email, peer_email, topic, max_turns) -> str`**
+**`run_autonomous_session(our_context, peer_context, our_email, peer_email, topic, max_turns) -> str`**
 
-Runs dual-instance conversation:
+Runs autonomous dual-instance conversation:
 1. Generate prompts for each instance
-2. Run conversation loop
-3. Generate and save transcript
+2. Run conversation loop (alternating turns)
+3. Generate and save transcript to both repos
 
-**`run_single_session(context_dir, our_email, peer_email, topic, max_turns) -> str`**
+**`run_interactive_session(peer_context, our_email, peer_email) -> str`**
 
-Runs single-instance conversation (one Claude simulates both).
+Opens interactive session with friend's Claude:
+1. Generate system prompt for friend's Claude
+2. Open new terminal running Claude with friend's context
+3. Capture transcript on session exit
+4. Commit transcript to both repos
 
 **`generate_instance_prompt(context_dir, my_email, peer_email, topic, is_initiator) -> str`**
 
-Creates system prompt for a Claude instance. Each instance only sees their user's context.
+Creates system prompt for a Claude instance in autonomous mode. Each instance only sees their user's context.
+
+**`generate_interactive_prompt(peer_email, peer_name, user_email, user_name) -> str`**
+
+Creates system prompt for interactive mode. Instructs Claude that it's representing the friend.
 
 **`run_claude_instance(context_dir, system_prompt, user_message, timeout=120) -> tuple[bool, str]`**
 
-Invokes Claude CLI and returns response.
+Invokes Claude CLI in non-interactive mode and returns response. Used for autonomous conversations.
 
 **`generate_transcript(session_id, our_email, peer_email, topic, messages) -> str`**
 
@@ -1114,6 +1129,7 @@ Local configuration and credential management.
 | `~/.claude-connect/tokens.json` | Auth tokens |
 | `~/.claude-connect/svn-staging/<email>/` | Shadow directory (encrypted SVN working copy) |
 | `~/.claude-connect/peers/<email>/` | Pulled friend contexts (decrypted) |
+| `~/.claude-connect/transcripts/` | Temporary transcript storage for interactive sessions |
 | `~/.claude-connect/test-users/<email>/credentials.json` | Test user credentials |
 
 #### Config Class
