@@ -6,6 +6,9 @@ Main entry point for the claudeconnect command.
 from __future__ import annotations
 
 import asyncio
+import datetime
+import json
+import os
 import shutil
 import subprocess
 import sys
@@ -14,6 +17,22 @@ from pathlib import Path
 
 import click
 import httpx
+
+
+def get_mock_dir() -> Path | None:
+    """Get mock directory path if CC_MOCK_DIR is set."""
+    mock_dir = os.environ.get("CC_MOCK_DIR")
+    if mock_dir:
+        path = Path(mock_dir)
+        # Return path even if it doesn't exist yet (for init)
+        return path
+    return None
+
+
+def is_mock_mode() -> bool:
+    """Check if running in mock/dev mode."""
+    return os.environ.get("CC_MOCK_DIR") is not None
+
 
 from .auth import login as do_login, ensure_valid_token, decode_jwt_payload, refresh_token
 from .config import (
@@ -33,14 +52,23 @@ def get_svn_token(id_token: str) -> str | None:
     """
     Exchange Google JWT for a short Fernet token for SVN auth.
 
-    For test users (CC_TEST_USER env), returns the stored SVN token directly.
+    For mock mode (CC_MOCK_DIR) and test users (CC_TEST_USER), returns mock/stored token.
 
     Args:
-        id_token: Google OAuth id_token (ignored for test users)
+        id_token: Google OAuth id_token (ignored for mock/test users)
 
     Returns:
         Fernet token string, or None on failure.
     """
+    # Check for mock/dev mode first
+    mock_dir = get_mock_dir()
+    if mock_dir:
+        mock_token_file = mock_dir / ".mock" / "api-svn-token.json"
+        if mock_token_file.exists():
+            data = json.loads(mock_token_file.read_text())
+            return data.get("svn_token", "mock-svn-token")
+        return "mock-svn-token"
+
     # Check for test user mode
     test_user_email = get_test_user_email()
     if test_user_email:
@@ -74,11 +102,26 @@ def get_valid_token() -> Tokens | None:
     """
     Get a valid (non-expired) token, refreshing if needed.
 
-    Checks for test user mode first (CC_TEST_USER env var).
+    Checks for mock mode (CC_MOCK_DIR) and test user mode (CC_TEST_USER) first.
 
     Returns:
         Valid Tokens, or None if not logged in or refresh fails.
     """
+    # Check for mock/dev mode first
+    mock_dir = get_mock_dir()
+    if mock_dir:
+        # Return mock tokens
+        mock_email = "dev@example.com"
+        mock_tokens_file = mock_dir / ".mock" / "config" / "tokens.json"
+        if mock_tokens_file.exists():
+            data = json.loads(mock_tokens_file.read_text())
+            mock_email = data.get("email", mock_email)
+        return Tokens(
+            id_token="mock-id-token",
+            refresh_token="mock-refresh-token",
+            email=mock_email,
+        )
+
     # Check for test user mode
     test_user_email = get_test_user_email()
     if test_user_email:
@@ -129,10 +172,10 @@ def ensure_repo(token: str) -> dict:
     """
     Ensure user's repo exists on server.
 
-    For test users (CC_TEST_USER env), returns stored repo info directly.
+    For mock mode (CC_MOCK_DIR) and test users (CC_TEST_USER), returns mock/stored info.
 
     Args:
-        token: OAuth id_token (ignored for test users)
+        token: OAuth id_token (ignored for mock/test users)
 
     Returns:
         Dict with 'repo', 'url', 'email' keys.
@@ -140,6 +183,20 @@ def ensure_repo(token: str) -> dict:
     Raises:
         Exception on failure.
     """
+    # Check for mock/dev mode first
+    mock_dir = get_mock_dir()
+    if mock_dir:
+        mock_email = "dev@example.com"
+        mock_repo_file = mock_dir / ".mock" / "api-ensure-repo.json"
+        if mock_repo_file.exists():
+            return json.loads(mock_repo_file.read_text())
+        return {
+            "repo": email_to_repo_name(mock_email),
+            "url": f"file://{mock_dir}",  # Local mock "repo"
+            "email": mock_email,
+            "created": False,
+        }
+
     # Check for test user mode
     test_user_email = get_test_user_email()
     if test_user_email:
@@ -165,6 +222,156 @@ def ensure_repo(token: str) -> dict:
         raise Exception(data.get("error", "Failed to ensure repo"))
 
     return response.json()
+
+
+def _init_mock_environment(mock_dir: Path) -> bool:
+    """
+    Initialize mock environment with sample data for UX development.
+
+    Creates directory structure and sample files for:
+    - Friend requests (pending)
+    - Conversations
+    - Accepted friend notifications
+
+    Args:
+        mock_dir: Path to mock environment directory
+
+    Returns:
+        True if successful
+    """
+    mock_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create directory structure
+    (mock_dir / "claudeconnect" / "friend_requests").mkdir(parents=True, exist_ok=True)
+    (mock_dir / "claudeconnect" / "conversations" / "with-alice-example-com").mkdir(parents=True, exist_ok=True)
+    (mock_dir / "claudeconnect" / "conversations" / "with-bob-example-com").mkdir(parents=True, exist_ok=True)
+    (mock_dir / "notes").mkdir(parents=True, exist_ok=True)
+    (mock_dir / ".mock" / "config").mkdir(parents=True, exist_ok=True)
+
+    # Sample friend request 1
+    (mock_dir / "claudeconnect" / "friend_requests" / "carol@example.com.md").write_text(
+        """# Friend Request
+
+from: carol@example.com
+date: 2026-01-20T10:00:00Z
+status: pending
+
+Hi! I'd like to connect our Claude instances to collaborate on projects.
+"""
+    )
+
+    # Sample friend request 2
+    (mock_dir / "claudeconnect" / "friend_requests" / "david@example.com.md").write_text(
+        """# Friend Request
+
+from: david@example.com
+date: 2026-01-19T15:30:00Z
+status: pending
+
+Hey, let's share context!
+"""
+    )
+
+    # Sample conversation with Alice
+    (mock_dir / "claudeconnect" / "conversations" / "with-alice-example-com" / "2026-01-15_abc12345.md").write_text(
+        """# Conversation: Dev <-> Alice
+
+**Session ID**: 2026-01-15_abc12345
+**Date**: 2026-01-15T14:00:00
+**Topic**: Architecture Planning
+
+---
+
+**Dev's Claude**: Let's discuss the system architecture...
+
+**Alice's Claude**: I've been thinking about microservices vs monolith...
+"""
+    )
+
+    # Sample new conversation
+    (mock_dir / "claudeconnect" / "conversations" / "with-alice-example-com" / "2026-01-19_def67890.md").write_text(
+        f"""# Conversation: Dev <-> Alice
+
+**Session ID**: 2026-01-19_def67890
+**Date**: {datetime.datetime.now().isoformat()}
+**Topic**: Code Review
+
+---
+
+**Dev's Claude**: Can you review this PR?
+
+**Alice's Claude**: Sure, looking at it now...
+"""
+    )
+
+    # Sample accepted friend notification from Bob
+    (mock_dir / "claudeconnect" / "conversations" / "with-bob-example-com" / "friend-accepted.md").write_text(
+        """# Friend Request Accepted
+
+**From**: bob@example.com
+**Date**: 2026-01-19T14:00:00Z
+**Type**: friend-request-accepted
+
+Bob has accepted your friend request. You are now connected!
+"""
+    )
+
+    # Sample note
+    (mock_dir / "notes" / "sample-note.md").write_text(
+        """# Sample Note
+
+This is a sample note in your context directory.
+"""
+    )
+
+    # Authz file
+    (mock_dir / "authz").write_text(
+        """[/]
+dev@example.com = rw
+alice@example.com = r
+bob@example.com = r
+
+[/claudeconnect/friend_requests]
+* = rw
+dev@example.com = rw
+
+[/claudeconnect/with-dev-example-com]
+dev@example.com = rw
+alice@example.com = rw
+bob@example.com = rw
+"""
+    )
+
+    # Privacy file
+    (mock_dir / "privacy.md").write_text(
+        """# Privacy Policy
+
+This file controls what friends can see in your context.
+
+## Public (friends can read)
+- notes/
+- projects/
+
+## Private (only you)
+- personal/
+- .env files
+"""
+    )
+
+    # Mock API response files
+    (mock_dir / ".mock" / "api-svn-token.json").write_text(
+        '{"svn_token": "mock-svn-token-for-dev"}'
+    )
+
+    (mock_dir / ".mock" / "api-ensure-repo.json").write_text(
+        f'{{"repo": "dev-example-com", "url": "file://{mock_dir}", "email": "dev@example.com", "created": false}}'
+    )
+
+    (mock_dir / ".mock" / "config" / "tokens.json").write_text(
+        '{"id_token": "mock-id-token", "refresh_token": "mock-refresh", "email": "dev@example.com"}'
+    )
+
+    return True
 
 
 def generate_authz_content(email: str, private_files: list[str] | None = None) -> str:
@@ -601,6 +808,40 @@ def status():
 @cli.command()
 def start():
     """Start Claude with sync enabled (default command)."""
+    # Check for mock/dev mode
+    mock_dir = get_mock_dir()
+    if mock_dir:
+        tokens = get_valid_token()  # Returns mock tokens
+        context_dir = mock_dir
+
+        # Check if mock environment is initialized
+        if not (mock_dir / "claudeconnect").exists():
+            print("[DEV MODE] Mock environment not initialized.")
+            print(f"Run: CC_MOCK_DIR={mock_dir} claudeconnect init")
+            sys.exit(1)
+
+        print(f"[DEV MODE] Using mock environment: {mock_dir}")
+        print(f"Logged in as: {tokens.email}")
+        print("\nSkipping sync (mock mode)...")
+
+        # Start Claude without sync
+        print("\nStarting Claude Code...")
+        print("(Sync disabled in dev mode)\n")
+
+        try:
+            process = subprocess.run(
+                ["claude"],
+                cwd=context_dir,
+            )
+        except FileNotFoundError:
+            print("Error: 'claude' command not found.")
+            print("Make sure Claude Code is installed.")
+        except KeyboardInterrupt:
+            pass
+
+        print("\nGoodbye!")
+        return
+
     # Check login and token validity
     tokens = get_valid_token()
     if not tokens:
@@ -706,6 +947,22 @@ async def run_with_sync(context_dir: Path, repo_url: str, token: str, email: str
 @cli.command()
 def init():
     """Initialize current directory as context directory."""
+    # Check for mock/dev mode
+    mock_dir = get_mock_dir()
+    if mock_dir:
+        print("[DEV MODE] Initializing mock environment...")
+        print(f"  Directory: {mock_dir}")
+        if _init_mock_environment(mock_dir):
+            print("\n✓ Mock environment initialized with sample data:")
+            print("  - 2 pending friend requests (carol, david)")
+            print("  - 2 conversations with alice")
+            print("  - 1 accepted friend notification (bob)")
+            print(f"\nRun: CC_MOCK_DIR={mock_dir} claudeconnect start")
+        else:
+            print("  Failed to initialize mock environment")
+            sys.exit(1)
+        return
+
     tokens = get_valid_token()
     if not tokens:
         print("Not logged in or token expired. Run `claudeconnect login` first.")

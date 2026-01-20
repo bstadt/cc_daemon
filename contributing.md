@@ -112,6 +112,48 @@ For testing friend/session functionality:
 2. Or use `~/.claude-connect/peers/` for cached peer contexts
 3. Test the full flow: friend request → accept → session
 
+### Mock Dev Mode
+
+For developing UX without server dependencies, use mock mode:
+
+```bash
+# Set up mock environment (one-time)
+mkdir -p mock-env
+CC_MOCK_DIR=./mock-env claudeconnect init
+
+# Run commands in mock mode
+CC_MOCK_DIR=./mock-env claudeconnect start
+CC_MOCK_DIR=./mock-env claudeconnect status
+```
+
+**What mock mode provides:**
+- Fake authentication (dev@example.com)
+- Sample friend requests (carol@example.com, david@example.com)
+- Sample conversations with alice@example.com
+- Sample accepted friend notification from bob@example.com
+
+**Mock directory structure:**
+```
+mock-env/
+├── authz                          # Access control file
+├── privacy.md                     # Privacy policy
+├── claudeconnect/
+│   ├── friend_requests/           # Pending friend requests
+│   └── conversations/             # Conversation transcripts
+├── notes/
+│   └── sample-note.md
+└── .mock/                         # Mock API responses
+    ├── api-svn-token.json
+    ├── api-ensure-repo.json
+    └── config/tokens.json
+```
+
+**Key points:**
+- Mock mode is activated by setting `CC_MOCK_DIR` environment variable
+- All API calls are bypassed and return mock data
+- SVN operations are skipped (no network required)
+- Ideal for iterating on UI/UX without server setup
+
 ## Commit Messages
 
 Use descriptive commit messages that explain:
@@ -185,4 +227,4 @@ If you find discrepancies between docs and code, **update the docs** to match th
 
 ---
 
-*Last updated: 2026-01-13*
+*Last updated: 2026-01-20*
