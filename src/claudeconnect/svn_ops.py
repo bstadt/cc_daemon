@@ -381,7 +381,7 @@ def email_to_repo_name(email: str) -> str:
     return email.replace("@", "-").replace(".", "-").lower()
 
 
-def repo_url_for_email(email: str, base_url: str = "https://claudeconnect.io/svn") -> str:
+def repo_url_for_email(email: str, base_url: str = "https://v2.claudeconnect.io/svn") -> str:
     """
     Get SVN repo URL for an email.
 

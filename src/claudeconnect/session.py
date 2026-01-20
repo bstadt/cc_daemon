@@ -22,7 +22,7 @@ from .svn_ops import SvnClient, SvnError, email_to_repo_name, repo_url_for_email
 
 # Cache directory for peer contexts
 PEERS_DIR = Path.home() / ".claude-connect" / "peers"
-SERVER_URL = "http://3.142.232.180"
+SERVER_URL = "https://v2.claudeconnect.io"
 
 
 def get_svn_token(id_token: str) -> str | None:

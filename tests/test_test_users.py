@@ -49,8 +49,8 @@ class TestTestUserCreate:
 
         assert "Repo:" in result.stdout or "repo" in result.stdout.lower(), \
             "Should show repo URL"
-        # v2 server at 3.142.232.180
-        assert "3.142.232.180/svn" in result.stdout or "/svn/" in result.stdout, \
+        # v2 server at v2.claudeconnect.io
+        assert "v2.claudeconnect.io/svn" in result.stdout or "/svn/" in result.stdout, \
             "Should show SVN URL"
 
         # Cleanup

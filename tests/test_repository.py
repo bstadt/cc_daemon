@@ -133,8 +133,8 @@ class TestStatus:
         env = {"CC_TEST_USER": test_user}
         result = run_cli(["status"], env=env, cwd=str(context_dir))
 
-        # v2 server at 3.142.232.180
-        assert "3.142.232.180/svn" in result.stdout or "/svn/" in result.stdout, \
+        # v2 server at v2.claudeconnect.io
+        assert "v2.claudeconnect.io/svn" in result.stdout or "/svn/" in result.stdout, \
             "Should show repo URL"
 
     def test_status_shows_expiry(self, test_context):

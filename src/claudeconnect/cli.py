@@ -26,7 +26,7 @@ from .svn_ops import SvnClient, SvnError, email_to_repo_name, repo_url_for_email
 from .sync import SyncLoop, sync_once
 
 
-SERVER_URL = "http://3.142.232.180"
+SERVER_URL = "https://v2.claudeconnect.io"
 
 
 def get_svn_token(id_token: str) -> str | None:
@@ -627,7 +627,8 @@ def start():
     print(f"Connecting as {tokens.email}...")
     try:
         repo_info = ensure_repo(tokens.id_token)
-        repo_url = repo_info["url"]
+        # Always compute repo_url locally for consistency
+        repo_url = repo_url_for_email(tokens.email)
 
         if repo_info.get("created"):
             print(f"  Created new repo: {repo_info['repo']}")
@@ -724,7 +725,8 @@ def init():
     print(f"Connecting as {tokens.email}...")
     try:
         repo_info = ensure_repo(tokens.id_token)
-        repo_url = repo_info["url"]
+        # Always compute repo_url locally for consistency
+        repo_url = repo_url_for_email(tokens.email)
     except Exception as e:
         print(f"  Error: {e}")
         sys.exit(1)
@@ -1227,11 +1229,14 @@ def test_user_create(ttl: str):
 
         data = response.json()
 
+        # Always compute repo_url locally for consistency
+        computed_repo_url = repo_url_for_email(data["email"])
+
         # Save locally
         creds = TestUserCredentials(
             email=data["email"],
             svn_token=data["svn_token"],
-            repo_url=data["repo_url"],
+            repo_url=computed_repo_url,
             expires_at=data["expires_at"],
         )
         creds.save()
@@ -1239,7 +1244,7 @@ def test_user_create(ttl: str):
         expires_str = datetime.fromtimestamp(data["expires_at"]).strftime("%Y-%m-%d %H:%M:%S")
 
         print(f"\n✓ Created test user: {data['email']}")
-        print(f"  Repo: {data['repo_url']}")
+        print(f"  Repo: {computed_repo_url}")
         print(f"  Expires: {expires_str}")
         print(f"\n  To use this test user:")
         print(f"    CC_TEST_USER={data['email']} claudeconnect init")

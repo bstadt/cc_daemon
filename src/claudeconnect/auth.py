@@ -16,7 +16,7 @@ import httpx
 from .config import Tokens, CONFIG_DIR
 
 
-SERVER_URL = "http://3.142.232.180"
+SERVER_URL = "https://v2.claudeconnect.io"
 LOCAL_PORT = 3407
 
 
