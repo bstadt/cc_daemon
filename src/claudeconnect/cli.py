@@ -26,7 +26,7 @@ from .svn_ops import SvnClient, SvnError, email_to_repo_name, repo_url_for_email
 from .sync import SyncLoop, sync_once
 
 
-SERVER_URL = "https://claudeconnect.io"
+SERVER_URL = "http://3.142.232.180"
 
 
 def get_svn_token(id_token: str) -> str | None:
@@ -178,6 +178,7 @@ def generate_authz_content(email: str, private_files: list[str] | None = None) -
     Returns:
         authz file content string
     """
+    email_repo_name = email_to_repo_name(email)
     lines = [
         "[/]",
         f"{email} = rw",
@@ -186,8 +187,8 @@ def generate_authz_content(email: str, private_files: list[str] | None = None) -
         "* = rw",
         f"{email} = rw",
         "",
-        "# Friends can write conversations to your repo",
-        "[/claudeconnect/conversations]",
+        f"# Friends can write conversations to your with-{email_repo_name} folder",
+        f"[/claudeconnect/with-{email_repo_name}]",
         f"{email} = rw",
     ]
 
@@ -265,9 +266,8 @@ def verify_init_structure(context_dir: Path) -> list[str]:
         if not fr_dir.is_dir():
             errors.append("claudeconnect/friend_requests/ directory missing")
 
-        conv_dir = cc_dir / "conversations"
-        if not conv_dir.is_dir():
-            errors.append("claudeconnect/conversations/ directory missing")
+        # Note: conversations are now stored directly in claudeconnect/with-{email}/
+        # No separate conversations/ directory needed
 
     # Check authz file
     authz_file = context_dir / "authz"
@@ -284,12 +284,11 @@ def verify_init_structure(context_dir: Path) -> list[str]:
 
 def migrate_authz_paths(authz_path: Path, email: str) -> bool:
     """
-    Migrate old authz paths to new claudeconnect/ prefix.
+    Migrate old authz paths to new structure.
 
     Migrates:
     - [/friend_requests] -> [/claudeconnect/friend_requests]
-
-    Also ensures [/claudeconnect/conversations] section exists.
+    - [/claudeconnect/conversations] -> [/claudeconnect/with-{email}]
 
     Args:
         authz_path: Path to authz file
@@ -299,8 +298,8 @@ def migrate_authz_paths(authz_path: Path, email: str) -> bool:
         True if changes were made, False otherwise.
     """
     content = authz_path.read_text()
-    original_content = content
     changes_made = False
+    email_repo_name = email_to_repo_name(email)
 
     # Migrate [/friend_requests] to [/claudeconnect/friend_requests]
     if "[/friend_requests]" in content and "[/claudeconnect/friend_requests]" not in content:
@@ -308,18 +307,75 @@ def migrate_authz_paths(authz_path: Path, email: str) -> bool:
         changes_made = True
         print("  Migrated [/friend_requests] -> [/claudeconnect/friend_requests]")
 
-    # Ensure [/claudeconnect/conversations] section exists
-    if "[/claudeconnect/conversations]" not in content:
-        # Add the section at the end
-        content = content.rstrip() + "\n\n# Friends can write conversations to your repo\n"
-        content += f"[/claudeconnect/conversations]\n{email} = rw\n"
+    # Migrate [/claudeconnect/conversations] to [/claudeconnect/with-{email}]
+    if "[/claudeconnect/conversations]" in content:
+        content = content.replace(
+            "[/claudeconnect/conversations]",
+            f"[/claudeconnect/with-{email_repo_name}]"
+        )
+        # Also update the comment if present
+        content = content.replace(
+            "# Friends can write conversations to your repo",
+            f"# Friends can write conversations to your with-{email_repo_name} folder"
+        )
         changes_made = True
-        print("  Added [/claudeconnect/conversations] section")
+        print(f"  Migrated [/claudeconnect/conversations] -> [/claudeconnect/with-{email_repo_name}]")
+
+    # Ensure the with-{email} section exists if neither old nor new exists
+    if f"[/claudeconnect/with-{email_repo_name}]" not in content:
+        content = content.rstrip() + f"\n\n# Friends can write conversations to your with-{email_repo_name} folder\n"
+        content += f"[/claudeconnect/with-{email_repo_name}]\n{email} = rw\n"
+        changes_made = True
+        print(f"  Added [/claudeconnect/with-{email_repo_name}] section")
 
     if changes_made:
         authz_path.write_text(content)
 
     return changes_made
+
+
+def migrate_conversation_directories(context_dir: Path) -> bool:
+    """
+    Migrate from old /conversations/ structure to new flat structure.
+
+    Moves:
+    - claudeconnect/conversations/with-{email}/ -> claudeconnect/with-{email}/
+
+    Args:
+        context_dir: The context directory
+
+    Returns:
+        True if migration was performed, False otherwise.
+    """
+    old_conversations_dir = context_dir / "claudeconnect" / "conversations"
+    if not old_conversations_dir.exists():
+        return False
+
+    migrated = False
+    for conv_dir in old_conversations_dir.iterdir():
+        if conv_dir.is_dir() and conv_dir.name.startswith("with-"):
+            new_location = context_dir / "claudeconnect" / conv_dir.name
+            if not new_location.exists():
+                shutil.move(str(conv_dir), str(new_location))
+                print(f"  Migrated {conv_dir.name} to new location")
+                migrated = True
+            else:
+                # Merge contents if destination exists
+                for item in conv_dir.iterdir():
+                    dest = new_location / item.name
+                    if not dest.exists():
+                        shutil.move(str(item), str(dest))
+                # Remove old dir if empty
+                if not any(conv_dir.iterdir()):
+                    conv_dir.rmdir()
+                migrated = True
+
+    # Remove empty conversations directory
+    if old_conversations_dir.exists() and not any(old_conversations_dir.iterdir()):
+        old_conversations_dir.rmdir()
+        print("  Removed empty conversations/ directory")
+
+    return migrated
 
 
 def ensure_authz_exists(
@@ -334,7 +390,9 @@ def ensure_authz_exists(
     Creates:
     - authz file with proper permissions
     - claudeconnect/friend_requests/ directory
-    - claudeconnect/conversations/ directory
+
+    Note: Conversation directories (claudeconnect/with-{email}/) are created
+    on-demand when sessions are started, not during init.
 
     Args:
         context_dir: The context directory
@@ -349,16 +407,19 @@ def ensure_authz_exists(
     # Ensure claudeconnect directory structure exists
     cc_dir = context_dir / "claudeconnect"
     friend_requests_dir = cc_dir / "friend_requests"
-    conversations_dir = cc_dir / "conversations"
 
-    for dir_path in [friend_requests_dir, conversations_dir]:
-        if not dir_path.exists():
-            dir_path.mkdir(parents=True, exist_ok=True)
-            # Add .keep file so SVN tracks the empty directory
-            keep_file = dir_path / ".keep"
-            keep_file.write_text("")
-            files_to_add.append(keep_file)
-            needs_commit = True
+    # Only create friend_requests dir during init
+    # Conversation dirs (with-{email}/) are created on-demand
+    if not friend_requests_dir.exists():
+        friend_requests_dir.mkdir(parents=True, exist_ok=True)
+        # Add .keep file so SVN tracks the empty directory
+        keep_file = friend_requests_dir / ".keep"
+        keep_file.write_text("")
+        files_to_add.append(keep_file)
+        needs_commit = True
+
+    # Migrate old conversation directories if they exist
+    migrate_conversation_directories(context_dir)
 
     if authz_path.exists():
         # Migrate old authz format if needed
@@ -895,7 +956,7 @@ def add_friend_to_authz(authz_path: Path, my_email: str, peer_email: str) -> boo
 
     Grants:
     - Read access to [/] (can read your context)
-    - Write access to [/claudeconnect/conversations] (can push conversations to you)
+    - Write access to [/claudeconnect/with-{my_email}] (can push conversations to you)
 
     Args:
         authz_path: Path to authz file
@@ -910,25 +971,28 @@ def add_friend_to_authz(authz_path: Path, my_email: str, peer_email: str) -> boo
     new_lines = []
     changes_made = False
 
+    my_email_repo_name = email_to_repo_name(my_email)
+    my_with_section = f"[/claudeconnect/with-{my_email_repo_name}]"
+
     # Track which sections we've seen
     current_section = None
     added_to_root = False
-    added_to_conversations = False
-    conversations_section_exists = False
+    added_to_with = False
+    with_section_exists = False
 
     # Check if friend already has access
     has_root_access = f"{peer_email} = r" in authz_content or f"{peer_email} = rw" in authz_content
-    has_conv_access = False
+    has_with_access = False
 
-    # Check conversations section specifically
-    in_conv_section = False
+    # Check with-{email} section specifically
+    in_with_section = False
     for line in lines:
         if line.strip().startswith('['):
-            in_conv_section = '[/claudeconnect/conversations]' in line
-            if in_conv_section:
-                conversations_section_exists = True
-        elif in_conv_section and peer_email in line:
-            has_conv_access = True
+            in_with_section = my_with_section in line
+            if in_with_section:
+                with_section_exists = True
+        elif in_with_section and peer_email in line:
+            has_with_access = True
 
     # Process lines and add friend where needed
     for i, line in enumerate(lines):
@@ -949,44 +1013,43 @@ def add_friend_to_authz(authz_path: Path, my_email: str, peer_email: str) -> boo
             changes_made = True
             print(f"  Added {peer_email} read access to [/]")
 
-        # Add write access after owner's rw line in [/claudeconnect/conversations] section
-        if (current_section == '[/claudeconnect/conversations]' and
-            not added_to_conversations and
-            not has_conv_access and
+        # Add write access after owner's rw line in [/claudeconnect/with-{my_email}] section
+        if (current_section == my_with_section and
+            not added_to_with and
+            not has_with_access and
             '= rw' in line and
             my_email in line):
             new_lines.append(f"{peer_email} = rw")
-            added_to_conversations = True
+            added_to_with = True
             changes_made = True
-            print(f"  Added {peer_email} write access to [/claudeconnect/conversations]")
+            print(f"  Added {peer_email} write access to {my_with_section}")
 
-    # If conversations section doesn't exist, add it
-    if not conversations_section_exists:
+    # If with-{email} section doesn't exist, add it
+    if not with_section_exists:
         new_lines.append("")
-        new_lines.append("# Friends can write conversations to your repo")
-        new_lines.append("[/claudeconnect/conversations]")
+        new_lines.append(f"# Friends can write conversations to your with-{my_email_repo_name} folder")
+        new_lines.append(my_with_section)
         new_lines.append(f"{my_email} = rw")
         new_lines.append(f"{peer_email} = rw")
         changes_made = True
-        print(f"  Created [/claudeconnect/conversations] section")
-        print(f"  Added {peer_email} write access to [/claudeconnect/conversations]")
-    elif not added_to_conversations and not has_conv_access:
+        print(f"  Created {my_with_section} section")
+        print(f"  Added {peer_email} write access to {my_with_section}")
+    elif not added_to_with and not has_with_access:
         # Section exists but we didn't find owner's line - append to end of section
-        # Find the conversations section and add after it
         final_lines = []
-        in_conv = False
+        in_with = False
         added = False
         for line in new_lines:
             final_lines.append(line)
-            if '[/claudeconnect/conversations]' in line:
-                in_conv = True
-            elif in_conv and not added:
+            if my_with_section in line:
+                in_with = True
+            elif in_with and not added:
                 # Add after first line of section
                 final_lines.append(f"{peer_email} = rw")
                 added = True
                 changes_made = True
-                print(f"  Added {peer_email} write access to [/claudeconnect/conversations]")
-                in_conv = False
+                print(f"  Added {peer_email} write access to {my_with_section}")
+                in_with = False
         new_lines = final_lines
 
     if changes_made:

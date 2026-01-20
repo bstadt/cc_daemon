@@ -22,7 +22,7 @@ from .svn_ops import SvnClient, SvnError, email_to_repo_name, repo_url_for_email
 
 # Cache directory for peer contexts
 PEERS_DIR = Path.home() / ".claude-connect" / "peers"
-SERVER_URL = "https://claudeconnect.io"
+SERVER_URL = "http://3.142.232.180"
 
 
 def get_svn_token(id_token: str) -> str | None:
@@ -275,7 +275,7 @@ async def run_session(
     transcript = header + conversation
 
     # Create conversation directories if needed
-    our_conv_dir = our_context_dir / "claudeconnect" / "conversations" / f"with-{email_to_repo_name(peer_email)}"
+    our_conv_dir = our_context_dir / "claudeconnect" / f"with-{email_to_repo_name(peer_email)}"
     our_conv_dir.mkdir(parents=True, exist_ok=True)
 
     # Save transcript locally (in our context)
@@ -296,7 +296,7 @@ async def run_session(
 
     # Commit to peer's repo
     print(f"\nCommitting to {peer_email}'s repo...")
-    peer_conv_dir = peer_context_dir / "claudeconnect" / "conversations" / f"with-{email_to_repo_name(our_email)}"
+    peer_conv_dir = peer_context_dir / "claudeconnect" / f"with-{email_to_repo_name(our_email)}"
     peer_conv_dir.mkdir(parents=True, exist_ok=True)
     peer_transcript_path = peer_conv_dir / transcript_filename
     peer_transcript_path.write_text(transcript)
@@ -308,7 +308,7 @@ async def run_session(
         print(f"  Committed to {peer_email}'s repo")
     except SvnError as e:
         print(f"  Warning: Failed to commit to peer's repo: {e}")
-        print(f"  (This is expected if you don't have write access to their conversations folder)")
+        print(f"  (This is expected if you don't have write access to their with-{email_to_repo_name(our_email)} folder)")
 
     return True, str(our_transcript_path)
 
@@ -531,7 +531,7 @@ async def run_dual_session(
     transcript = header + "\n\n".join(transcript_lines)
 
     # Create conversation directories if needed
-    our_conv_dir = our_context_dir / "claudeconnect" / "conversations" / f"with-{email_to_repo_name(peer_email)}"
+    our_conv_dir = our_context_dir / "claudeconnect" / f"with-{email_to_repo_name(peer_email)}"
     our_conv_dir.mkdir(parents=True, exist_ok=True)
 
     # Save transcript locally
@@ -552,7 +552,7 @@ async def run_dual_session(
 
     # Commit to peer's repo
     print(f"\nCommitting to {peer_email}'s repo...")
-    peer_conv_dir = peer_context_dir / "claudeconnect" / "conversations" / f"with-{email_to_repo_name(our_email)}"
+    peer_conv_dir = peer_context_dir / "claudeconnect" / f"with-{email_to_repo_name(our_email)}"
     peer_conv_dir.mkdir(parents=True, exist_ok=True)
     peer_transcript_path = peer_conv_dir / transcript_filename
     peer_transcript_path.write_text(transcript)
@@ -564,6 +564,6 @@ async def run_dual_session(
         print(f"  Committed to {peer_email}'s repo")
     except SvnError as e:
         print(f"  Warning: Failed to commit to peer's repo: {e}")
-        print(f"  (This is expected if you don't have write access to their conversations folder)")
+        print(f"  (This is expected if you don't have write access to their with-{email_to_repo_name(our_email)} folder)")
 
     return True, str(our_transcript_path)
