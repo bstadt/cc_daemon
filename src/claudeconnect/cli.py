@@ -6,6 +6,7 @@ Main entry point for the claudeconnect command.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import shutil
 import subprocess
 import sys
@@ -14,6 +15,18 @@ from pathlib import Path
 
 import click
 import httpx
+
+# ANSI color codes - matching Claude Code's aesthetic
+CORAL = '\033[38;5;209m'      # Coral/salmon matching Claude Code
+LIME = '\033[38;5;114m'       # Muted lime green for friend Claude
+WHITE = '\033[97m'            # Bright white for main text
+BOLD = '\033[1m'              # Bold text
+DIM = '\033[2m'               # Dim for secondary text
+BLACK = '\033[30m'            # Black for eyes
+BLACK_BG = '\033[40m'         # Black background for transparency
+YELLOW = '\033[38;5;228m'     # Soft yellow for sparkles
+RESET = '\033[0m'
+CLEAR = '\033[2J\033[H'       # Clear screen and move cursor to top
 
 from .auth import login as do_login, ensure_valid_token, decode_jwt_payload, refresh_token
 from .config import (
@@ -27,6 +40,177 @@ from .sync import SyncLoop, sync_once
 
 
 SERVER_URL = "https://v2.claudeconnect.io"
+
+
+def display_startup_banner(context_dir: Path, email: str, clear_screen: bool = True) -> None:
+    """Display ClaudeConnect startup banner with two Claude creatures and status."""
+    # Clear screen for clean display (optional)
+    if clear_screen:
+        print(CLEAR, end='')
+
+    # Two Claude creatures side by side - coral (you) and lime (friend)
+    print()
+    print(f" {CORAL}▐{BLACK_BG}▛███▜{RESET}{CORAL}▌{RESET} {YELLOW}✦{RESET} {LIME}▐{BLACK_BG}▛███▜{RESET}{LIME}▌{RESET}   {WHITE}{BOLD}Claude Connect{RESET}")
+    print(f"{CORAL}▝▜█████▛▘{RESET} {LIME}▝▜█████▛▘{RESET}  {DIM}{email}{RESET}")
+    print(f"  {CORAL}▘▘ ▝▝{RESET}     {LIME}▘▘ ▝▝{RESET}")
+    print()
+
+    # Check for friend requests and conversations
+    friend_requests_dir = context_dir / "claudeconnect" / "friend_requests"
+    conversations_dir = context_dir / "claudeconnect" / "conversations"
+
+    # Collect friend request notifications (pending requests + accepted notifications)
+    friend_notifications = []  # List of (display_text, is_accepted)
+
+    if friend_requests_dir.exists():
+        for f in friend_requests_dir.glob("*.md"):
+            try:
+                content = f.read_text()
+                # Check for pending requests
+                if "status: pending" in content:
+                    for line in content.split("\n"):
+                        if line.startswith("from:"):
+                            sender = line.split(":", 1)[1].strip()
+                            friend_notifications.append((sender, False))
+                            break
+            except Exception:
+                pass
+
+    # Check conversations for accepted friend requests
+    accepted_friends = []
+    if conversations_dir.exists():
+        for conv_dir in conversations_dir.iterdir():
+            if conv_dir.is_dir() and conv_dir.name.startswith("with-"):
+                # Look for friend-accepted.md file
+                accepted_file = conv_dir / "friend-accepted.md"
+                if accepted_file.exists():
+                    try:
+                        content = accepted_file.read_text()
+                        if "friend-request-accepted" in content.lower():
+                            # Extract email from **From**: line
+                            for line in content.split("\n"):
+                                if "**From**:" in line or "From:" in line:
+                                    email_part = line.split(":", 1)[1].strip()
+                                    # Remove markdown bold if present
+                                    email_part = email_part.replace("**", "").strip()
+                                    accepted_friends.append(email_part)
+                                    break
+                    except Exception:
+                        pass
+
+    # Add accepted friends to notifications
+    for email_addr in accepted_friends:
+        # Extract username from email for shorter display
+        username = email_addr.split("@")[0] if "@" in email_addr else email_addr
+        friend_notifications.append((f"{username} accepted your request!", True))
+
+    # Get recent conversations (last 30 days) with topic preview
+    recent_convos = []  # List of (peer_email, topic_preview, mtime)
+    if conversations_dir.exists():
+        month_ago = datetime.datetime.now().timestamp() - (30 * 24 * 60 * 60)
+        for conv_dir in conversations_dir.iterdir():
+            if conv_dir.is_dir() and conv_dir.name.startswith("with-"):
+                peer_name = conv_dir.name[5:]  # Remove "with-" prefix
+                # Convert back to email format (replace - with . and @)
+                peer_email = peer_name.replace("-", ".")
+                # Fix common email pattern: user.example.com -> user@example.com
+                if peer_email.count(".") >= 2:
+                    parts = peer_email.rsplit(".", 2)
+                    if len(parts) == 3:
+                        peer_email = f"{parts[0]}@{parts[1]}.{parts[2]}"
+
+                latest_file = None
+                latest_time = 0
+                for f in conv_dir.glob("*.md"):
+                    # Skip friend-accepted.md files for conversation listing
+                    if f.name == "friend-accepted.md":
+                        continue
+                    try:
+                        mtime = f.stat().st_mtime
+                        if mtime > latest_time:
+                            latest_time = mtime
+                            latest_file = f
+                    except Exception:
+                        pass
+
+                if latest_file and latest_time > month_ago:
+                    # Extract topic from file
+                    topic = ""
+                    try:
+                        content = latest_file.read_text()
+                        for line in content.split("\n"):
+                            if line.startswith("**Topic**:"):
+                                topic = line.split(":", 1)[1].strip()
+                                break
+                    except Exception:
+                        pass
+                    recent_convos.append((peer_email, topic, latest_time))
+
+        # Sort by most recent
+        recent_convos.sort(key=lambda x: x[2], reverse=True)
+        recent_convos = recent_convos[:5]  # Limit to 5
+
+    # Display boxes side by side if there's activity
+    if friend_notifications or recent_convos:
+        W = 34  # Total box width
+
+        def truncate_with_ellipsis(text: str, max_len: int) -> str:
+            """Truncate text with ellipsis if it exceeds max_len."""
+            if len(text) <= max_len:
+                return text
+            return text[:max_len - 3] + "..."
+
+        def make_box(title: str, items: list[str]) -> list[str]:
+            """Create a box with title and items, exactly W chars wide."""
+            lines = []
+            # Header: ┌─ TITLE ───────┐
+            title_truncated = truncate_with_ellipsis(title, W - 6)
+            dashes = W - 5 - len(title_truncated)
+            lines.append(f"┌─ {title_truncated} " + "─" * dashes + "┐")
+            # Items: │ content      │
+            max_content_len = W - 4  # 2 for "│ " and 2 for " │"
+            for item in items:
+                content = truncate_with_ellipsis(item, max_content_len)
+                padding = max_content_len - len(content)
+                lines.append(f"│ {content}" + " " * padding + " │")
+            # Footer
+            lines.append("└" + "─" * (W - 2) + "┘")
+            return lines
+
+        fr_lines = []
+        if friend_notifications:
+            items = [f"∙ {notif[0]}" for notif in friend_notifications[:5]]
+            total = len(friend_notifications)
+            fr_lines = make_box(f"FRIEND REQUESTS ({total})", items)
+
+        conv_lines = []
+        if recent_convos:
+            items = []
+            for peer_email, topic, _ in recent_convos:
+                # Show email + topic preview
+                username = peer_email.split("@")[0] if "@" in peer_email else peer_email
+                if topic:
+                    items.append(f"∙ {username}: {topic}")
+                else:
+                    items.append(f"∙ {username}")
+            conv_lines = make_box("CONVERSATIONS", items)
+
+        # Print side by side or single
+        if fr_lines and conv_lines:
+            max_lines = max(len(fr_lines), len(conv_lines))
+            empty_space = " " * W
+            for i in range(max_lines):
+                left = fr_lines[i] if i < len(fr_lines) else empty_space
+                right = conv_lines[i] if i < len(conv_lines) else empty_space
+                print(f" {left}  {right}")
+        elif fr_lines:
+            for line in fr_lines:
+                print(f" {line}")
+        elif conv_lines:
+            for line in conv_lines:
+                print(f" {line}")
+
+        print()
 
 
 def get_svn_token(id_token: str) -> str | None:
@@ -599,6 +783,27 @@ def status():
 
 
 @cli.command()
+def dashboard():
+    """Show ClaudeConnect dashboard with friend requests and conversations."""
+    tokens = get_valid_token()
+    if not tokens:
+        print("Not logged in. Run `claudeconnect login` first.")
+        sys.exit(1)
+
+    config = get_config()
+    if not config.context_dir:
+        print("No context directory set. Run `claudeconnect init` first.")
+        sys.exit(1)
+
+    context_dir = Path(config.context_dir)
+    if not context_dir.exists():
+        print(f"Context directory not found: {context_dir}")
+        sys.exit(1)
+
+    display_startup_banner(context_dir, tokens.email, clear_screen=False)
+
+
+@cli.command()
 def start():
     """Start Claude with sync enabled (default command)."""
     # Check login and token validity
@@ -665,9 +870,12 @@ def start():
     print("\nSyncing...")
     sync_once(context_dir, repo_url, svn_token, tokens.email)
 
+    # Display startup banner with friend requests and conversations
+    display_startup_banner(context_dir, tokens.email)
+
     # Start sync loop and Claude
-    print("\nStarting Claude Code with sync enabled...")
-    print("(Sync runs every 30 seconds in background)\n")
+    print("Starting Claude Code with sync enabled...")
+    print(f"{DIM}(Sync runs every 30 seconds in background){RESET}\n")
 
     # Run async main
     asyncio.run(run_with_sync(context_dir, repo_url, svn_token, tokens.email))
