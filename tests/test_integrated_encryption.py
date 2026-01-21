@@ -329,7 +329,7 @@ class TestIntegratedEncryptionFlow:
 
         # Alice sends friend request to Bob
         result = run_cli(
-            ["friend", bob_email, "--message", "Hey Bob, let's connect!"],
+            ["friend", bob_email],
             env=alice_env,
             cwd=str(alice_dir),
         )
@@ -380,7 +380,7 @@ class TestIntegratedEncryptionFlow:
 
         # Alice sends friend request to Bob
         result = run_cli(
-            ["friend", bob_email, "--message", "Let's be friends!"],
+            ["friend", bob_email],
             env=alice_env,
             cwd=str(alice_dir),
         )

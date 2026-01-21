@@ -1489,8 +1489,7 @@ def add_friend_to_authz(authz_path: Path, my_email: str, peer_email: str) -> boo
 
 @cli.command()
 @click.argument("peer_email")
-@click.option("--message", "-m", default="Hi! I'd like to connect our Claude instances.", help="Message to include")
-def friend(peer_email: str, message: str):
+def friend(peer_email: str):
     """Send a friend request to another user.
 
     This command:
@@ -1550,7 +1549,7 @@ def friend(peer_email: str, message: str):
     # Step 4: Send friend request via API (include public key if available)
     print("  Sending friend request...")
     try:
-        request_data = {"to": peer_email, "message": message}
+        request_data = {"to": peer_email}
         if my_public_key_hex:
             request_data["public_key"] = my_public_key_hex
 
