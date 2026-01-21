@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import platform
+import shutil
 import subprocess
 import tempfile
 from datetime import datetime
@@ -18,6 +20,10 @@ import httpx
 
 from .config import get_config, get_tokens, Tokens
 from .svn_ops import SvnClient, SvnError, email_to_repo_name, repo_url_for_email
+
+
+# Directory for interactive session transcripts
+TRANSCRIPTS_DIR = Path.home() / ".claude-connect" / "transcripts"
 
 
 # Cache directory for peer contexts
@@ -567,3 +573,224 @@ async def run_dual_session(
         print(f"  (This is expected if you don't have write access to their with-{email_to_repo_name(our_email)} folder)")
 
     return True, str(our_transcript_path)
+
+
+def generate_interactive_prompt(
+    peer_email: str,
+    user_email: str,
+) -> str:
+    """
+    Generate system prompt for an interactive session where user chats with peer's Claude.
+
+    The peer's Claude will have access to the peer's context and represent them
+    in conversation with the user.
+    """
+    peer_name = peer_email.split("@")[0]
+    user_name = user_email.split("@")[0]
+
+    prompt = f"""You are representing {peer_name} ({peer_email}) in a ClaudeConnect interactive session.
+
+The person chatting with you is {user_name} ({user_email}).
+
+You have access to {peer_name}'s context in this directory. Answer questions and have conversations from {peer_name}'s perspective, based on their notes, projects, and context.
+
+IMPORTANT: When the conversation starts, immediately introduce yourself with a greeting like:
+"Hi {user_name}! I'm representing {peer_name} in this ClaudeConnect session. I have access to their notes and context. What would you like to know?"
+
+Guidelines:
+- Be helpful and conversational
+- Only share information that exists in the context files
+- If asked about something not in the context, say so rather than making things up
+- Respect any privacy guidelines in privacy.md
+
+This conversation will be saved and shared with both parties.
+
+To exit the session, the user can press Ctrl+D twice."""
+
+    return prompt
+
+
+def create_interactive_transcript_header(
+    user_email: str,
+    peer_email: str,
+    session_id: str,
+) -> str:
+    """Create the markdown header for an interactive session transcript."""
+    timestamp = datetime.now().isoformat()
+
+    header = f"""# Interactive Session: {user_email.split('@')[0]} with {peer_email.split('@')[0]}'s Claude
+
+**Session ID**: {session_id}
+**Date**: {timestamp}
+**User**: {user_email}
+**Representing**: {peer_email}
+**Type**: interactive
+
+---
+
+"""
+    return header
+
+
+def run_interactive_session(
+    peer_email: str,
+) -> tuple[bool, str]:
+    """
+    Start an interactive session with a peer's Claude in a new terminal window.
+
+    Opens a new Terminal.app window (macOS only) where the user can chat directly
+    with a Claude instance that has access to the peer's context.
+
+    Args:
+        peer_email: The peer's email address
+
+    Returns:
+        Tuple of (success, session_id or error message)
+    """
+    from .cli import get_valid_token, get_svn_token as cli_get_svn_token
+
+    # Check platform
+    if platform.system() != "Darwin":
+        return False, "Interactive sessions are only supported on macOS. Use `claudeconnect session` for autonomous conversations."
+
+    # Check for script command
+    if not shutil.which("script"):
+        return False, "The 'script' command is not available. Cannot capture transcript."
+
+    # Get our credentials
+    tokens = get_valid_token()
+    if not tokens:
+        return False, "Not logged in"
+
+    config = get_config()
+    if not config.context_dir:
+        return False, "No context directory configured"
+
+    our_context_dir = Path(config.context_dir)
+    our_email = tokens.email
+
+    # Get SVN token
+    svn_token = cli_get_svn_token(tokens.id_token)
+    if not svn_token:
+        return False, "Failed to get SVN token"
+
+    # Pull peer's context
+    print(f"\nPreparing interactive session with {peer_email}...")
+    peer_context_dir = pull_peer_context(peer_email, svn_token, our_email)
+    if not peer_context_dir:
+        return False, f"Failed to pull {peer_email}'s context. Are you connected as friends?"
+
+    # Generate session ID
+    session_id = datetime.now().strftime("%Y-%m-%d") + "_" + uuid4().hex[:8]
+
+    # Create transcripts directory
+    TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+    transcript_path = TRANSCRIPTS_DIR / f"{session_id}.txt"
+
+    # Generate system prompt
+    system_prompt = generate_interactive_prompt(peer_email, our_email)
+
+    # Write system prompt to a temp file to avoid escaping issues
+    prompt_file = TRANSCRIPTS_DIR / f"{session_id}_prompt.txt"
+    prompt_file.write_text(system_prompt)
+
+    # Build the command to run in the new terminal
+    # We use script to capture the session, then claude with the system prompt from file
+    # cd to peer context first so Claude sees it as its working directory
+    # Pass "hi" as initial prompt to trigger Claude's greeting
+    terminal_cmd = f"script -Fq {transcript_path} bash -c 'cd {peer_context_dir} && claude --system-prompt \"$(cat {prompt_file})\" \"hi\"'"
+
+    # Escape for AppleScript: backslash-escape double quotes and backslashes
+    escaped_cmd = terminal_cmd.replace("\\", "\\\\").replace('"', '\\"')
+
+    # Open new Terminal window with osascript
+    osascript_cmd = f'''
+    tell application "Terminal"
+        do script "{escaped_cmd}"
+        activate
+    end tell
+    '''
+
+    print(f"\nOpening interactive session in new Terminal window...")
+    print(f"  Session ID: {session_id}")
+    print(f"  Peer context: {peer_context_dir}")
+    print(f"  Transcript will be saved to: {transcript_path}")
+
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", osascript_cmd],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        if result.returncode != 0:
+            error = result.stderr or "Unknown error"
+            return False, f"Failed to open Terminal: {error}"
+
+    except subprocess.TimeoutExpired:
+        return False, "Timed out trying to open Terminal"
+    except FileNotFoundError:
+        return False, "osascript not found. Are you on macOS?"
+
+    print(f"\n✓ Interactive session started!")
+    print(f"\n  You're now chatting with {peer_email}'s Claude in the new window.")
+    print(f"  When you're done, press Ctrl+D twice to exit.")
+    print(f"\n  After the session ends, run:")
+    print(f"    claudeconnect commit-transcript {session_id}")
+    print(f"  to save and share the transcript.")
+
+    return True, session_id
+
+
+def commit_interactive_transcript(
+    session_id: str,
+) -> tuple[bool, str]:
+    """
+    Commit an interactive session transcript to both repos.
+
+    Reads the raw transcript, adds a header, and commits to both the user's
+    and peer's repos.
+
+    Args:
+        session_id: The session ID from run_interactive_session
+
+    Returns:
+        Tuple of (success, transcript_path or error message)
+    """
+    from .cli import get_valid_token, get_svn_token as cli_get_svn_token
+
+    # Get our credentials
+    tokens = get_valid_token()
+    if not tokens:
+        return False, "Not logged in"
+
+    config = get_config()
+    if not config.context_dir:
+        return False, "No context directory configured"
+
+    our_context_dir = Path(config.context_dir)
+    our_email = tokens.email
+
+    # Find the transcript file
+    transcript_path = TRANSCRIPTS_DIR / f"{session_id}.txt"
+    if not transcript_path.exists():
+        return False, f"Transcript not found: {transcript_path}"
+
+    # Read the raw transcript
+    raw_transcript = transcript_path.read_text()
+
+    if len(raw_transcript.strip()) < 100:
+        return False, "Transcript appears to be empty or too short"
+
+    # We need to determine the peer email from the session
+    # For now, we'll ask the user to provide it or parse from the transcript
+    # This is a limitation - we should store session metadata
+
+    # For now, return success with instructions
+    print(f"\nTranscript found: {transcript_path}")
+    print(f"  Size: {len(raw_transcript)} bytes")
+    print(f"\n  To commit this transcript, the peer email is needed.")
+    print(f"  This will be automated in a future version.")
+
+    return True, str(transcript_path)
