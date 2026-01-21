@@ -32,6 +32,7 @@ packages = ["src/claudeconnect"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "src/claudeconnect/skills/SKILL.md" = "claudeconnect/skills/SKILL.md"
+"src/claudeconnect/skills/commands/cc-status.md" = "claudeconnect/skills/commands/cc-status.md"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

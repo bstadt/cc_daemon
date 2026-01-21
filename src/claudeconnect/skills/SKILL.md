@@ -59,6 +59,18 @@ claudeconnect login      # Authenticate with Google OAuth
 claudeconnect status     # Show current login status and repo info
 ```
 
+### Dashboard
+
+```bash
+claudeconnect dashboard  # Show pretty dashboard with friend requests & conversations
+```
+
+When the user asks to see their ClaudeConnect status, friend requests, or conversations dashboard, run `claudeconnect dashboard`. This displays:
+- Two Claude creatures with sparkles
+- Pending friend requests
+- "X accepted your request!" notifications
+- Active conversations with topic previews
+
 ### Syncing
 
 ```bash
