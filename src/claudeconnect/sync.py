@@ -156,9 +156,9 @@ class SyncLoop:
             None, _detect_context_changes, self.context_dir, self.shadow_dir
         )
 
-        if changed_files['modified'] or changed_files['added'] or changed_files['deleted']:
+        if changed_files['modified'] or changed_files['added']:
             logger.info(f"Context changes: {len(changed_files['modified'])} modified, "
-                       f"{len(changed_files['added'])} added, {len(changed_files['deleted'])} deleted")
+                       f"{len(changed_files['added'])} added")
 
             # Copy changed/added files from context to shadow (encrypting)
             await loop.run_in_executor(
@@ -171,16 +171,7 @@ class SyncLoop:
             for path in changed_files['added']:
                 await loop.run_in_executor(None, self.svn.add, path, True)
 
-            # Handle deleted files in shadow
-            for path in changed_files['deleted']:
-                shadow_path = self.shadow_dir / path
-                if shadow_path.exists():
-                    shadow_path.unlink()
-
-            # Delete missing files from SVN
-            deleted = await loop.run_in_executor(None, self.svn.delete_missing)
-            if deleted:
-                logger.info(f"Marked {len(deleted)} files for deletion in SVN")
+            # NOTE: No auto-deletion - users must explicitly delete via skill
 
             # Commit changes
             try:
@@ -263,7 +254,7 @@ def sync_once(
         changed_files = _detect_context_changes(context_dir, shadow_dir)
 
         added_count = 0
-        if changed_files['modified'] or changed_files['added'] or changed_files['deleted']:
+        if changed_files['modified'] or changed_files['added']:
             # Copy changed/added files from context to shadow (encrypting)
             _copy_to_shadow(
                 context_dir, shadow_dir,
@@ -279,20 +270,11 @@ def sync_once(
             if added_count:
                 print(f"  Added {added_count} files")
 
-            # Handle deleted files
-            for path in changed_files['deleted']:
-                shadow_path = shadow_dir / path
-                if shadow_path.exists():
-                    shadow_path.unlink()
-
-            # Delete missing from SVN
-            deleted = svn.delete_missing()
-            if deleted:
-                print(f"  Deleted {len(deleted)} files")
+            # NOTE: No auto-deletion - users must explicitly delete via skill
 
             # Commit
             status = svn.status()
-            if status.has_changes or added_count or deleted:
+            if status.has_changes or added_count:
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 rev = svn.commit(f"Auto-sync {timestamp}")
                 if rev:
@@ -309,17 +291,18 @@ def _detect_context_changes(context_dir: Path, shadow_dir: Path) -> dict:
     """
     Detect what files changed in context_dir compared to shadow_dir.
 
+    NOTE: Sync never auto-deletes files. Deletions require explicit user action
+    via a delete skill that runs `svn delete`. This prevents accidental data loss.
+
     Returns:
-        Dict with 'modified', 'added', 'deleted' lists of relative paths
+        Dict with 'modified', 'added' lists of relative paths (no 'deleted')
     """
     changes = {'modified': [], 'added': [], 'deleted': []}
 
     # Find all markdown files in context dir
-    context_files = set()
     for path in context_dir.rglob("*.md"):
         if ".svn" not in path.parts:
             rel_path = path.relative_to(context_dir)
-            context_files.add(rel_path)
 
             shadow_path = shadow_dir / rel_path
             if shadow_path.exists():
@@ -339,13 +322,8 @@ def _detect_context_changes(context_dir: Path, shadow_dir: Path) -> dict:
         else:
             changes['added'].append(Path("authz"))
 
-    # Find deleted files (in shadow but not in context)
-    # Exclude claudeconnect/ folder - that's managed by the server, not the user
-    for path in shadow_dir.rglob("*.md"):
-        if ".svn" not in path.parts and "claudeconnect" not in path.parts:
-            rel_path = path.relative_to(shadow_dir)
-            if rel_path not in context_files:
-                changes['deleted'].append(rel_path)
+    # NOTE: No delete detection - sync only adds/updates, never deletes
+    # Users must explicitly delete files via a delete skill
 
     return changes
 
