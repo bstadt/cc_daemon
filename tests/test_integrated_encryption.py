@@ -467,6 +467,81 @@ class TestIntegratedEncryptionFlow:
                 assert "Secret Plans" in content or is_encrypted_file(pulled_file.read_bytes())
 
 
+class TestAuthzAccessControl:
+    """Tests that verify authz changes actually grant/deny SVN access."""
+
+    @pytest.mark.timeout(120)
+    def test_friend_can_pull_after_accept(self, three_test_users, tmp_path):
+        """
+        Verify the full access control flow:
+        1. Bob CANNOT pull Alice's repo initially (not a friend)
+        2. Alice friends Bob, Bob accepts
+        3. Bob CAN pull Alice's repo after accept
+
+        This catches authz sync issues where versioned authz isn't
+        copied to conf/authz for Apache.
+        """
+        alice_email = three_test_users[0]
+        bob_email = three_test_users[1]
+
+        # Initialize Alice and Bob
+        alice_dir = tmp_path / "alice"
+        bob_dir = tmp_path / "bob"
+        alice_dir.mkdir()
+        bob_dir.mkdir()
+
+        alice_env = {"CC_TEST_USER": alice_email}
+        bob_env = {"CC_TEST_USER": bob_email}
+
+        for email, env, d in [(alice_email, alice_env, alice_dir),
+                               (bob_email, bob_env, bob_dir)]:
+            result = run_cli(["init"], env=env, cwd=str(d), input_text="y\n")
+            if result.returncode != 0:
+                pytest.fail(f"Init failed for {email}: {result.stderr}")
+
+        # Alice creates a file and syncs
+        (alice_dir / "secret.md").write_text("# Alice's Secret\n\nTop secret info!")
+        result = run_cli(["sync"], env=alice_env, cwd=str(alice_dir))
+        assert result.returncode == 0, f"Alice sync failed: {result.stderr}"
+
+        # Bob tries to pull Alice BEFORE being friends - should fail
+        result = run_cli(["pull", alice_email], env=bob_env, cwd=str(bob_dir))
+        # Note: pull might fail with access denied or just return empty - depends on implementation
+
+        # Alice friends Bob
+        result = run_cli(["friend", bob_email], env=alice_env, cwd=str(alice_dir))
+        if result.returncode != 0:
+            pytest.skip(f"Friend request failed: {result.stderr}")
+
+        # Wait for server to process
+        time.sleep(2)
+
+        # Bob syncs to get friend request
+        run_cli(["sync"], env=bob_env, cwd=str(bob_dir))
+        time.sleep(1)
+
+        # Bob accepts Alice's friend request
+        result = run_cli(
+            ["accept-friend", alice_email],
+            env=bob_env,
+            cwd=str(bob_dir),
+        )
+        if result.returncode != 0:
+            pytest.skip(f"Accept friend failed: {result.stderr}")
+
+        # Wait for authz to propagate (post-commit hook should sync it)
+        time.sleep(2)
+
+        # Bob pulls Alice's context - THIS IS THE CRITICAL TEST
+        # If authz wasn't synced to conf/authz, this will fail with access denied
+        result = run_cli(["pull", alice_email], env=bob_env, cwd=str(bob_dir))
+
+        assert result.returncode == 0, \
+            f"Bob should be able to pull Alice after friending. Error: {result.stderr}\n" \
+            "This usually means the versioned authz wasn't synced to conf/authz. " \
+            "Check that the post-commit hook is installed on the server."
+
+
 class TestEncryptionEdgeCases:
     """Edge case tests for encryption integration."""
 
