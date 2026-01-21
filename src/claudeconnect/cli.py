@@ -55,6 +55,20 @@ from .scanner import scan_directory
 from .svn_ops import SvnClient, SvnError, email_to_repo_name, repo_url_for_email
 from .sync import SyncLoop, sync_once
 
+# Encryption is optional - only available if cryptography is installed
+try:
+    from .encryption import (
+        is_encryption_available,
+        generate_keypair,
+        load_public_key,
+        get_key_fingerprint,
+        save_friend_public_key,
+        load_friend_public_key,
+    )
+    HAS_ENCRYPTION = is_encryption_available()
+except ImportError:
+    HAS_ENCRYPTION = False
+
 
 SERVER_URL = "https://v2.claudeconnect.io"
 
@@ -1130,7 +1144,12 @@ def start():
     asyncio.run(run_with_sync(context_dir, repo_url, svn_token, tokens.email))
 
 
-async def run_with_sync(context_dir: Path, repo_url: str, token: str, email: str):
+async def run_with_sync(
+    context_dir: Path,
+    repo_url: str,
+    token: str,
+    email: str,
+):
     """Run Claude Code with background sync loop."""
     # Start sync loop
     sync_loop = SyncLoop(context_dir, repo_url, token, email, interval=30)
@@ -1161,8 +1180,14 @@ async def run_with_sync(context_dir: Path, repo_url: str, token: str, email: str
 
 
 @cli.command()
-def init():
-    """Initialize current directory as context directory."""
+@click.option("--no-encrypt", is_flag=True, help="Disable client-side encryption")
+def init(no_encrypt: bool):
+    """Initialize current directory as context directory.
+
+    Encryption is enabled by default (X25519 + AES-256-GCM).
+    Use --no-encrypt to disable if you don't need privacy.
+    """
+    encrypt = not no_encrypt
     # Check for mock/dev mode
     mock_dir = get_mock_dir()
     if mock_dir:
@@ -1187,6 +1212,13 @@ def init():
     config = get_config()
     cwd = Path.cwd()
 
+    # Validate encryption requirements
+    if encrypt and not HAS_ENCRYPTION:
+        print("Warning: Encryption requires cryptography package.")
+        print("  Install with: pip install claudeconnect[encryption]")
+        print("  Continuing without encryption...")
+        encrypt = False
+
     if config.context_dir and Path(config.context_dir) != cwd:
         print(f"Warning: Switching context directory")
         print(f"  From: {config.context_dir}")
@@ -1210,10 +1242,28 @@ def init():
         print("Failed to get SVN token")
         sys.exit(1)
 
+    # Set up encryption if requested
+    if encrypt:
+        print("  Setting up encryption...")
+        try:
+            _, public_bytes = generate_keypair()
+            fingerprint = get_key_fingerprint(public_bytes)
+            print(f"  Generated keypair (fingerprint: {fingerprint})")
+        except FileExistsError:
+            # Keys already exist, load them
+            public_bytes = load_public_key()
+            fingerprint = get_key_fingerprint(public_bytes)
+            print(f"  Using existing keypair (fingerprint: {fingerprint})")
+        except Exception as e:
+            print(f"  Error generating keypair: {e}")
+            print("  Continuing without encryption...")
+            encrypt = False
+
     # Initialize
     print(f"\nInitializing: {cwd}")
     if init_context_dir(cwd, repo_url, svn_token, tokens.email):
         config.context_dir = str(cwd)
+        config.encryption_enabled = encrypt
         config.save()
 
         # Install skill for Claude Code
@@ -1232,6 +1282,10 @@ def init():
             print("  You may need to run `claudeconnect init` again or create these manually.")
 
         print("\n✓ Context directory initialized")
+        if encrypt:
+            print("  Encryption: ENABLED (zero-trust)")
+            print(f"  Key fingerprint: {fingerprint}")
+            print("  Your private key is stored at ~/.claude-connect/keys/private.key")
         print(f"  Run `claudeconnect` to start Claude with sync.")
     else:
         sys.exit(1)
@@ -1435,8 +1489,7 @@ def add_friend_to_authz(authz_path: Path, my_email: str, peer_email: str) -> boo
 
 @cli.command()
 @click.argument("peer_email")
-@click.option("--message", "-m", default="Hi! I'd like to connect our Claude instances.", help="Message to include")
-def friend(peer_email: str, message: str):
+def friend(peer_email: str):
     """Send a friend request to another user.
 
     This command:
@@ -1472,7 +1525,18 @@ def friend(peer_email: str, message: str):
 
     add_friend_to_authz(authz_path, my_email, peer_email)
 
-    # Step 2: Sync to commit authz changes
+    # Step 2: Get our public key if encryption is enabled (to include in request)
+    config = get_config()
+    my_public_key_hex = None
+    if config.encryption_enabled and HAS_ENCRYPTION:
+        try:
+            my_public_key = load_public_key()
+            my_public_key_hex = my_public_key.hex()
+            print(f"  Will share your public key with friend request")
+        except FileNotFoundError:
+            print("  Warning: No encryption keys found. Run `claudeconnect init --encrypt` first.")
+
+    # Step 3: Sync to commit authz changes
     svn_token = get_svn_token(tokens.id_token)
     if not svn_token:
         print("Failed to get SVN token")
@@ -1482,13 +1546,17 @@ def friend(peer_email: str, message: str):
     print("  Syncing authz changes...")
     sync_once(context_dir, repo_url, svn_token, my_email)
 
-    # Step 3: Send friend request via API
+    # Step 4: Send friend request via API (include public key if available)
     print("  Sending friend request...")
     try:
+        request_data = {"to": peer_email}
+        if my_public_key_hex:
+            request_data["public_key"] = my_public_key_hex
+
         response = httpx.post(
             f"{SERVER_URL}/api/friend-request",
             headers={"Authorization": f"Bearer {tokens.id_token}"},
-            json={"to": peer_email, "message": message},
+            json=request_data,
             timeout=30,
         )
 
@@ -1559,14 +1627,34 @@ def accept_friend(peer_email: str):
 
     add_friend_to_authz(authz_path, my_email, peer_email)
 
-    # Step 2: Delete the friend request file
+    # Step 2: Extract and save friend's public key if present in request
+    config = get_config()
+    if config.encryption_enabled and HAS_ENCRYPTION:
+        try:
+            # Read friend request to extract public key
+            request_content = request_file.read_text()
+            # Look for public key in the request (format: Public-Key: <hex>)
+            import re
+            key_match = re.search(r'Public-Key:\s*([a-fA-F0-9]{64})', request_content)
+            if key_match:
+                peer_public_key_hex = key_match.group(1)
+                peer_public_key = bytes.fromhex(peer_public_key_hex)
+                save_friend_public_key(peer_email, peer_public_key)
+                fingerprint = get_key_fingerprint(peer_public_key)
+                print(f"  Saved friend's public key (fingerprint: {fingerprint})")
+            else:
+                print("  Note: Friend request did not include public key (encryption won't work)")
+        except Exception as e:
+            print(f"  Warning: Could not process friend's public key: {e}")
+
+    # Step 4: Delete the friend request file
     try:
         request_file.unlink()
         print(f"  Removed friend request file")
     except Exception as e:
         print(f"  Warning: Could not delete request file: {e}")
 
-    # Step 3: Sync to commit authz changes and request deletion
+    # Step 5: Sync to commit authz changes and request deletion
     svn_token = get_svn_token(tokens.id_token)
     if not svn_token:
         print("Failed to get SVN token")

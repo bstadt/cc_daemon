@@ -47,6 +47,8 @@ class Config:
     context_dir: Optional[str] = None
     svn_username: Optional[str] = None
     svn_password: Optional[str] = None
+    encryption_enabled: bool = False  # Whether to encrypt context files
+    # Note: kms_key_id removed - now using client-side X25519 keys at ~/.claude-connect/keys/
 
     def save(self):
         """Save config to disk."""

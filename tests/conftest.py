@@ -26,6 +26,11 @@ def verify_init_structure(context_dir: Path, email: str) -> list[str]:
         └── claudeconnect/
             └── with-claudeconnect-io/      # System messages folder
 
+    Expected encryption keys (encryption is default):
+        ~/.claude-connect/keys/
+        ├── private.key                     # User's private key
+        └── public.key                      # User's public key
+
     Expected authz sections:
         [/]
         owner@email.com = rw
@@ -99,6 +104,13 @@ def verify_init_structure(context_dir: Path, email: str) -> list[str]:
             elif in_system_section and "* = rw" in line:
                 errors.append("with-claudeconnect-io section should NOT be world-writable (* = rw)")
                 break
+
+    # === Encryption Keys (encryption is now default) ===
+    keys_dir = Path.home() / ".claude-connect" / "keys"
+    if not (keys_dir / "private.key").is_file():
+        errors.append("Encryption private key not created at ~/.claude-connect/keys/private.key")
+    if not (keys_dir / "public.key").is_file():
+        errors.append("Encryption public key not created at ~/.claude-connect/keys/public.key")
 
     # === Skill Installation ===
     skill_file = Path.home() / ".claude" / "skills" / "claudeconnect" / "SKILL.md"
