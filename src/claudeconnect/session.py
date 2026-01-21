@@ -765,8 +765,10 @@ def run_interactive_session(
     if not peer_context_dir:
         return False, f"Failed to pull {peer_email}'s context. Are you connected as friends?"
 
-    # Generate session ID
-    session_id = datetime.now().strftime("%Y-%m-%d") + "_" + uuid4().hex[:8]
+    # Generate session ID with peer username and timestamp
+    peer_username = peer_email.split("@")[0]
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    session_id = f"{peer_username}_{timestamp}"
 
     # Create transcripts directory
     TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
