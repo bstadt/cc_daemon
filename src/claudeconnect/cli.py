@@ -1194,24 +1194,24 @@ def start():
         if encrypt:
             print("  Setting up encryption...")
             try:
-                # Generate or load X25519 keypair
+                # Generate or load X25519 keypair (account-scoped)
                 try:
-                    _, public_bytes = generate_keypair()
+                    _, public_bytes = generate_keypair(tokens.email)
                     fingerprint = get_key_fingerprint(public_bytes)
                     print(f"  Generated keypair (fingerprint: {fingerprint})")
                 except FileExistsError:
                     # Keys already exist, load them
-                    public_bytes = load_public_key()
+                    public_bytes = load_public_key(tokens.email)
                     fingerprint = get_key_fingerprint(public_bytes)
                     print(f"  Using existing keypair (fingerprint: {fingerprint})")
 
-                # Generate or load master key
+                # Generate or load master key (account-scoped)
                 try:
-                    generate_master_key()
+                    generate_master_key(tokens.email)
                     print("  Generated master encryption key")
                 except FileExistsError:
                     # Master key already exists
-                    load_master_key()  # Verify it's loadable
+                    load_master_key(tokens.email)  # Verify it's loadable
                     print("  Using existing master key")
 
                 # Convert public key to hex for authz
@@ -1353,24 +1353,24 @@ def init(no_encrypt: bool):
     if encrypt:
         print("  Setting up encryption...")
         try:
-            # Generate or load X25519 keypair
+            # Generate or load X25519 keypair (account-scoped)
             try:
-                _, public_bytes = generate_keypair()
+                _, public_bytes = generate_keypair(tokens.email)
                 fingerprint = get_key_fingerprint(public_bytes)
                 print(f"  Generated keypair (fingerprint: {fingerprint})")
             except FileExistsError:
                 # Keys already exist, load them
-                public_bytes = load_public_key()
+                public_bytes = load_public_key(tokens.email)
                 fingerprint = get_key_fingerprint(public_bytes)
                 print(f"  Using existing keypair (fingerprint: {fingerprint})")
 
-            # Generate or load master key
+            # Generate or load master key (account-scoped)
             try:
-                generate_master_key()
+                generate_master_key(tokens.email)
                 print("  Generated master encryption key")
             except FileExistsError:
                 # Master key already exists
-                load_master_key()  # Verify it's loadable
+                load_master_key(tokens.email)  # Verify it's loadable
                 print("  Using existing master key")
 
             # Convert public key to hex for authz
@@ -1710,14 +1710,14 @@ def friend(peer_email: str):
     my_public_key_hex = None
     if HAS_ENCRYPTION and peer_public_key:
         try:
-            # Load our master key and encrypt it for the peer
-            my_master_key = load_master_key()
+            # Load our master key and encrypt it for the peer (account-scoped)
+            my_master_key = load_master_key(my_email)
             encrypted_blob = encrypt_master_key_for_recipient(my_master_key, peer_public_key)
             encrypted_master_key_hex = encrypted_blob.hex()
             print(f"  Encrypted master key for {peer_email}")
 
             # Also include our public key so they can encrypt for us
-            my_public_key = load_public_key()
+            my_public_key = load_public_key(my_email)
             my_public_key_hex = my_public_key.hex()
         except FileNotFoundError:
             print("  Warning: No encryption keys found. Run `claudeconnect init` to generate keys.")
@@ -1854,8 +1854,8 @@ def accept_friend(peer_email: str):
             if master_key_match:
                 encrypted_master_key_hex = master_key_match.group(1)
                 encrypted_blob = bytes.fromhex(encrypted_master_key_hex)
-                # Decrypt with our private key
-                friend_master_key = decrypt_received_master_key(encrypted_blob)
+                # Decrypt with our private key (account-scoped)
+                friend_master_key = decrypt_received_master_key(encrypted_blob, my_email)
                 save_friend_master_key(peer_email, friend_master_key)
                 print(f"  Decrypted and saved friend's master key - you can now read their files!")
             else:

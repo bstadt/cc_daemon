@@ -54,9 +54,20 @@ PLAINTEXT_FILES = {
 # File extensions to encrypt
 ENCRYPTED_EXTENSIONS = {".md"}
 
-# Default key storage location
-DEFAULT_KEYS_DIR = Path.home() / ".claude-connect" / "keys"
+# Default key storage locations
+# Keys are account-scoped: ~/.claude-connect/keys/<email>/
+DEFAULT_KEYS_BASE = Path.home() / ".claude-connect" / "keys"
 DEFAULT_FRIENDS_DIR = Path.home() / ".claude-connect" / "friends"
+
+
+def _sanitize_email(email: str) -> str:
+    """Sanitize email for use in filesystem paths."""
+    return email.lower().replace("@", "-").replace(".", "-")
+
+
+def get_keys_dir(email: str) -> Path:
+    """Get account-scoped keys directory for an email."""
+    return DEFAULT_KEYS_BASE / _sanitize_email(email)
 
 # Master key encryption format (v2)
 MASTER_KEY_FORMAT_VERSION = 2
@@ -87,12 +98,13 @@ def _ensure_crypto():
 # Key Management
 # =============================================================================
 
-def generate_keypair(keys_dir: Optional[Path] = None) -> tuple[bytes, bytes]:
+def generate_keypair(email: str, keys_dir: Optional[Path] = None) -> tuple[bytes, bytes]:
     """
     Generate a new X25519 keypair and save to disk.
 
     Args:
-        keys_dir: Directory to store keys (default: ~/.claude-connect/keys/)
+        email: User's email address (for account-scoped key storage)
+        keys_dir: Override directory to store keys (default: ~/.claude-connect/keys/<email>/)
 
     Returns:
         Tuple of (private_key_bytes, public_key_bytes)
@@ -103,7 +115,7 @@ def generate_keypair(keys_dir: Optional[Path] = None) -> tuple[bytes, bytes]:
     """
     _ensure_crypto()
 
-    keys_dir = keys_dir or DEFAULT_KEYS_DIR
+    keys_dir = keys_dir or get_keys_dir(email)
     keys_dir.mkdir(parents=True, exist_ok=True)
 
     private_path = keys_dir / "private.key"
@@ -137,12 +149,13 @@ def generate_keypair(keys_dir: Optional[Path] = None) -> tuple[bytes, bytes]:
     return private_bytes, public_bytes
 
 
-def load_private_key(keys_dir: Optional[Path] = None) -> X25519PrivateKey:
+def load_private_key(email: str, keys_dir: Optional[Path] = None) -> X25519PrivateKey:
     """
     Load the user's private key from disk.
 
     Args:
-        keys_dir: Directory containing keys
+        email: User's email address (for account-scoped key storage)
+        keys_dir: Override directory containing keys
 
     Returns:
         X25519PrivateKey object
@@ -153,7 +166,7 @@ def load_private_key(keys_dir: Optional[Path] = None) -> X25519PrivateKey:
     """
     _ensure_crypto()
 
-    keys_dir = keys_dir or DEFAULT_KEYS_DIR
+    keys_dir = keys_dir or get_keys_dir(email)
     private_path = keys_dir / "private.key"
 
     if not private_path.exists():
@@ -166,12 +179,13 @@ def load_private_key(keys_dir: Optional[Path] = None) -> X25519PrivateKey:
     return X25519PrivateKey.from_private_bytes(private_bytes)
 
 
-def load_public_key(keys_dir: Optional[Path] = None) -> bytes:
+def load_public_key(email: str, keys_dir: Optional[Path] = None) -> bytes:
     """
     Load the user's public key bytes from disk.
 
     Args:
-        keys_dir: Directory containing keys
+        email: User's email address (for account-scoped key storage)
+        keys_dir: Override directory containing keys
 
     Returns:
         Raw public key bytes (32 bytes)
@@ -179,7 +193,7 @@ def load_public_key(keys_dir: Optional[Path] = None) -> bytes:
     Raises:
         FileNotFoundError: If public key doesn't exist
     """
-    keys_dir = keys_dir or DEFAULT_KEYS_DIR
+    keys_dir = keys_dir or get_keys_dir(email)
     public_path = keys_dir / "public.key"
 
     if not public_path.exists():
@@ -209,7 +223,7 @@ def get_key_fingerprint(public_key_bytes: bytes) -> str:
 # Master Key Management (v2 - single key per user)
 # =============================================================================
 
-def generate_master_key(keys_dir: Optional[Path] = None) -> bytes:
+def generate_master_key(email: str, keys_dir: Optional[Path] = None) -> bytes:
     """
     Generate and save a new master AES key.
 
@@ -217,7 +231,8 @@ def generate_master_key(keys_dir: Optional[Path] = None) -> bytes:
     Friends receive this key (encrypted for them) to decrypt your files.
 
     Args:
-        keys_dir: Directory to store the key
+        email: User's email address (for account-scoped key storage)
+        keys_dir: Override directory to store the key
 
     Returns:
         The generated 32-byte master key
@@ -225,7 +240,7 @@ def generate_master_key(keys_dir: Optional[Path] = None) -> bytes:
     Raises:
         FileExistsError: If master key already exists
     """
-    keys_dir = keys_dir or DEFAULT_KEYS_DIR
+    keys_dir = keys_dir or get_keys_dir(email)
     keys_dir.mkdir(parents=True, exist_ok=True)
 
     master_path = keys_dir / "master.key"
@@ -242,12 +257,13 @@ def generate_master_key(keys_dir: Optional[Path] = None) -> bytes:
     return master_key
 
 
-def load_master_key(keys_dir: Optional[Path] = None) -> bytes:
+def load_master_key(email: str, keys_dir: Optional[Path] = None) -> bytes:
     """
     Load the user's master AES key from disk.
 
     Args:
-        keys_dir: Directory containing the key
+        email: User's email address (for account-scoped key storage)
+        keys_dir: Override directory containing the key
 
     Returns:
         32-byte master key
@@ -255,7 +271,7 @@ def load_master_key(keys_dir: Optional[Path] = None) -> bytes:
     Raises:
         FileNotFoundError: If master key doesn't exist
     """
-    keys_dir = keys_dir or DEFAULT_KEYS_DIR
+    keys_dir = keys_dir or get_keys_dir(email)
     master_path = keys_dir / "master.key"
 
     if not master_path.exists():
@@ -307,6 +323,7 @@ def encrypt_master_key_for_recipient(
 
 def decrypt_received_master_key(
     encrypted_blob: bytes,
+    email: str,
     keys_dir: Optional[Path] = None,
 ) -> bytes:
     """
@@ -314,7 +331,8 @@ def decrypt_received_master_key(
 
     Args:
         encrypted_blob: 80-byte blob from encrypt_master_key_for_recipient
-        keys_dir: Directory containing our private key
+        email: Our email address (for account-scoped key storage)
+        keys_dir: Override directory containing our private key
 
     Returns:
         Decrypted 32-byte master key
@@ -333,7 +351,7 @@ def decrypt_received_master_key(
     ephemeral_public = encrypted_blob[:X25519_KEY_SIZE]
     encrypted_key = encrypted_blob[X25519_KEY_SIZE:]
 
-    private_key = load_private_key(keys_dir)
+    private_key = load_private_key(email, keys_dir)
 
     return _decrypt_key_for_recipient(encrypted_key, ephemeral_public, private_key)
 
@@ -712,15 +730,19 @@ def encrypt_file(
 def decrypt_file(
     ciphertext: bytes,
     recipient_id: str,
+    email: str,
     keys_dir: Optional[Path] = None,
 ) -> bytes:
     """
-    Decrypt file content using our private key.
+    Decrypt file content using our private key (v1 multi-recipient format).
+
+    NOTE: This is the v1 format. For v2 master key format, use decrypt_file_with_master_key.
 
     Args:
         ciphertext: Encrypted file bytes
         recipient_id: Our recipient ID (email) to find our key blob
-        keys_dir: Directory containing our keys
+        email: User's email address (for account-scoped key storage)
+        keys_dir: Override directory containing our keys
 
     Returns:
         Decrypted plaintext bytes
@@ -731,8 +753,8 @@ def decrypt_file(
     """
     _ensure_crypto()
 
-    # Load our private key
-    private_key = load_private_key(keys_dir)
+    # Load our private key (account-scoped)
+    private_key = load_private_key(email, keys_dir)
 
     # Parse header
     if len(ciphertext) < 5:
@@ -788,10 +810,13 @@ def add_recipient_to_file(
     new_recipient_id: str,
     new_recipient_public_key: bytes,
     our_recipient_id: str,
+    email: str,
     keys_dir: Optional[Path] = None,
 ) -> bytes:
     """
-    Add a new recipient to an already-encrypted file.
+    Add a new recipient to an already-encrypted file (v1 format).
+
+    NOTE: This is the v1 format. For v2, friends receive your master key directly.
 
     This decrypts our copy of the AES key, then re-encrypts it
     for the new recipient. Content is NOT re-encrypted.
@@ -801,7 +826,8 @@ def add_recipient_to_file(
         new_recipient_id: New recipient's ID (email)
         new_recipient_public_key: New recipient's public key
         our_recipient_id: Our recipient ID to find our key
-        keys_dir: Directory containing our keys
+        email: User's email address (for account-scoped key storage)
+        keys_dir: Override directory containing our keys
 
     Returns:
         Updated encrypted file with new recipient
@@ -811,8 +837,8 @@ def add_recipient_to_file(
     """
     _ensure_crypto()
 
-    # Load our private key
-    private_key = load_private_key(keys_dir)
+    # Load our private key (account-scoped)
+    private_key = load_private_key(email, keys_dir)
 
     # Parse header
     if ciphertext[:5] != MAGIC_BYTES:
@@ -870,7 +896,7 @@ def add_recipient_to_file(
     # Actually, let's change the format: store ephemeral key per recipient
     # For v1, we'll just re-encrypt the whole file
     all_recipients = {
-        our_recipient_id: load_public_key(keys_dir),  # us
+        our_recipient_id: load_public_key(email, keys_dir),  # us
         new_recipient_id: new_recipient_public_key,
     }
 
@@ -904,7 +930,7 @@ def add_recipient_to_file(
     # We only have our key and the new person's key
     # We lose other recipients - this is a v1 limitation
     recipients = {
-        our_recipient_id: load_public_key(keys_dir),
+        our_recipient_id: load_public_key(email, keys_dir),
         new_recipient_id: new_recipient_public_key,
     }
 
@@ -917,6 +943,7 @@ def add_recipient_to_file(
 
 def encrypt_file_with_master_key(
     plaintext: bytes,
+    email: str,
     keys_dir: Optional[Path] = None,
 ) -> bytes:
     """
@@ -930,14 +957,15 @@ def encrypt_file_with_master_key(
 
     Args:
         plaintext: Raw file content to encrypt
-        keys_dir: Directory containing our master key
+        email: User's email address (for account-scoped key storage)
+        keys_dir: Override directory containing our master key
 
     Returns:
         Encrypted file bytes
     """
     _ensure_crypto()
 
-    master_key = load_master_key(keys_dir)
+    master_key = load_master_key(email, keys_dir)
 
     # Encrypt content with AES-GCM
     nonce = os.urandom(NONCE_SIZE)
@@ -956,6 +984,7 @@ def encrypt_file_with_master_key(
 
 def decrypt_file_with_master_key(
     ciphertext: bytes,
+    email: str,
     keys_dir: Optional[Path] = None,
 ) -> bytes:
     """
@@ -963,7 +992,8 @@ def decrypt_file_with_master_key(
 
     Args:
         ciphertext: Encrypted file bytes (v2 format)
-        keys_dir: Directory containing our master key
+        email: User's email address (for account-scoped key storage)
+        keys_dir: Override directory containing our master key
 
     Returns:
         Decrypted plaintext bytes
@@ -983,7 +1013,7 @@ def decrypt_file_with_master_key(
     nonce = ciphertext[6:18]
     encrypted_content = ciphertext[18:]
 
-    master_key = load_master_key(keys_dir)
+    master_key = load_master_key(email, keys_dir)
     aesgcm = AESGCM(master_key)
 
     return aesgcm.decrypt(nonce, encrypted_content, None)

@@ -38,7 +38,7 @@ try:
         encrypt_file_with_master_key,
         decrypt_file_with_master_key,
         load_master_key,
-        DEFAULT_KEYS_DIR,
+        get_keys_dir,
         DEFAULT_FRIENDS_DIR,
     )
     HAS_ENCRYPTION = is_encryption_available()
@@ -386,7 +386,7 @@ def _copy_to_shadow(
         if encryption_enabled and HAS_ENCRYPTION:
             if should_encrypt_file(rel_path) and not is_encrypted_file(content):
                 try:
-                    content = encrypt_file_with_master_key(content)
+                    content = encrypt_file_with_master_key(content, email)
                     logger.debug(f"Encrypted {rel_path} for shadow dir")
                 except Exception as e:
                     logger.error(f"Failed to encrypt {rel_path}: {e}")
@@ -435,7 +435,7 @@ def _copy_from_shadow(
         if encryption_enabled and HAS_ENCRYPTION:
             if should_encrypt_file(rel_path) and is_encrypted_file(content):
                 try:
-                    content = decrypt_file_with_master_key(content)
+                    content = decrypt_file_with_master_key(content, email)
                     logger.debug(f"Decrypted {rel_path} for context dir")
                 except Exception as e:
                     logger.warning(f"Could not decrypt {rel_path}: {e}")
