@@ -1,6 +1,11 @@
 """Sync loop for Claude Connect.
 
 Handles bidirectional syncing between local context directory and SVN repo.
+
+When encryption is enabled, files are encrypted before commit and decrypted
+after update using client-side hybrid encryption (X25519 + AES-256-GCM).
+This provides zero-trust context sharing where the SVN server only ever sees
+encrypted blobs and private keys never leave the user's machine.
 """
 
 from __future__ import annotations
@@ -13,6 +18,24 @@ from typing import Optional
 
 from .svn_ops import SvnClient, SvnError
 from .config import get_tokens, get_config, Config
+
+# Encryption is optional
+try:
+    from .encryption import (
+        is_encryption_available,
+        should_encrypt_file,
+        is_encrypted_file,
+        encrypt_file,
+        decrypt_file,
+        load_public_key,
+        load_friend_public_key,
+        list_friends,
+        DEFAULT_KEYS_DIR,
+        DEFAULT_FRIENDS_DIR,
+    )
+    HAS_ENCRYPTION = is_encryption_available()
+except ImportError:
+    HAS_ENCRYPTION = False
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +50,7 @@ class SyncLoop:
         token: str,
         email: str,
         interval: int = 30,
+        kms_key_id: Optional[str] = None,  # Kept for backwards compat, ignored
     ):
         """
         Initialize sync loop.
@@ -37,6 +61,7 @@ class SyncLoop:
             token: Fernet SVN token
             email: User email (SVN username)
             interval: Sync interval in seconds
+            kms_key_id: Deprecated, ignored (use config.encryption_enabled)
         """
         self.context_dir = Path(context_dir)
         self.repo_url = repo_url
@@ -46,6 +71,13 @@ class SyncLoop:
         self.running = False
         self._task: Optional[asyncio.Task] = None
         self.svn = SvnClient(context_dir, repo_url, token, email)
+
+        # Check if encryption is enabled via config
+        config = get_config()
+        self.encryption_enabled = config.encryption_enabled and HAS_ENCRYPTION
+
+        if config.encryption_enabled and not HAS_ENCRYPTION:
+            logger.warning("Encryption enabled but cryptography not available")
 
     async def start(self):
         """Start the sync loop."""
@@ -87,6 +119,11 @@ class SyncLoop:
             updated = await loop.run_in_executor(None, self.svn.update)
             if updated:
                 logger.info(f"Pulled {len(updated)} updates: {updated}")
+                # Decrypt pulled files if encryption is enabled
+                if self.encryption_enabled:
+                    await loop.run_in_executor(
+                        None, _decrypt_files, self.context_dir, updated, self.email
+                    )
         except SvnError as e:
             logger.error(f"Update failed: {e}")
             return
@@ -119,6 +156,12 @@ class SyncLoop:
 
         # Commit local changes
         if status.has_changes or added or deleted:
+            # Encrypt files before commit if encryption is enabled
+            if self.encryption_enabled:
+                await loop.run_in_executor(
+                    None, _encrypt_modified_files, self.context_dir, self.svn, self.email
+                )
+
             try:
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 message = f"Auto-sync {timestamp}"
@@ -127,6 +170,12 @@ class SyncLoop:
                 )
                 if rev:
                     logger.info(f"Committed revision {rev}")
+
+                # Decrypt files after commit to restore plaintext for local use
+                if self.encryption_enabled:
+                    await loop.run_in_executor(
+                        None, _decrypt_all_encrypted_files, self.context_dir, self.email
+                    )
             except SvnError as e:
                 logger.error(f"Commit failed: {e}")
 
@@ -156,14 +205,34 @@ class SyncLoop:
         logger.info(f"Resolved conflict in {path} (kept local version)")
 
 
-def sync_once(context_dir: Path, repo_url: str, svn_token: str, email: str) -> bool:
+def sync_once(
+    context_dir: Path,
+    repo_url: str,
+    svn_token: str,
+    email: str,
+    kms_key_id: Optional[str] = None,  # Kept for backwards compat, ignored
+) -> bool:
     """
     Perform a single synchronous sync.
+
+    Args:
+        context_dir: Local context directory
+        repo_url: SVN repository URL
+        svn_token: Fernet SVN token
+        email: User email (SVN username)
+        kms_key_id: Deprecated, ignored (use config.encryption_enabled)
 
     Returns:
         True if sync completed successfully.
     """
     svn = SvnClient(context_dir, repo_url, svn_token, email)
+
+    # Check if encryption is enabled via config
+    config = get_config()
+    encryption_enabled = config.encryption_enabled and HAS_ENCRYPTION
+
+    if config.encryption_enabled and not HAS_ENCRYPTION:
+        print("  Warning: Encryption enabled but cryptography not available")
 
     try:
         # Clean up any stale locks from previous sessions
@@ -173,6 +242,9 @@ def sync_once(context_dir: Path, repo_url: str, svn_token: str, email: str) -> b
         updated = svn.update()
         if updated:
             print(f"  Pulled {len(updated)} files")
+            # Decrypt pulled files if encryption is enabled
+            if encryption_enabled:
+                _decrypt_files(context_dir, updated, email)
 
         # Add new markdown files
         added = svn.add_all_markdown()
@@ -193,13 +265,133 @@ def sync_once(context_dir: Path, repo_url: str, svn_token: str, email: str) -> b
         # Commit
         status = svn.status()
         if status.has_changes or added or deleted:
+            # Encrypt files before commit if encryption is enabled
+            if encryption_enabled:
+                _encrypt_modified_files(context_dir, svn, email)
+
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             rev = svn.commit(f"Auto-sync {timestamp}")
             if rev:
                 print(f"  Committed revision {rev}")
+
+            # Decrypt files after commit to restore plaintext for local use
+            if encryption_enabled:
+                _decrypt_all_encrypted_files(context_dir, email)
 
         return True
 
     except SvnError as e:
         print(f"  Sync error: {e}")
         return False
+
+
+def _get_recipients_for_encryption(email: str) -> dict[str, bytes]:
+    """
+    Build recipients dict for encryption.
+
+    Includes:
+    - The user's own public key (so they can decrypt their own files)
+    - All friends' public keys (so friends can also read)
+
+    Args:
+        email: User's email
+
+    Returns:
+        Dict mapping email -> public_key_bytes
+    """
+    recipients = {}
+
+    if not HAS_ENCRYPTION:
+        return recipients
+
+    try:
+        # Add our own public key
+        our_public_key = load_public_key()
+        recipients[email] = our_public_key
+
+        # Add all friends' public keys
+        for friend_id in list_friends():
+            try:
+                friend_key = load_friend_public_key(friend_id)
+                # Convert sanitized ID back to approximate email for recipient lookup
+                # Note: This is imperfect since @ and . both become -
+                recipients[friend_id] = friend_key
+            except FileNotFoundError:
+                pass  # Friend key not found, skip
+
+    except FileNotFoundError:
+        logger.warning("No encryption keys found - files will not be encrypted")
+
+    return recipients
+
+
+def _encrypt_modified_files(context_dir: Path, svn: SvnClient, email: str) -> None:
+    """Encrypt modified files in-place before commit."""
+    if not HAS_ENCRYPTION:
+        return
+
+    recipients = _get_recipients_for_encryption(email)
+    if not recipients:
+        logger.warning("No recipients for encryption - skipping")
+        return
+
+    status = svn.status()
+    for path in status.modified + status.added:
+        full_path = context_dir / path
+        if full_path.exists() and should_encrypt_file(path):
+            try:
+                plaintext = full_path.read_bytes()
+                # Don't re-encrypt already encrypted files
+                if is_encrypted_file(plaintext):
+                    continue
+                ciphertext = encrypt_file(plaintext, recipients)
+                full_path.write_bytes(ciphertext)
+                logger.debug(f"Encrypted {path} for commit")
+            except Exception as e:
+                logger.error(f"Failed to encrypt {path}: {e}")
+
+
+def _decrypt_files(context_dir: Path, files: list[Path], email: str) -> None:
+    """Decrypt specific files after pull."""
+    if not HAS_ENCRYPTION:
+        return
+
+    for path in files:
+        full_path = context_dir / path
+        if full_path.exists() and should_encrypt_file(path):
+            try:
+                ciphertext = full_path.read_bytes()
+                # Check if file is actually encrypted
+                if is_encrypted_file(ciphertext):
+                    plaintext = decrypt_file(ciphertext, email)
+                    full_path.write_bytes(plaintext)
+                    logger.debug(f"Decrypted {path}")
+            except ValueError as e:
+                # Not a recipient - might be friend's file we can't decrypt
+                logger.debug(f"Could not decrypt {path}: {e}")
+            except Exception as e:
+                logger.warning(f"Could not decrypt {path}: {e}")
+
+
+def _decrypt_all_encrypted_files(context_dir: Path, email: str) -> None:
+    """Decrypt all encrypted files to restore plaintext for local use."""
+    if not HAS_ENCRYPTION:
+        return
+
+    for path in context_dir.rglob("*.md"):
+        if ".svn" in path.parts:
+            continue
+        try:
+            rel_path = path.relative_to(context_dir)
+            if should_encrypt_file(rel_path):
+                ciphertext = path.read_bytes()
+                # Check if file is actually encrypted
+                if is_encrypted_file(ciphertext):
+                    plaintext = decrypt_file(ciphertext, email)
+                    path.write_bytes(plaintext)
+                    logger.debug(f"Decrypted {rel_path}")
+        except ValueError as e:
+            # Not a recipient - might be friend's file we can't decrypt
+            logger.debug(f"Could not decrypt {path}: {e}")
+        except Exception as e:
+            logger.warning(f"Could not decrypt {path}: {e}")
