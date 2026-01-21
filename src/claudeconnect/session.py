@@ -21,6 +21,18 @@ import httpx
 from .config import get_config, get_tokens, Tokens
 from .svn_ops import SvnClient, SvnError, email_to_repo_name, repo_url_for_email
 
+# Encryption imports (optional)
+try:
+    from .encryption import (
+        is_encryption_available,
+        is_encrypted_file,
+        decrypt_file_with_friend_master_key,
+        has_friend_master_key,
+    )
+    HAS_ENCRYPTION = is_encryption_available()
+except ImportError:
+    HAS_ENCRYPTION = False
+
 
 # Directory for interactive session transcripts
 TRANSCRIPTS_DIR = Path.home() / ".claude-connect" / "transcripts"
@@ -61,6 +73,41 @@ def lookup_repo(email: str) -> str | None:
         return None
 
 
+def decrypt_peer_context(peer_dir: Path, peer_email: str) -> int:
+    """
+    Decrypt all encrypted files in a peer's context using their master key.
+
+    Args:
+        peer_dir: Path to the peer's checked-out context
+        peer_email: The peer's email (to look up their master key)
+
+    Returns:
+        Number of files decrypted
+    """
+    if not HAS_ENCRYPTION:
+        return 0
+
+    if not has_friend_master_key(peer_email):
+        print(f"  Warning: No master key for {peer_email}, cannot decrypt their files")
+        return 0
+
+    decrypted_count = 0
+    for md_file in peer_dir.rglob("*.md"):
+        if ".svn" in md_file.parts:
+            continue
+
+        try:
+            content = md_file.read_bytes()
+            if is_encrypted_file(content):
+                plaintext = decrypt_file_with_friend_master_key(content, peer_email)
+                md_file.write_bytes(plaintext)
+                decrypted_count += 1
+        except Exception as e:
+            print(f"  Warning: Could not decrypt {md_file.name}: {e}")
+
+    return decrypted_count
+
+
 def pull_peer_context(peer_email: str, svn_token: str, our_email: str) -> Path | None:
     """
     Pull or update a peer's context to local cache.
@@ -89,6 +136,10 @@ def pull_peer_context(peer_email: str, svn_token: str, our_email: str) -> Path |
             updated = svn.update()
             if updated:
                 print(f"  Pulled {len(updated)} updates")
+            # Decrypt any encrypted files
+            decrypted = decrypt_peer_context(peer_dir, peer_email)
+            if decrypted:
+                print(f"  Decrypted {decrypted} files")
             return peer_dir
         except SvnError as e:
             print(f"  Update failed: {e}")
@@ -101,6 +152,10 @@ def pull_peer_context(peer_email: str, svn_token: str, our_email: str) -> Path |
         try:
             svn.checkout()
             print(f"  Checked out to {peer_dir}")
+            # Decrypt any encrypted files
+            decrypted = decrypt_peer_context(peer_dir, peer_email)
+            if decrypted:
+                print(f"  Decrypted {decrypted} files")
             return peer_dir
         except SvnError as e:
             print(f"  Checkout failed: {e}")
