@@ -1531,7 +1531,11 @@ def add_friend_to_authz(authz_path: Path, my_email: str, peer_email: str) -> boo
 
     Grants:
     - Read access to [/] (can read your context)
-    - Write access to [/claudeconnect/with-{my_email}] (can push conversations to you)
+    - Write access to [/claudeconnect/with-{peer_email}] (peer can push conversations to you)
+
+    The with-folder is named after the peer because they are the one writing to it.
+    E.g., if alice@ex.com friends bob@ex.com, alice's authz grants bob write access
+    to [/claudeconnect/with-bob-ex-com] so bob can save transcripts there.
 
     Args:
         authz_path: Path to authz file
@@ -1547,7 +1551,9 @@ def add_friend_to_authz(authz_path: Path, my_email: str, peer_email: str) -> boo
     changes_made = False
 
     my_email_repo_name = email_to_repo_name(my_email)
-    my_with_section = f"[/claudeconnect/with-{my_email_repo_name}]"
+    peer_email_repo_name = email_to_repo_name(peer_email)
+    # The with-folder is named after the PEER - they write conversations TO your repo
+    peer_with_section = f"[/claudeconnect/with-{peer_email_repo_name}]"
 
     # Track which sections we've seen
     current_section = None
@@ -1559,11 +1565,11 @@ def add_friend_to_authz(authz_path: Path, my_email: str, peer_email: str) -> boo
     has_root_access = f"{peer_email} = r" in authz_content or f"{peer_email} = rw" in authz_content
     has_with_access = False
 
-    # Check with-{email} section specifically
+    # Check with-{peer_email} section specifically
     in_with_section = False
     for line in lines:
         if line.strip().startswith('['):
-            in_with_section = my_with_section in line
+            in_with_section = peer_with_section in line
             if in_with_section:
                 with_section_exists = True
         elif in_with_section and peer_email in line:
@@ -1588,8 +1594,8 @@ def add_friend_to_authz(authz_path: Path, my_email: str, peer_email: str) -> boo
             changes_made = True
             print(f"  Added {peer_email} read access to [/]")
 
-        # Add write access after owner's rw line in [/claudeconnect/with-{my_email}] section
-        if (current_section == my_with_section and
+        # Add write access after owner's rw line in [/claudeconnect/with-{peer_email}] section
+        if (current_section == peer_with_section and
             not added_to_with and
             not has_with_access and
             '= rw' in line and
@@ -1597,18 +1603,18 @@ def add_friend_to_authz(authz_path: Path, my_email: str, peer_email: str) -> boo
             new_lines.append(f"{peer_email} = rw")
             added_to_with = True
             changes_made = True
-            print(f"  Added {peer_email} write access to {my_with_section}")
+            print(f"  Added {peer_email} write access to {peer_with_section}")
 
-    # If with-{email} section doesn't exist, add it
+    # If with-{peer_email} section doesn't exist, add it
     if not with_section_exists:
         new_lines.append("")
-        new_lines.append(f"# Friends can write conversations to your with-{my_email_repo_name} folder")
-        new_lines.append(my_with_section)
+        new_lines.append(f"# {peer_email} can write conversations to your with-{peer_email_repo_name} folder")
+        new_lines.append(peer_with_section)
         new_lines.append(f"{my_email} = rw")
         new_lines.append(f"{peer_email} = rw")
         changes_made = True
-        print(f"  Created {my_with_section} section")
-        print(f"  Added {peer_email} write access to {my_with_section}")
+        print(f"  Created {peer_with_section} section")
+        print(f"  Added {peer_email} write access to {peer_with_section}")
     elif not added_to_with and not has_with_access:
         # Section exists but we didn't find owner's line - append to end of section
         final_lines = []
@@ -1616,14 +1622,14 @@ def add_friend_to_authz(authz_path: Path, my_email: str, peer_email: str) -> boo
         added = False
         for line in new_lines:
             final_lines.append(line)
-            if my_with_section in line:
+            if peer_with_section in line:
                 in_with = True
             elif in_with and not added:
                 # Add after first line of section
                 final_lines.append(f"{peer_email} = rw")
                 added = True
                 changes_made = True
-                print(f"  Added {peer_email} write access to {my_with_section}")
+                print(f"  Added {peer_email} write access to {peer_with_section}")
                 in_with = False
         new_lines = final_lines
 
