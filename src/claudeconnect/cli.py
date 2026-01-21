@@ -49,7 +49,7 @@ from .auth import login as do_login, ensure_valid_token, decode_jwt_payload, ref
 from .config import (
     get_config, get_tokens, Config, Tokens, is_logged_in, get_email,
     get_test_user_email, get_test_user_credentials, list_test_users,
-    TestUserCredentials, TEST_USERS_DIR,
+    TestUserCredentials, TEST_USERS_DIR, get_shadow_dir, sanitize_email,
 )
 from .scanner import scan_directory
 from .svn_ops import SvnClient, SvnError, email_to_repo_name, repo_url_for_email
@@ -60,10 +60,16 @@ try:
     from .encryption import (
         is_encryption_available,
         generate_keypair,
+        generate_master_key,
+        load_master_key,
         load_public_key,
         get_key_fingerprint,
         save_friend_public_key,
         load_friend_public_key,
+        encrypt_master_key_for_recipient,
+        decrypt_received_master_key,
+        save_friend_master_key,
+        has_friend_master_key,
     )
     HAS_ENCRYPTION = is_encryption_available()
 except ImportError:
@@ -586,7 +592,11 @@ This file controls what friends can see in your context.
     return True
 
 
-def generate_authz_content(email: str, private_files: list[str] | None = None) -> str:
+def generate_authz_content(
+    email: str,
+    private_files: list[str] | None = None,
+    public_key_hex: str | None = None,
+) -> str:
     """
     Generate initial authz file content for a new user.
 
@@ -595,15 +605,27 @@ def generate_authz_content(email: str, private_files: list[str] | None = None) -
     - [/claudeconnect/with-claudeconnect-io] - owner only (server uses admin bypass for writes)
     - [/claudeconnect/with-{owner-email}] - owner rw, friends get rw when added
 
+    The public key is stamped at the top as a comment, making it globally readable.
+    This allows anyone to encrypt content for this user without needing to friend first.
+
     Args:
         email: User's email (SVN username)
         private_files: List of file paths (relative to repo root) to make private
+        public_key_hex: User's X25519 public key as hex string (64 chars)
 
     Returns:
         authz file content string
     """
     email_repo_name = email_to_repo_name(email)
-    lines = [
+
+    lines = []
+
+    # Stamp public key at the top if provided
+    if public_key_hex:
+        lines.append(f"# Public-Key: {public_key_hex}")
+        lines.append("")
+
+    lines.extend([
         "[/]",
         f"{email} = rw",
         "",
@@ -614,7 +636,7 @@ def generate_authz_content(email: str, private_files: list[str] | None = None) -
         f"# Friends can write conversations to your with-{email_repo_name} folder",
         f"[/claudeconnect/with-{email_repo_name}]",
         f"{email} = rw",
-    ]
+    ])
 
     # Add private file sections - only owner has access
     if private_files:
@@ -663,32 +685,45 @@ def install_skill() -> bool:
         return False
 
 
-def verify_init_structure(context_dir: Path) -> list[str]:
+def verify_init_structure(context_dir: Path, email: str) -> list[str]:
     """
     Verify that init created all expected directories and files per system2.md.
 
-    Expected structure:
-        context_dir/
-        ├── .svn/                           # SVN working copy
+    Shadow directory architecture:
+        ~/.claude-connect/svn-staging/<email>/
+        ├── .svn/                           # SVN working copy (encrypted files)
         ├── authz                           # Access control file
         └── claudeconnect/
             └── with-claudeconnect-io/      # System messages folder
 
+        context_dir/                        # User's plaintext directory
+        ├── authz                           # Access control file (copied from shadow)
+        └── claudeconnect/
+            └── with-claudeconnect-io/      # System messages folder
+        (NO .svn/ folder!)
+
     Args:
         context_dir: The context directory to verify
+        email: User's email (for shadow directory lookup)
 
     Returns:
         List of error messages for missing/invalid components.
         Empty list if everything is correct.
     """
     errors = []
+    shadow_dir = get_shadow_dir(email)
 
-    # Check SVN working copy
-    svn_dir = context_dir / ".svn"
+    # Check shadow directory has SVN working copy
+    svn_dir = shadow_dir / ".svn"
     if not svn_dir.is_dir():
-        errors.append(".svn directory missing - not a valid SVN working copy")
+        errors.append(f"Shadow directory missing .svn - not initialized: {shadow_dir}")
 
-    # Check claudeconnect directory structure
+    # Check context directory does NOT have .svn (shadow architecture)
+    context_svn = context_dir / ".svn"
+    if context_svn.exists():
+        errors.append("Context directory has .svn/ - should use shadow directory instead")
+
+    # Check claudeconnect directory structure in context dir
     cc_dir = context_dir / "claudeconnect"
     if not cc_dir.is_dir():
         errors.append("claudeconnect/ directory missing")
@@ -698,7 +733,7 @@ def verify_init_structure(context_dir: Path) -> list[str]:
         if not system_dir.is_dir():
             errors.append("claudeconnect/with-claudeconnect-io/ directory missing")
 
-    # Check authz file
+    # Check authz file in context dir
     authz_file = context_dir / "authz"
     if not authz_file.is_file():
         errors.append("authz file missing")
@@ -713,59 +748,72 @@ def verify_init_structure(context_dir: Path) -> list[str]:
 
 def ensure_authz_exists(
     context_dir: Path,
+    shadow_dir: Path,
     svn: "SvnClient",
     email: str,
     private_files: list[str] | None = None,
+    public_key_hex: str | None = None,
 ) -> None:
     """
     Ensure authz file and claudeconnect directories exist per system2.md.
 
-    Creates:
-    - authz file with proper permissions
+    Creates in BOTH shadow_dir (for SVN) and context_dir (for user):
+    - authz file with proper permissions (includes public key if provided)
     - claudeconnect/with-claudeconnect-io/ directory (system messages folder)
 
     Note: Conversation directories (claudeconnect/with-{email}/) are created
     on-demand when sessions are started, not during init.
 
     Args:
-        context_dir: The context directory
-        svn: SVN client instance
+        context_dir: The user's plaintext context directory
+        shadow_dir: The SVN working copy directory (encrypted)
+        svn: SVN client instance (operates on shadow_dir)
         email: User's email
         private_files: Optional list of file paths to make private
+        public_key_hex: User's public key as hex string (stamped in authz)
     """
-    authz_path = context_dir / "authz"
     files_to_add = []
     needs_commit = False
 
-    # Ensure claudeconnect directory structure exists per system2.md
-    cc_dir = context_dir / "claudeconnect"
-    system_messages_dir = cc_dir / "with-claudeconnect-io"
+    # Create structure in BOTH directories
+    for target_dir in [shadow_dir, context_dir]:
+        cc_dir = target_dir / "claudeconnect"
+        system_messages_dir = cc_dir / "with-claudeconnect-io"
 
-    # Create with-claudeconnect-io/ for system messages (friend requests, notifications)
-    # Conversation dirs (with-{email}/) are created on-demand
-    if not system_messages_dir.exists():
-        system_messages_dir.mkdir(parents=True, exist_ok=True)
-        # Add .keep file so SVN tracks the empty directory
-        keep_file = system_messages_dir / ".keep"
-        keep_file.write_text("")
-        files_to_add.append(keep_file)
-        needs_commit = True
+        # Create with-claudeconnect-io/ for system messages (friend requests, notifications)
+        if not system_messages_dir.exists():
+            system_messages_dir.mkdir(parents=True, exist_ok=True)
+            # Add .keep file so SVN tracks the empty directory
+            keep_file = system_messages_dir / ".keep"
+            keep_file.write_text("")
+            # Only add to SVN from shadow_dir
+            if target_dir == shadow_dir:
+                files_to_add.append(keep_file)
+                needs_commit = True
 
-    if authz_path.exists():
-        # If authz exists but we have new private files, update it
+    # Handle authz file
+    shadow_authz = shadow_dir / "authz"
+    context_authz = context_dir / "authz"
+
+    if shadow_authz.exists():
+        # If authz exists in shadow but we have new private files, update it
         if private_files:
-            update_authz_with_private_files(authz_path, email, private_files)
+            update_authz_with_private_files(shadow_authz, email, private_files)
+        # Copy to context dir
+        shutil.copy2(shadow_authz, context_authz)
     else:
         print("  Creating authz file...")
-        authz_content = generate_authz_content(email, private_files)
-        authz_path.write_text(authz_content)
-        files_to_add.append(authz_path)
+        authz_content = generate_authz_content(email, private_files, public_key_hex)
+        # Write to both locations
+        shadow_authz.write_text(authz_content)
+        context_authz.write_text(authz_content)
+        files_to_add.append(shadow_authz)
         needs_commit = True
 
     if needs_commit and files_to_add:
         try:
             for file_path in files_to_add:
-                rel_path = file_path.relative_to(context_dir)
+                rel_path = file_path.relative_to(shadow_dir)
                 svn.add(rel_path, parents=True)
             svn.commit("Initialize authz and claudeconnect directories")
             print("  Created authz and claudeconnect directories")
@@ -805,37 +853,63 @@ def update_authz_with_private_files(authz_path: Path, email: str, private_files:
     print(f"  Updated authz with {len(new_private)} private file(s)")
 
 
-def init_context_dir(context_dir: Path, repo_url: str, svn_token: str, email: str) -> bool:
+def init_context_dir(
+    context_dir: Path,
+    repo_url: str,
+    svn_token: str,
+    email: str,
+    public_key_hex: str | None = None,
+) -> bool:
     """
-    Initialize a context directory with SVN checkout.
+    Initialize a context directory using shadow directory architecture.
+
+    Shadow directory architecture keeps SVN metadata separate from user files:
+    - Shadow dir (~/.claude-connect/svn-staging/<email>/): SVN working copy with encrypted files
+    - Context dir (user's directory): Plaintext files, NO .svn folder
 
     Args:
-        context_dir: The directory to initialize
+        context_dir: The user's plaintext directory to initialize
         repo_url: SVN repository URL
         svn_token: Fernet token for SVN auth
         email: User email (SVN username)
+        public_key_hex: User's public key as hex string (stamped in authz)
 
     Returns:
         True if successful.
     """
-    svn = SvnClient(context_dir, repo_url, svn_token, email)
+    # Get shadow directory path
+    shadow_dir = get_shadow_dir(email)
+    shadow_dir.mkdir(parents=True, exist_ok=True)
 
-    # Check if already a working copy
+    # SVN client operates on shadow directory, NOT context directory
+    svn = SvnClient(shadow_dir, repo_url, svn_token, email)
+
+    # Check if shadow dir already has SVN working copy
     if svn.is_working_copy():
         info = svn.info()
         if info and info.get("url") == repo_url:
-            print(f"  Already initialized (revision {info['revision']})")
+            print(f"  Shadow directory already initialized (revision {info['revision']})")
             # Still run migration/ensure for existing repos
-            ensure_authz_exists(context_dir, svn, email)
+            ensure_authz_exists(context_dir, shadow_dir, svn, email, public_key_hex=public_key_hex)
             return True
         else:
-            print(f"  Error: Directory is an SVN working copy for different repo")
+            print(f"  Error: Shadow directory is SVN working copy for different repo")
             print(f"  Expected: {repo_url}")
             print(f"  Got: {info.get('url')}")
+            print(f"  Shadow dir: {shadow_dir}")
             return False
 
+    # Check if context directory has .svn (old architecture - needs migration)
+    old_svn = context_dir / ".svn"
+    if old_svn.exists():
+        print("  Warning: Found .svn in context directory (old architecture)")
+        print("  Migrating to shadow directory architecture...")
+        # Move .svn to shadow directory
+        shutil.move(str(old_svn), str(shadow_dir / ".svn"))
+        print("  Moved .svn to shadow directory")
+
     # Check if directory has markdown files to import
-    md_files = list(context_dir.glob("**/*.md"))
+    md_files = [f for f in context_dir.glob("**/*.md") if ".svn" not in f.parts]
     private_files: list[str] = []  # Files to mark private in authz
 
     if md_files:
@@ -870,54 +944,27 @@ def init_context_dir(context_dir: Path, repo_url: str, svn_token: str, email: st
         else:
             print("  No sensitive information detected")
 
-    # Need to handle this carefully:
-    # 1. If directory is empty, just checkout
-    # 2. If directory has files, we need to:
-    #    a. Checkout to a temp location
-    #    b. Move .svn to the context dir
-    #    c. Add existing files
-
-    if not any(context_dir.iterdir()):
-        # Empty directory - simple checkout
+    # Checkout SVN into shadow directory (if not already a working copy)
+    if not svn.is_working_copy():
         try:
             svn.checkout()
-            print("  Checked out empty repository")
-            ensure_authz_exists(context_dir, svn, email, private_files)
-            return True
-        except SvnError as e:
-            print(f"  Checkout failed: {e}")
-            return False
-    else:
-        # Directory has files - need to overlay SVN
-        print("  Initializing with existing files...")
-
-        # Checkout to temp location (use /tmp to avoid permission issues)
-        import tempfile
-        temp_dir = Path(tempfile.mkdtemp(prefix="claudeconnect_init_"))
-        temp_svn = SvnClient(temp_dir, repo_url, svn_token, email)
-
-        try:
-            temp_svn.checkout()
+            print(f"  Created shadow directory: {shadow_dir}")
         except SvnError as e:
             print(f"  Checkout failed: {e}")
             return False
 
-        # Move .svn folder to context dir
-        svn_folder = temp_dir / ".svn"
-        target_svn = context_dir / ".svn"
+    # Copy existing markdown files from context dir to shadow dir
+    if md_files:
+        print("  Copying files to shadow directory...")
+        for md_file in md_files:
+            rel_path = md_file.relative_to(context_dir)
+            shadow_file = shadow_dir / rel_path
+            shadow_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(md_file, shadow_file)
 
-        if target_svn.exists():
-            print("  Error: .svn folder already exists")
-            return False
-
-        svn_folder.rename(target_svn)
-
-        # Clean up temp dir
-        shutil.rmtree(temp_dir)
-
-        # Now add all markdown files
+        # Add files to SVN in shadow directory
         added = svn.add_all_markdown()
-        print(f"  Added {len(added)} markdown files")
+        print(f"  Added {len(added)} markdown files to SVN")
 
         # Set ignore patterns for non-markdown
         svn.set_ignore([
@@ -937,16 +984,20 @@ def init_context_dir(context_dir: Path, repo_url: str, svn_token: str, email: st
             ".venv",
         ])
 
-        # Initial commit
+        # Initial commit from shadow directory
         try:
             rev = svn.commit("Initial sync from claudeconnect")
             if rev:
                 print(f"  Committed initial sync (revision {rev})")
-            ensure_authz_exists(context_dir, svn, email, private_files)
-            return True
         except SvnError as e:
             print(f"  Initial commit failed: {e}")
             return False
+
+    # Ensure authz and directory structure exist in both locations
+    ensure_authz_exists(context_dir, shadow_dir, svn, email, private_files, public_key_hex)
+
+    print(f"  Shadow directory: {shadow_dir}")
+    return True
 
 
 @click.group(invoke_without_command=True)
@@ -1130,15 +1181,53 @@ def start():
         sys.exit(1)
 
     # Initialize context directory if needed
-    # Username is email, password is the Fernet token
-    svn = SvnClient(context_dir, repo_url, svn_token, tokens.email)
+    # Check shadow directory for working copy (shadow dir architecture)
+    shadow_dir = get_shadow_dir(tokens.email)
+    shadow_dir.mkdir(parents=True, exist_ok=True)
+    svn = SvnClient(shadow_dir, repo_url, svn_token, tokens.email)
     if not svn.is_working_copy():
         print(f"\nInitializing context directory: {context_dir}")
-        if not init_context_dir(context_dir, repo_url, svn_token, tokens.email):
+
+        # Set up encryption by default
+        encrypt = HAS_ENCRYPTION
+        public_key_hex = None
+        if encrypt:
+            print("  Setting up encryption...")
+            try:
+                # Generate or load X25519 keypair
+                try:
+                    _, public_bytes = generate_keypair()
+                    fingerprint = get_key_fingerprint(public_bytes)
+                    print(f"  Generated keypair (fingerprint: {fingerprint})")
+                except FileExistsError:
+                    # Keys already exist, load them
+                    public_bytes = load_public_key()
+                    fingerprint = get_key_fingerprint(public_bytes)
+                    print(f"  Using existing keypair (fingerprint: {fingerprint})")
+
+                # Generate or load master key
+                try:
+                    generate_master_key()
+                    print("  Generated master encryption key")
+                except FileExistsError:
+                    # Master key already exists
+                    load_master_key()  # Verify it's loadable
+                    print("  Using existing master key")
+
+                # Convert public key to hex for authz
+                public_key_hex = public_bytes.hex()
+
+            except Exception as e:
+                print(f"  Warning: Could not set up encryption: {e}")
+                encrypt = False
+                public_key_hex = None
+
+        if not init_context_dir(context_dir, repo_url, svn_token, tokens.email, public_key_hex):
             sys.exit(1)
 
-        # Save context dir to config
+        # Save context dir and encryption setting to config
         config.context_dir = str(context_dir)
+        config.encryption_enabled = encrypt
         config.save()
 
         # Install skill for Claude Code
@@ -1259,25 +1348,43 @@ def init(no_encrypt: bool):
         sys.exit(1)
 
     # Set up encryption if requested
+    public_key_hex = None
+    fingerprint = None
     if encrypt:
         print("  Setting up encryption...")
         try:
-            _, public_bytes = generate_keypair()
-            fingerprint = get_key_fingerprint(public_bytes)
-            print(f"  Generated keypair (fingerprint: {fingerprint})")
-        except FileExistsError:
-            # Keys already exist, load them
-            public_bytes = load_public_key()
-            fingerprint = get_key_fingerprint(public_bytes)
-            print(f"  Using existing keypair (fingerprint: {fingerprint})")
+            # Generate or load X25519 keypair
+            try:
+                _, public_bytes = generate_keypair()
+                fingerprint = get_key_fingerprint(public_bytes)
+                print(f"  Generated keypair (fingerprint: {fingerprint})")
+            except FileExistsError:
+                # Keys already exist, load them
+                public_bytes = load_public_key()
+                fingerprint = get_key_fingerprint(public_bytes)
+                print(f"  Using existing keypair (fingerprint: {fingerprint})")
+
+            # Generate or load master key
+            try:
+                generate_master_key()
+                print("  Generated master encryption key")
+            except FileExistsError:
+                # Master key already exists
+                load_master_key()  # Verify it's loadable
+                print("  Using existing master key")
+
+            # Convert public key to hex for authz
+            public_key_hex = public_bytes.hex()
+
         except Exception as e:
-            print(f"  Error generating keypair: {e}")
+            print(f"  Error generating keys: {e}")
             print("  Continuing without encryption...")
             encrypt = False
+            public_key_hex = None
 
     # Initialize
     print(f"\nInitializing: {cwd}")
-    if init_context_dir(cwd, repo_url, svn_token, tokens.email):
+    if init_context_dir(cwd, repo_url, svn_token, tokens.email, public_key_hex):
         config.context_dir = str(cwd)
         config.encryption_enabled = encrypt
         config.save()
@@ -1290,7 +1397,7 @@ def init(no_encrypt: bool):
             print("    You may need to manually copy SKILL.md to ~/.claude/skills/claudeconnect/")
 
         # Verify directory structure was created correctly
-        verification_errors = verify_init_structure(cwd)
+        verification_errors = verify_init_structure(cwd, tokens.email)
         if verification_errors:
             print("\n⚠ Warning: Some components were not set up correctly:")
             for error in verification_errors:
@@ -1527,14 +1634,49 @@ def add_friend_to_authz(authz_path: Path, my_email: str, peer_email: str) -> boo
     return changes_made
 
 
+def fetch_peer_public_key(peer_email: str) -> bytes | None:
+    """
+    Fetch a peer's public key from their authz file.
+
+    The public key is stored as a comment at the top of the authz:
+    # Public-Key: <64-char-hex>
+
+    Args:
+        peer_email: Peer's email address
+
+    Returns:
+        Public key bytes (32 bytes) or None if not found
+    """
+    import re
+
+    # Authz is globally readable from the SVN repo
+    peer_repo_name = email_to_repo_name(peer_email)
+    authz_url = f"https://v2.claudeconnect.io/svn/{peer_repo_name}/authz"
+
+    try:
+        response = httpx.get(authz_url, timeout=10)
+        if response.status_code == 200:
+            content = response.text
+            # Look for public key comment
+            match = re.search(r'^# Public-Key:\s*([a-fA-F0-9]{64})', content, re.MULTILINE)
+            if match:
+                return bytes.fromhex(match.group(1))
+    except Exception as e:
+        print(f"  Warning: Could not fetch peer's public key: {e}")
+
+    return None
+
+
 @cli.command()
 @click.argument("peer_email")
 def friend(peer_email: str):
     """Send a friend request to another user.
 
     This command:
-    1. Updates your authz to grant them read access + conversation write access
-    2. Sends a friend request to their repo
+    1. Fetches peer's public key from their authz
+    2. Encrypts your master key for them (so they can read your files immediately)
+    3. Updates your authz to grant them read access
+    4. Sends a friend request with the encrypted master key
     """
     tokens = get_valid_token()
     if not tokens:
@@ -1555,7 +1697,34 @@ def friend(peer_email: str):
 
     print(f"Sending friend request to {peer_email}...")
 
-    # Step 1: Update local authz to grant them appropriate access
+    # Step 1: Fetch peer's public key from their authz
+    print("  Fetching peer's public key...")
+    peer_public_key = fetch_peer_public_key(peer_email)
+    if not peer_public_key:
+        print(f"  Warning: Could not find public key for {peer_email}")
+        print(f"  They may not have encryption set up, or their repo doesn't exist.")
+        print(f"  Continuing without encrypted master key...")
+
+    # Step 2: Encrypt our master key for them (if we have both keys)
+    encrypted_master_key_hex = None
+    my_public_key_hex = None
+    if HAS_ENCRYPTION and peer_public_key:
+        try:
+            # Load our master key and encrypt it for the peer
+            my_master_key = load_master_key()
+            encrypted_blob = encrypt_master_key_for_recipient(my_master_key, peer_public_key)
+            encrypted_master_key_hex = encrypted_blob.hex()
+            print(f"  Encrypted master key for {peer_email}")
+
+            # Also include our public key so they can encrypt for us
+            my_public_key = load_public_key()
+            my_public_key_hex = my_public_key.hex()
+        except FileNotFoundError:
+            print("  Warning: No encryption keys found. Run `claudeconnect init` to generate keys.")
+        except Exception as e:
+            print(f"  Warning: Could not encrypt master key: {e}")
+
+    # Step 3: Update local authz to grant them appropriate access
     context_dir = Path(config.context_dir)
     authz_path = context_dir / "authz"
 
@@ -1565,18 +1734,7 @@ def friend(peer_email: str):
 
     add_friend_to_authz(authz_path, my_email, peer_email)
 
-    # Step 2: Get our public key to include in request (if keys exist)
-    # Always try to include public key - it enables the friend to encrypt files for us
-    my_public_key_hex = None
-    if HAS_ENCRYPTION:
-        try:
-            my_public_key = load_public_key()
-            my_public_key_hex = my_public_key.hex()
-            print(f"  Will share your public key with friend request")
-        except FileNotFoundError:
-            print("  Warning: No encryption keys found. Run `claudeconnect init` to generate keys.")
-
-    # Step 3: Sync to commit authz changes
+    # Step 4: Sync to commit authz changes
     svn_token = get_svn_token(tokens.id_token)
     if not svn_token:
         print("Failed to get SVN token")
@@ -1586,12 +1744,14 @@ def friend(peer_email: str):
     print("  Syncing authz changes...")
     sync_once(context_dir, repo_url, svn_token, my_email)
 
-    # Step 4: Send friend request via API (include public key if available)
+    # Step 5: Send friend request via API
     print("  Sending friend request...")
     try:
         request_data = {"to": peer_email}
         if my_public_key_hex:
             request_data["public_key"] = my_public_key_hex
+        if encrypted_master_key_hex:
+            request_data["encrypted_master_key"] = encrypted_master_key_hex
 
         response = httpx.post(
             f"{SERVER_URL}/api/friend-request",
@@ -1603,7 +1763,10 @@ def friend(peer_email: str):
         if response.status_code == 200:
             print(f"\n✓ Friend request sent to {peer_email}")
             print(f"  They will see your request in their claudeconnect/with-claudeconnect-io/ folder.")
-            print(f"  Once they accept, they can send you conversations.")
+            if encrypted_master_key_hex:
+                print(f"  Your encrypted master key was included - they can read your files immediately after accepting.")
+            else:
+                print(f"  Once they accept, they can send you conversations.")
         elif response.status_code == 404:
             print(f"\n✗ User {peer_email} not found on ClaudeConnect")
             sys.exit(1)
@@ -1623,9 +1786,10 @@ def accept_friend(peer_email: str):
     """Accept a pending friend request.
 
     This command:
-    1. Updates your authz to grant them read access + conversation write access
-    2. Deletes the friend request file
-    3. Syncs changes to the server so they can access your context
+    1. Extracts and decrypts friend's master key (so you can read their files)
+    2. Updates your authz to grant them read access
+    3. Deletes the friend request file
+    4. Syncs changes to the server
     """
     tokens = get_valid_token()
     if not tokens:
@@ -1668,15 +1832,14 @@ def accept_friend(peer_email: str):
 
     add_friend_to_authz(authz_path, my_email, peer_email)
 
-    # Step 2: Extract and save friend's public key if present in request
-    # Always try to save the key if present - enables encryption even if config wasn't set
+    # Step 2: Extract keys from friend request
     if HAS_ENCRYPTION:
         try:
-            # Read friend request to extract public key
-            request_content = request_file.read_text()
-            # Look for public key in the request (format: Public-Key: <hex>)
             import re
-            key_match = re.search(r'Public-Key:\s*([a-fA-F0-9]{64})', request_content)
+            request_content = request_file.read_text()
+
+            # Extract and save friend's public key
+            key_match = re.search(r'\*\*Public-Key\*\*:\s*([a-fA-F0-9]{64})', request_content)
             if key_match:
                 peer_public_key_hex = key_match.group(1)
                 peer_public_key = bytes.fromhex(peer_public_key_hex)
@@ -1684,18 +1847,32 @@ def accept_friend(peer_email: str):
                 fingerprint = get_key_fingerprint(peer_public_key)
                 print(f"  Saved friend's public key (fingerprint: {fingerprint})")
             else:
-                print("  Note: Friend request did not include public key (encryption won't work)")
-        except Exception as e:
-            print(f"  Warning: Could not process friend's public key: {e}")
+                print("  Note: Friend request did not include public key")
 
-    # Step 4: Delete the friend request file
+            # Extract and decrypt friend's master key (this lets us read their files!)
+            master_key_match = re.search(r'\*\*Encrypted-Master-Key\*\*:\s*([a-fA-F0-9]+)', request_content)
+            if master_key_match:
+                encrypted_master_key_hex = master_key_match.group(1)
+                encrypted_blob = bytes.fromhex(encrypted_master_key_hex)
+                # Decrypt with our private key
+                friend_master_key = decrypt_received_master_key(encrypted_blob)
+                save_friend_master_key(peer_email, friend_master_key)
+                print(f"  Decrypted and saved friend's master key - you can now read their files!")
+            else:
+                print("  Note: Friend request did not include encrypted master key")
+                print("  You won't be able to read their encrypted files.")
+
+        except Exception as e:
+            print(f"  Warning: Could not process encryption keys: {e}")
+
+    # Step 3: Delete the friend request file
     try:
         request_file.unlink()
         print(f"  Removed friend request file")
     except Exception as e:
         print(f"  Warning: Could not delete request file: {e}")
 
-    # Step 5: Sync to commit authz changes and request deletion
+    # Step 4: Sync to commit authz changes and request deletion
     svn_token = get_svn_token(tokens.id_token)
     if not svn_token:
         print("Failed to get SVN token")

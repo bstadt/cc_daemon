@@ -13,6 +13,36 @@ CONFIG_DIR = Path.home() / ".claude-connect"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 TOKENS_FILE = CONFIG_DIR / "tokens.json"
 TEST_USERS_DIR = CONFIG_DIR / "test-users"
+SVN_STAGING_DIR = CONFIG_DIR / "svn-staging"
+
+
+def sanitize_email(email: str) -> str:
+    """
+    Sanitize email for use in directory/file names.
+
+    Args:
+        email: User email (e.g., brandon@gmail.com)
+
+    Returns:
+        Sanitized name (e.g., brandon-gmail-com)
+    """
+    return email.replace("@", "-").replace(".", "-").lower()
+
+
+def get_shadow_dir(email: str) -> Path:
+    """
+    Get the shadow directory path for a user.
+
+    The shadow directory contains the SVN working copy with encrypted files.
+    The user's context directory remains plaintext with no .svn/ metadata.
+
+    Args:
+        email: User email
+
+    Returns:
+        Path to shadow directory (~/.claude-connect/svn-staging/<sanitized-email>/)
+    """
+    return SVN_STAGING_DIR / sanitize_email(email)
 
 
 @dataclass
