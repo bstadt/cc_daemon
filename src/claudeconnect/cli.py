@@ -1131,8 +1131,7 @@ def start():
 
     # Initial sync
     print("\nSyncing...")
-    kms_key_id = config.kms_key_id if config.encryption_enabled else None
-    sync_once(context_dir, repo_url, svn_token, tokens.email, kms_key_id)
+    sync_once(context_dir, repo_url, svn_token, tokens.email)
 
     # Display startup banner with friend requests and conversations
     display_startup_banner(context_dir, tokens.email)
@@ -1142,7 +1141,7 @@ def start():
     print(f"{DIM}(Sync runs every 30 seconds in background){RESET}\n")
 
     # Run async main
-    asyncio.run(run_with_sync(context_dir, repo_url, svn_token, tokens.email, kms_key_id))
+    asyncio.run(run_with_sync(context_dir, repo_url, svn_token, tokens.email))
 
 
 async def run_with_sync(
@@ -1150,11 +1149,10 @@ async def run_with_sync(
     repo_url: str,
     token: str,
     email: str,
-    kms_key_id: str | None = None,
 ):
     """Run Claude Code with background sync loop."""
     # Start sync loop
-    sync_loop = SyncLoop(context_dir, repo_url, token, email, interval=30, kms_key_id=kms_key_id)
+    sync_loop = SyncLoop(context_dir, repo_url, token, email, interval=30)
     await sync_loop.start()
 
     try:
@@ -1314,10 +1312,9 @@ def sync():
 
     context_dir = Path(config.context_dir)
     repo_url = repo_url_for_email(tokens.email)
-    kms_key_id = config.kms_key_id if config.encryption_enabled else None
 
     print("Syncing...")
-    if sync_once(context_dir, repo_url, svn_token, tokens.email, kms_key_id):
+    if sync_once(context_dir, repo_url, svn_token, tokens.email):
         print("✓ Sync complete")
     else:
         sys.exit(1)
@@ -1546,9 +1543,8 @@ def friend(peer_email: str, message: str):
         sys.exit(1)
 
     repo_url = repo_url_for_email(my_email)
-    kms_key_id = config.kms_key_id if config.encryption_enabled else None
     print("  Syncing authz changes...")
-    sync_once(context_dir, repo_url, svn_token, my_email, kms_key_id)
+    sync_once(context_dir, repo_url, svn_token, my_email)
 
     # Step 4: Send friend request via API (include public key if available)
     print("  Sending friend request...")
@@ -1665,9 +1661,8 @@ def accept_friend(peer_email: str):
         sys.exit(1)
 
     repo_url = repo_url_for_email(my_email)
-    kms_key_id = config.kms_key_id if config.encryption_enabled else None
     print("  Syncing changes to server...")
-    if not sync_once(context_dir, repo_url, svn_token, my_email, kms_key_id):
+    if not sync_once(context_dir, repo_url, svn_token, my_email):
         print("  Warning: Sync may have failed. Run `claudeconnect sync` to retry.")
 
     print(f"\n✓ Friend request accepted!")
@@ -1726,9 +1721,8 @@ def reject_friend(peer_email: str):
         sys.exit(1)
 
     repo_url = repo_url_for_email(my_email)
-    kms_key_id = config.kms_key_id if config.encryption_enabled else None
     print("  Syncing changes to server...")
-    if not sync_once(context_dir, repo_url, svn_token, my_email, kms_key_id):
+    if not sync_once(context_dir, repo_url, svn_token, my_email):
         print("  Warning: Sync may have failed. Run `claudeconnect sync` to retry.")
 
     print(f"\n✓ Friend request rejected.")
