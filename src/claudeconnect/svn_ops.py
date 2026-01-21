@@ -351,6 +351,27 @@ class SvnClient:
         result = self._run(["cleanup"])
         return result.returncode == 0
 
+    def revert(self, path: Optional[Path] = None, recursive: bool = True) -> bool:
+        """
+        Revert changes in the working copy.
+
+        Args:
+            path: Specific path to revert, or None for entire working copy
+            recursive: If True, revert recursively
+
+        Returns:
+            True if successful.
+        """
+        args = ["revert"]
+        if recursive:
+            args.append("-R")
+        if path:
+            args.append(str(path))
+        else:
+            args.append(".")
+        result = self._run(args)
+        return result.returncode == 0
+
     def _with_cleanup_retry(self, operation: str, args: list[str], cwd: Optional[Path] = None) -> subprocess.CompletedProcess:
         """
         Run an SVN command with automatic cleanup retry on lock errors.

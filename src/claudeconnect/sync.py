@@ -1,23 +1,33 @@
 """Sync loop for Claude Connect.
 
-Handles bidirectional syncing between local context directory and SVN repo.
+Handles bidirectional syncing between local context directory and SVN repo
+using shadow directory architecture.
 
-When encryption is enabled, files are encrypted before commit and decrypted
-after update using client-side hybrid encryption (X25519 + AES-256-GCM).
-This provides zero-trust context sharing where the SVN server only ever sees
-encrypted blobs and private keys never leave the user's machine.
+Shadow directory architecture:
+- context_dir: User's plaintext files (no .svn/)
+- shadow_dir: SVN working copy with encrypted files (~/.claude-connect/svn-staging/<email>/)
+
+Sync flow:
+- OUTBOUND: context_dir → (encrypt) → shadow_dir → SVN commit
+- INBOUND: SVN update → shadow_dir → (decrypt) → context_dir
+
+When encryption is enabled, files are encrypted when copying to shadow_dir
+and decrypted when copying from shadow_dir. This provides zero-trust context
+sharing where the SVN server only ever sees encrypted blobs and private keys
+never leave the user's machine.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from .svn_ops import SvnClient, SvnError
-from .config import get_tokens, get_config, Config
+from .config import get_tokens, get_config, Config, get_shadow_dir
 
 # Encryption is optional
 try:
@@ -25,12 +35,10 @@ try:
         is_encryption_available,
         should_encrypt_file,
         is_encrypted_file,
-        encrypt_file,
-        decrypt_file,
-        load_public_key,
-        load_friend_public_key,
-        list_friends,
-        DEFAULT_KEYS_DIR,
+        encrypt_file_with_master_key,
+        decrypt_file_with_master_key,
+        load_master_key,
+        get_keys_dir,
         DEFAULT_FRIENDS_DIR,
     )
     HAS_ENCRYPTION = is_encryption_available()
@@ -41,7 +49,12 @@ logger = logging.getLogger(__name__)
 
 
 class SyncLoop:
-    """Background sync loop for keeping local context in sync with SVN."""
+    """Background sync loop for keeping local context in sync with SVN.
+
+    Uses shadow directory architecture where SVN operations happen in
+    ~/.claude-connect/svn-staging/<email>/ and files are copied to/from
+    the user's context directory with encryption/decryption.
+    """
 
     def __init__(
         self,
@@ -56,7 +69,7 @@ class SyncLoop:
         Initialize sync loop.
 
         Args:
-            context_dir: Local context directory
+            context_dir: User's plaintext context directory
             repo_url: SVN repository URL
             token: Fernet SVN token
             email: User email (SVN username)
@@ -70,7 +83,10 @@ class SyncLoop:
         self.interval = interval
         self.running = False
         self._task: Optional[asyncio.Task] = None
-        self.svn = SvnClient(context_dir, repo_url, token, email)
+
+        # Shadow directory is where SVN operations happen
+        self.shadow_dir = get_shadow_dir(email)
+        self.svn = SvnClient(self.shadow_dir, repo_url, token, email)
 
         # Check if encryption is enabled via config
         config = get_config()
@@ -107,75 +123,74 @@ class SyncLoop:
             await asyncio.sleep(self.interval)
 
     async def _sync_once(self):
-        """Perform a single sync cycle."""
-        # Run SVN operations in thread pool to avoid blocking
+        """Perform a single sync cycle using shadow directory architecture."""
         loop = asyncio.get_event_loop()
 
         # Clean up any stale locks before operations
         await loop.run_in_executor(None, self.svn.cleanup)
 
-        # Pull remote changes
+        # INBOUND: Pull remote changes to shadow dir, then copy to context dir
         try:
             updated = await loop.run_in_executor(None, self.svn.update)
             if updated:
                 logger.info(f"Pulled {len(updated)} updates: {updated}")
-                # Decrypt pulled files if encryption is enabled
-                if self.encryption_enabled:
-                    await loop.run_in_executor(
-                        None, _decrypt_files, self.context_dir, updated, self.email
-                    )
+                # Copy updated files from shadow to context (decrypting)
+                await loop.run_in_executor(
+                    None, _copy_from_shadow, self.shadow_dir, self.context_dir,
+                    updated, self.email, self.encryption_enabled
+                )
         except SvnError as e:
             logger.error(f"Update failed: {e}")
             return
 
-        # Check for conflicts
+        # Also ensure any files in shadow are in context (handles crashed syncs)
+        missing_in_context = await loop.run_in_executor(
+            None, _find_missing_in_context, self.shadow_dir, self.context_dir
+        )
+        if missing_in_context:
+            logger.info(f"Syncing {len(missing_in_context)} missing files to context")
+            await loop.run_in_executor(
+                None, _copy_from_shadow, self.shadow_dir, self.context_dir,
+                missing_in_context, self.email, self.encryption_enabled
+            )
+
+        # Check for conflicts in shadow dir
         status = await loop.run_in_executor(None, self.svn.status)
         if status.has_conflicts:
             for path in status.conflicted:
                 logger.warning(f"Conflict detected: {path}")
-                # Auto-resolve with local version, keep theirs as backup
                 await self._handle_conflict(path)
 
-        # Add new markdown files
-        added = await loop.run_in_executor(None, self.svn.add_all_markdown)
-        if added:
-            logger.info(f"Added {len(added)} new files: {added}")
+        # OUTBOUND: Copy changed files from context to shadow (encrypting), then commit
+        # First, detect what changed in context dir
+        changed_files = await loop.run_in_executor(
+            None, _detect_context_changes, self.context_dir, self.shadow_dir
+        )
 
-        # Ensure authz file is tracked (it's not a .md file so add_all_markdown won't catch it)
-        authz_path = self.context_dir / "authz"
-        if authz_path.exists():
-            authz_added = await loop.run_in_executor(None, self.svn.add, Path("authz"))
-            if authz_added:
-                added.append(Path("authz"))
-                logger.info("Added authz file")
+        if changed_files['modified'] or changed_files['added']:
+            logger.info(f"Context changes: {len(changed_files['modified'])} modified, "
+                       f"{len(changed_files['added'])} added")
 
-        # Delete missing files (removed from filesystem)
-        deleted = await loop.run_in_executor(None, self.svn.delete_missing)
-        if deleted:
-            logger.info(f"Deleted {len(deleted)} missing files: {deleted}")
+            # Copy changed/added files from context to shadow (encrypting)
+            await loop.run_in_executor(
+                None, _copy_to_shadow, self.context_dir, self.shadow_dir,
+                changed_files['modified'] + changed_files['added'],
+                self.email, self.encryption_enabled
+            )
 
-        # Commit local changes
-        if status.has_changes or added or deleted:
-            # Encrypt files before commit if encryption is enabled
-            if self.encryption_enabled:
-                await loop.run_in_executor(
-                    None, _encrypt_modified_files, self.context_dir, self.svn, self.email
-                )
+            # Add new files to SVN
+            for path in changed_files['added']:
+                await loop.run_in_executor(None, self.svn.add, path, True)
 
+            # NOTE: No auto-deletion - users must explicitly delete via skill
+
+            # Commit changes
             try:
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 message = f"Auto-sync {timestamp}"
-                rev = await loop.run_in_executor(
-                    None, self.svn.commit, message
-                )
+                rev = await loop.run_in_executor(None, self.svn.commit, message)
                 if rev:
                     logger.info(f"Committed revision {rev}")
-
-                # Decrypt files after commit to restore plaintext for local use
-                if self.encryption_enabled:
-                    await loop.run_in_executor(
-                        None, _decrypt_all_encrypted_files, self.context_dir, self.email
-                    )
             except SvnError as e:
                 logger.error(f"Commit failed: {e}")
 
@@ -187,9 +202,8 @@ class SyncLoop:
         """
         loop = asyncio.get_event_loop()
 
-        # SVN creates files like: file.md.r123, file.md.r456
-        # Find the "theirs" version
-        working_path = self.context_dir / path
+        # SVN creates files like: file.md.r123, file.md.r456 in shadow dir
+        working_path = self.shadow_dir / path
 
         for conflict_file in working_path.parent.glob(f"{working_path.stem}*.r*"):
             # Rename to .theirs.md
@@ -213,10 +227,10 @@ def sync_once(
     kms_key_id: Optional[str] = None,  # Kept for backwards compat, ignored
 ) -> bool:
     """
-    Perform a single synchronous sync.
+    Perform a single synchronous sync using shadow directory architecture.
 
     Args:
-        context_dir: Local context directory
+        context_dir: User's plaintext context directory
         repo_url: SVN repository URL
         svn_token: Fernet SVN token
         email: User email (SVN username)
@@ -225,7 +239,9 @@ def sync_once(
     Returns:
         True if sync completed successfully.
     """
-    svn = SvnClient(context_dir, repo_url, svn_token, email)
+    # Shadow directory is where SVN operations happen
+    shadow_dir = get_shadow_dir(email)
+    svn = SvnClient(shadow_dir, repo_url, svn_token, email)
 
     # Check if encryption is enabled via config
     config = get_config()
@@ -238,45 +254,49 @@ def sync_once(
         # Clean up any stale locks from previous sessions
         svn.cleanup()
 
-        # Pull updates
+        # INBOUND: Pull updates to shadow dir
         updated = svn.update()
         if updated:
             print(f"  Pulled {len(updated)} files")
-            # Decrypt pulled files if encryption is enabled
-            if encryption_enabled:
-                _decrypt_files(context_dir, updated, email)
+            # Copy from shadow to context (decrypting)
+            _copy_from_shadow(shadow_dir, context_dir, updated, email, encryption_enabled)
 
-        # Add new markdown files
-        added = svn.add_all_markdown()
-        if added:
-            print(f"  Added {len(added)} files")
+        # Also ensure any files in shadow (especially claudeconnect/) are in context
+        # This handles cases where a previous sync crashed mid-copy
+        missing_in_context = _find_missing_in_context(shadow_dir, context_dir)
+        if missing_in_context:
+            print(f"  Syncing {len(missing_in_context)} missing files to context")
+            _copy_from_shadow(shadow_dir, context_dir, missing_in_context, email, encryption_enabled)
 
-        # Ensure authz file is tracked (it's not a .md file so add_all_markdown won't catch it)
-        authz_path = context_dir / "authz"
-        if authz_path.exists() and svn.add(Path("authz")):
-            added.append(Path("authz"))
-            print(f"  Added authz file")
+        # OUTBOUND: Detect changes in context dir
+        changed_files = _detect_context_changes(context_dir, shadow_dir)
 
-        # Delete missing files
-        deleted = svn.delete_missing()
-        if deleted:
-            print(f"  Deleted {len(deleted)} files")
+        added_count = 0
+        if changed_files['modified'] or changed_files['added']:
+            # Copy changed/added files from context to shadow (encrypting)
+            _copy_to_shadow(
+                context_dir, shadow_dir,
+                changed_files['modified'] + changed_files['added'],
+                email, encryption_enabled
+            )
 
-        # Commit
-        status = svn.status()
-        if status.has_changes or added or deleted:
-            # Encrypt files before commit if encryption is enabled
-            if encryption_enabled:
-                _encrypt_modified_files(context_dir, svn, email)
+            # Add new files to SVN
+            for path in changed_files['added']:
+                if svn.add(path, parents=True):
+                    added_count += 1
 
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            rev = svn.commit(f"Auto-sync {timestamp}")
-            if rev:
-                print(f"  Committed revision {rev}")
+            if added_count:
+                print(f"  Added {added_count} files")
 
-            # Decrypt files after commit to restore plaintext for local use
-            if encryption_enabled:
-                _decrypt_all_encrypted_files(context_dir, email)
+            # NOTE: No auto-deletion - users must explicitly delete via skill
+
+            # Commit
+            status = svn.status()
+            if status.has_changes or added_count:
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                rev = svn.commit(f"Auto-sync {timestamp}")
+                if rev:
+                    print(f"  Committed revision {rev}")
 
         return True
 
@@ -285,113 +305,167 @@ def sync_once(
         return False
 
 
-def _get_recipients_for_encryption(email: str) -> dict[str, bytes]:
+def _detect_context_changes(context_dir: Path, shadow_dir: Path) -> dict:
     """
-    Build recipients dict for encryption.
+    Detect what files changed in context_dir compared to shadow_dir.
 
-    Includes:
-    - The user's own public key (so they can decrypt their own files)
-    - All friends' public keys (so friends can also read)
-
-    Args:
-        email: User's email
+    NOTE: Sync never auto-deletes files. Deletions require explicit user action
+    via a delete skill that runs `svn delete`. This prevents accidental data loss.
 
     Returns:
-        Dict mapping email -> public_key_bytes
+        Dict with 'modified', 'added' lists of relative paths (no 'deleted')
     """
-    recipients = {}
+    changes = {'modified': [], 'added': [], 'deleted': []}
 
-    if not HAS_ENCRYPTION:
-        return recipients
-
-    try:
-        # Add our own public key
-        our_public_key = load_public_key()
-        recipients[email] = our_public_key
-
-        # Add all friends' public keys
-        for friend_id in list_friends():
-            try:
-                friend_key = load_friend_public_key(friend_id)
-                # Convert sanitized ID back to approximate email for recipient lookup
-                # Note: This is imperfect since @ and . both become -
-                recipients[friend_id] = friend_key
-            except FileNotFoundError:
-                pass  # Friend key not found, skip
-
-    except FileNotFoundError:
-        logger.warning("No encryption keys found - files will not be encrypted")
-
-    return recipients
-
-
-def _encrypt_modified_files(context_dir: Path, svn: SvnClient, email: str) -> None:
-    """Encrypt modified files in-place before commit."""
-    if not HAS_ENCRYPTION:
-        return
-
-    recipients = _get_recipients_for_encryption(email)
-    if not recipients:
-        logger.warning("No recipients for encryption - skipping")
-        return
-
-    status = svn.status()
-    for path in status.modified + status.added:
-        full_path = context_dir / path
-        if full_path.exists() and should_encrypt_file(path):
-            try:
-                plaintext = full_path.read_bytes()
-                # Don't re-encrypt already encrypted files
-                if is_encrypted_file(plaintext):
-                    continue
-                ciphertext = encrypt_file(plaintext, recipients)
-                full_path.write_bytes(ciphertext)
-                logger.debug(f"Encrypted {path} for commit")
-            except Exception as e:
-                logger.error(f"Failed to encrypt {path}: {e}")
-
-
-def _decrypt_files(context_dir: Path, files: list[Path], email: str) -> None:
-    """Decrypt specific files after pull."""
-    if not HAS_ENCRYPTION:
-        return
-
-    for path in files:
-        full_path = context_dir / path
-        if full_path.exists() and should_encrypt_file(path):
-            try:
-                ciphertext = full_path.read_bytes()
-                # Check if file is actually encrypted
-                if is_encrypted_file(ciphertext):
-                    plaintext = decrypt_file(ciphertext, email)
-                    full_path.write_bytes(plaintext)
-                    logger.debug(f"Decrypted {path}")
-            except ValueError as e:
-                # Not a recipient - might be friend's file we can't decrypt
-                logger.debug(f"Could not decrypt {path}: {e}")
-            except Exception as e:
-                logger.warning(f"Could not decrypt {path}: {e}")
-
-
-def _decrypt_all_encrypted_files(context_dir: Path, email: str) -> None:
-    """Decrypt all encrypted files to restore plaintext for local use."""
-    if not HAS_ENCRYPTION:
-        return
-
+    # Find all markdown files in context dir
     for path in context_dir.rglob("*.md"):
-        if ".svn" in path.parts:
-            continue
-        try:
+        if ".svn" not in path.parts:
             rel_path = path.relative_to(context_dir)
-            if should_encrypt_file(rel_path):
-                ciphertext = path.read_bytes()
-                # Check if file is actually encrypted
-                if is_encrypted_file(ciphertext):
-                    plaintext = decrypt_file(ciphertext, email)
-                    path.write_bytes(plaintext)
-                    logger.debug(f"Decrypted {rel_path}")
-        except ValueError as e:
-            # Not a recipient - might be friend's file we can't decrypt
-            logger.debug(f"Could not decrypt {path}: {e}")
-        except Exception as e:
-            logger.warning(f"Could not decrypt {path}: {e}")
+
+            shadow_path = shadow_dir / rel_path
+            if shadow_path.exists():
+                # Check if modified (compare mtimes or content)
+                if path.stat().st_mtime > shadow_path.stat().st_mtime:
+                    changes['modified'].append(rel_path)
+            else:
+                changes['added'].append(rel_path)
+
+    # Also check authz file
+    context_authz = context_dir / "authz"
+    shadow_authz = shadow_dir / "authz"
+    if context_authz.exists():
+        if shadow_authz.exists():
+            if context_authz.stat().st_mtime > shadow_authz.stat().st_mtime:
+                changes['modified'].append(Path("authz"))
+        else:
+            changes['added'].append(Path("authz"))
+
+    # NOTE: No delete detection - sync only adds/updates, never deletes
+    # Users must explicitly delete files via a delete skill
+
+    return changes
+
+
+def _find_missing_in_context(shadow_dir: Path, context_dir: Path) -> list[Path]:
+    """
+    Find files in shadow_dir that are missing from context_dir.
+
+    This handles cases where a previous sync crashed mid-copy,
+    leaving files in shadow but not in context.
+
+    Returns:
+        List of relative paths that need to be copied to context
+    """
+    missing = []
+
+    for path in shadow_dir.rglob("*.md"):
+        if ".svn" not in path.parts:
+            rel_path = path.relative_to(shadow_dir)
+            context_path = context_dir / rel_path
+            if not context_path.exists():
+                missing.append(rel_path)
+
+    return missing
+
+
+def _copy_to_shadow(
+    context_dir: Path,
+    shadow_dir: Path,
+    files: list[Path],
+    email: str,
+    encryption_enabled: bool
+) -> None:
+    """
+    Copy files from context_dir to shadow_dir, encrypting if enabled.
+
+    Uses master key encryption (v2) - simpler than multi-recipient model.
+    All files are encrypted with user's master AES key.
+
+    Args:
+        context_dir: User's plaintext directory
+        shadow_dir: SVN working copy directory
+        files: List of relative paths to copy
+        email: User's email (unused in v2, kept for API compat)
+        encryption_enabled: Whether to encrypt files
+    """
+    for rel_path in files:
+        context_path = context_dir / rel_path
+        shadow_path = shadow_dir / rel_path
+
+        if not context_path.exists():
+            continue
+
+        # Ensure parent directory exists in shadow
+        shadow_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Read plaintext from context
+        content = context_path.read_bytes()
+
+        # Encrypt if enabled and file should be encrypted
+        if encryption_enabled and HAS_ENCRYPTION:
+            if should_encrypt_file(rel_path) and not is_encrypted_file(content):
+                try:
+                    content = encrypt_file_with_master_key(content, email)
+                    logger.debug(f"Encrypted {rel_path} for shadow dir")
+                except Exception as e:
+                    logger.error(f"Failed to encrypt {rel_path}: {e}")
+
+        # Write to shadow dir
+        shadow_path.write_bytes(content)
+
+
+def _copy_from_shadow(
+    shadow_dir: Path,
+    context_dir: Path,
+    files: list[Path],
+    email: str,
+    encryption_enabled: bool
+) -> None:
+    """
+    Copy files from shadow_dir to context_dir, decrypting if needed.
+
+    Uses master key decryption (v2) - files are encrypted with user's master key.
+
+    Args:
+        shadow_dir: SVN working copy directory
+        context_dir: User's plaintext directory
+        files: List of relative paths to copy
+        email: User's email (unused in v2, kept for API compat)
+        encryption_enabled: Whether encryption is enabled
+    """
+    for rel_path in files:
+        shadow_path = shadow_dir / rel_path
+        context_path = context_dir / rel_path
+
+        if not shadow_path.exists():
+            # File was deleted on remote - delete locally too
+            if context_path.exists():
+                context_path.unlink()
+                logger.debug(f"Deleted {rel_path} from context dir")
+            continue
+
+        # Skip directories (SVN update returns both files and dirs)
+        if shadow_path.is_dir():
+            context_path.mkdir(parents=True, exist_ok=True)
+            continue
+
+        # Ensure parent directory exists in context
+        context_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Read from shadow (may be encrypted)
+        content = shadow_path.read_bytes()
+
+        # Decrypt if needed
+        if encryption_enabled and HAS_ENCRYPTION:
+            if should_encrypt_file(rel_path) and is_encrypted_file(content):
+                try:
+                    content = decrypt_file_with_master_key(content, email)
+                    logger.debug(f"Decrypted {rel_path} for context dir")
+                except Exception as e:
+                    logger.warning(f"Could not decrypt {rel_path}: {e}")
+                    continue
+
+        # Write plaintext to context dir
+        context_path.write_bytes(content)
+
+

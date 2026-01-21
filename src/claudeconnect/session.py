@@ -18,8 +18,21 @@ from uuid import uuid4
 
 import httpx
 
-from .config import get_config, get_tokens, Tokens
+from .config import get_config, get_tokens, Tokens, get_shadow_dir
 from .svn_ops import SvnClient, SvnError, email_to_repo_name, repo_url_for_email
+from .sync import sync_once
+
+# Encryption imports (optional)
+try:
+    from .encryption import (
+        is_encryption_available,
+        is_encrypted_file,
+        decrypt_file_with_friend_master_key,
+        has_friend_master_key,
+    )
+    HAS_ENCRYPTION = is_encryption_available()
+except ImportError:
+    HAS_ENCRYPTION = False
 
 
 # Directory for interactive session transcripts
@@ -61,6 +74,41 @@ def lookup_repo(email: str) -> str | None:
         return None
 
 
+def decrypt_peer_context(peer_dir: Path, peer_email: str) -> int:
+    """
+    Decrypt all encrypted files in a peer's context using their master key.
+
+    Args:
+        peer_dir: Path to the peer's checked-out context
+        peer_email: The peer's email (to look up their master key)
+
+    Returns:
+        Number of files decrypted
+    """
+    if not HAS_ENCRYPTION:
+        return 0
+
+    if not has_friend_master_key(peer_email):
+        print(f"  Warning: No master key for {peer_email}, cannot decrypt their files")
+        return 0
+
+    decrypted_count = 0
+    for md_file in peer_dir.rglob("*.md"):
+        if ".svn" in md_file.parts:
+            continue
+
+        try:
+            content = md_file.read_bytes()
+            if is_encrypted_file(content):
+                plaintext = decrypt_file_with_friend_master_key(content, peer_email)
+                md_file.write_bytes(plaintext)
+                decrypted_count += 1
+        except Exception as e:
+            print(f"  Warning: Could not decrypt {md_file.name}: {e}")
+
+    return decrypted_count
+
+
 def pull_peer_context(peer_email: str, svn_token: str, our_email: str) -> Path | None:
     """
     Pull or update a peer's context to local cache.
@@ -89,6 +137,10 @@ def pull_peer_context(peer_email: str, svn_token: str, our_email: str) -> Path |
             updated = svn.update()
             if updated:
                 print(f"  Pulled {len(updated)} updates")
+            # Decrypt any encrypted files
+            decrypted = decrypt_peer_context(peer_dir, peer_email)
+            if decrypted:
+                print(f"  Decrypted {decrypted} files")
             return peer_dir
         except SvnError as e:
             print(f"  Update failed: {e}")
@@ -101,6 +153,10 @@ def pull_peer_context(peer_email: str, svn_token: str, our_email: str) -> Path |
         try:
             svn.checkout()
             print(f"  Checked out to {peer_dir}")
+            # Decrypt any encrypted files
+            decrypted = decrypt_peer_context(peer_dir, peer_email)
+            if decrypted:
+                print(f"  Decrypted {decrypted} files")
             return peer_dir
         except SvnError as e:
             print(f"  Checkout failed: {e}")
@@ -290,25 +346,29 @@ async def run_session(
     our_transcript_path.write_text(transcript)
     print(f"\nSaved transcript: {our_transcript_path}")
 
-    # Commit to our repo
+    # Commit to our repo using sync (handles shadow dir architecture)
     print("\nCommitting to your repo...")
-    our_svn = SvnClient(our_context_dir, repo_url_for_email(our_email), svn_token, our_email)
     try:
-        our_svn.add(our_transcript_path.relative_to(our_context_dir), parents=True)
-        our_svn.commit(f"Session with {peer_email}: {session_id}")
+        repo_url = repo_url_for_email(our_email)
+        sync_once(our_context_dir, repo_url, svn_token, our_email)
         print("  Committed to your repo")
-    except SvnError as e:
+    except Exception as e:
         print(f"  Warning: Failed to commit to your repo: {e}")
 
     # Commit to peer's repo
     print(f"\nCommitting to {peer_email}'s repo...")
-    peer_conv_dir = peer_context_dir / "claudeconnect" / f"with-{email_to_repo_name(our_email)}"
-    peer_conv_dir.mkdir(parents=True, exist_ok=True)
-    peer_transcript_path = peer_conv_dir / transcript_filename
-    peer_transcript_path.write_text(transcript)
-
     peer_svn = SvnClient(peer_context_dir, repo_url_for_email(peer_email), svn_token, our_email)
     try:
+        # Revert any decrypted files before committing
+        peer_svn.revert(recursive=True)
+
+        # Now create the conversation directory and write transcript
+        peer_conv_dir = peer_context_dir / "claudeconnect" / f"with-{email_to_repo_name(our_email)}"
+        peer_conv_dir.mkdir(parents=True, exist_ok=True)
+        peer_transcript_path = peer_conv_dir / transcript_filename
+        peer_transcript_path.write_text(transcript)
+
+        # Add and commit just the transcript
         peer_svn.add(peer_transcript_path.relative_to(peer_context_dir), parents=True)
         peer_svn.commit(f"Session with {our_email}: {session_id}")
         print(f"  Committed to {peer_email}'s repo")
@@ -546,25 +606,30 @@ async def run_dual_session(
     our_transcript_path.write_text(transcript)
     print(f"\nSaved transcript: {our_transcript_path}")
 
-    # Commit to our repo
+    # Commit to our repo using sync (handles shadow dir architecture)
     print("\nCommitting to your repo...")
-    our_svn = SvnClient(our_context_dir, repo_url_for_email(our_email), svn_token, our_email)
     try:
-        our_svn.add(our_transcript_path.relative_to(our_context_dir), parents=True)
-        our_svn.commit(f"Dual session with {peer_email}: {session_id}")
+        repo_url = repo_url_for_email(our_email)
+        sync_once(our_context_dir, repo_url, svn_token, our_email)
         print("  Committed to your repo")
-    except SvnError as e:
+    except Exception as e:
         print(f"  Warning: Failed to commit to your repo: {e}")
 
     # Commit to peer's repo
     print(f"\nCommitting to {peer_email}'s repo...")
-    peer_conv_dir = peer_context_dir / "claudeconnect" / f"with-{email_to_repo_name(our_email)}"
-    peer_conv_dir.mkdir(parents=True, exist_ok=True)
-    peer_transcript_path = peer_conv_dir / transcript_filename
-    peer_transcript_path.write_text(transcript)
-
     peer_svn = SvnClient(peer_context_dir, repo_url_for_email(peer_email), svn_token, our_email)
     try:
+        # Revert any decrypted files before committing (they're marked as modified)
+        # We only want to commit the new transcript, not the decrypted content
+        peer_svn.revert(recursive=True)
+
+        # Now create the conversation directory and write transcript
+        peer_conv_dir = peer_context_dir / "claudeconnect" / f"with-{email_to_repo_name(our_email)}"
+        peer_conv_dir.mkdir(parents=True, exist_ok=True)
+        peer_transcript_path = peer_conv_dir / transcript_filename
+        peer_transcript_path.write_text(transcript)
+
+        # Add and commit just the transcript
         peer_svn.add(peer_transcript_path.relative_to(peer_context_dir), parents=True)
         peer_svn.commit(f"Dual session with {our_email}: {session_id}")
         print(f"  Committed to {peer_email}'s repo")
