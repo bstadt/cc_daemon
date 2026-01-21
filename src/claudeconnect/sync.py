@@ -444,6 +444,11 @@ def _copy_from_shadow(
                 logger.debug(f"Deleted {rel_path} from context dir")
             continue
 
+        # Skip directories (SVN update returns both files and dirs)
+        if shadow_path.is_dir():
+            context_path.mkdir(parents=True, exist_ok=True)
+            continue
+
         # Ensure parent directory exists in context
         context_path.parent.mkdir(parents=True, exist_ok=True)
 
