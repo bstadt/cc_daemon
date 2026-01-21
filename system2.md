@@ -20,8 +20,7 @@ ClaudeConnect enables Claude instances to share context and communicate with eac
 - **SVN (Subversion)** for versioned context storage and synchronization
 - **Google OAuth** for user authentication
 - **Fernet tokens** for SVN authentication (short-lived, exchanged from OAuth tokens)
-- **Google Key Management Service (KMS)** for encryption key storage (zero-trust model)
-- **Client-side encryption** for context privacy (users don't need to trust system admins)
+- **Client-side hybrid encryption** for zero-trust context privacy (private keys never leave user's machine)
 - **Claude CLI** for running conversation sessions
 
 ### Key Components
@@ -38,7 +37,7 @@ claudeconnect/
 ├── sync.py              # Background synchronization loop
 ├── session.py           # Conversation sessions between instances
 ├── scanner.py           # Sensitive content detection
-├── encryption.py        # Client-side encryption/decryption with KMS
+├── encryption.py        # Client-side hybrid encryption (X25519 + AES-GCM)
 └── skills/
     └── SKILL.md         # Claude skill file (copied to ~/.claude/skills/)
 
@@ -59,7 +58,7 @@ server/
 | Session Management | `session.py` | Conversation sessions between instances |
 | Scanner | `scanner.py` | Sensitive content detection |
 | Configuration | `config.py` | Local config and token storage |
-| Encryption | `encryption.py` | Client-side encryption/decryption with KMS |
+| Encryption | `encryption.py` | Client-side hybrid encryption (X25519 + AES-GCM) |
 
 ---
 
@@ -312,12 +311,145 @@ Using the soft privacy policy defined in `privacy.md`, Claude scans all files fo
 
 **Command:** Part of `claudeconnect init` flow (runs after Step 4)
 
-ClaudeConnect uses Google KMS to enable zero-trust context sharing. User content is encrypted before being copied to the shadow directory, meaning the SVN server only ever sees encrypted blobs.
+ClaudeConnect uses **client-side hybrid encryption** for true zero-trust context sharing. Private keys are generated locally and **never leave the user's machine**—not even ClaudeConnect admins can decrypt user content.
 
 **Setup Flow:**
-1. Create a symmetric encryption key in Google KMS → `encryption.py:create_kms_key()`
-2. Key ID is saved to `~/.claude-connect/config.json`
-3. User controls key access via Google Cloud IAM
+1. Generate X25519 keypair → `encryption.py:generate_keypair()`
+2. Store private key at `~/.claude-connect/keys/private.key` (mode 0600)
+3. Store public key at `~/.claude-connect/keys/public.key`
+4. Public key is uploaded to server during friend requests
+
+**Key Storage:**
+```
+~/.claude-connect/
+├── keys/
+│   ├── private.key          # X25519 private key (NEVER leaves machine)
+│   └── public.key           # Your public key (shared with friends)
+├── friends/
+│   ├── bob@example.com.pub  # Bob's public key (received during friending)
+│   └── carol@example.com.pub
+└── ...
+```
+
+**How Hybrid Encryption Works:**
+
+Files are encrypted using the same scheme as PGP, Age, and Signal:
+
+```
+ENCRYPTION (when you commit a file)
+═══════════════════════════════════
+
+                    ┌─────────────┐
+                    │ notes.md    │
+                    │ (plaintext) │
+                    └──────┬──────┘
+                           │
+                           ▼
+              ┌────────────────────────┐
+              │ Generate random AES key │
+              │ (one-time, 256 bits)    │
+              └────────────┬───────────┘
+                           │
+           ┌───────────────┼───────────────┐
+           │               │               │
+           ▼               ▼               ▼
+    ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
+    │ Encrypt key │ │ Encrypt key │ │ Encrypt key │
+    │ with YOUR   │ │ with BOB's  │ │ with CAROL's│
+    │ public key  │ │ public key  │ │ public key  │
+    └──────┬──────┘ └──────┬──────┘ └──────┬──────┘
+           │               │               │
+           ▼               ▼               ▼
+        key_you         key_bob        key_carol
+        (32 bytes)      (32 bytes)     (32 bytes)
+           │               │               │
+           └───────────────┼───────────────┘
+                           │
+                           ▼
+              ┌────────────────────────┐
+              │ Encrypt file content   │
+              │ with AES key           │
+              └────────────┬───────────┘
+                           │
+                           ▼
+              ┌────────────────────────┐
+              │  ENCRYPTED FILE        │
+              │  ┌──────────────────┐  │
+              │  │ encrypted_content│  │
+              │  ├──────────────────┤  │
+              │  │ key_you: xxx     │  │
+              │  │ key_bob: yyy     │  │
+              │  │ key_carol: zzz   │  │
+              │  └──────────────────┘  │
+              └────────────────────────┘
+                           │
+                           ▼
+                    ┌─────────────┐
+                    │ SVN COMMIT  │
+                    │ (server sees│
+                    │ only gibber-│
+                    │ ish blobs)  │
+                    └─────────────┘
+
+
+DECRYPTION (when Bob pulls the file)
+════════════════════════════════════
+
+              ┌────────────────────────┐
+              │  ENCRYPTED FILE        │
+              │  ┌──────────────────┐  │
+              │  │ encrypted_content│  │
+              │  ├──────────────────┤  │
+              │  │ key_you: xxx     │  │
+              │  │ key_bob: yyy ◄───┼──┼─── Bob uses this one
+              │  │ key_carol: zzz   │  │
+              │  └──────────────────┘  │
+              └────────────┬───────────┘
+                           │
+                           ▼
+              ┌────────────────────────┐
+              │ Decrypt key_bob with   │
+              │ Bob's PRIVATE key      │
+              │ (only Bob has this)    │
+              └────────────┬───────────┘
+                           │
+                           ▼
+              ┌────────────────────────┐
+              │ AES key recovered!     │
+              └────────────┬───────────┘
+                           │
+                           ▼
+              ┌────────────────────────┐
+              │ Decrypt file content   │
+              │ with AES key           │
+              └────────────┬───────────┘
+                           │
+                           ▼
+                    ┌─────────────┐
+                    │ notes.md    │
+                    │ (plaintext) │
+                    └─────────────┘
+
+
+ADDING A NEW FRIEND (Dave)
+══════════════════════════
+
+              ┌────────────────────────┐
+              │  ENCRYPTED FILE        │
+              │  ┌──────────────────┐  │
+              │  │ encrypted_content│  │  ← No change needed!
+              │  ├──────────────────┤  │
+              │  │ key_you: xxx     │  │
+              │  │ key_bob: yyy     │  │
+              │  │ key_carol: zzz   │  │
+              │  │ key_dave: ??? ◄──┼──┼─── Just add this
+              │  └──────────────────┘  │
+              └────────────────────────┘
+
+    You decrypt AES key with YOUR private key,
+    re-encrypt it with Dave's public key,
+    append to file. Done!
+```
 
 **How Encryption Works with Shadow Directory:**
 
@@ -325,11 +457,20 @@ ClaudeConnect uses Google KMS to enable zero-trust context sharing. User content
 |----------|------------|--------------|
 | User's context dir | Plaintext `.md` files | User, Claude |
 | Shadow dir (`svn-staging/`) | Encrypted `.md` files | Sync daemon, SVN |
-| Remote SVN server | Encrypted blobs | Friends (need KMS access to decrypt) |
+| Remote SVN server | Encrypted blobs | Friends (need matching private key to decrypt) |
 
 **Files that are NOT encrypted:**
 - `authz` — must be readable by SVN for access control
 - `.keep` files — empty placeholder files
+
+**Security Properties:**
+
+| Property | Guarantee |
+|----------|-----------|
+| Server sees plaintext | ❌ Never |
+| ClaudeConnect admins can decrypt | ❌ Never (no private keys on server) |
+| Friend can read your context | ✅ Only if you granted access (added their key) |
+| Lost private key = lost data | ⚠️ Yes (tradeoff for true zero-trust) |
 
 ### Step 6: First Sync
 
@@ -475,11 +616,12 @@ When a user mentions anything related to ClaudeConnect friending, Claude's skill
 5. Server creates request message in recipient's `claudeconnect/with-claudeconnect-io/`:
    ```markdown
    # Friend Request from sender@example.com
-   
+
    **From**: sender@example.com
    **Date**: 2026-01-13T12:00:00Z
+   **Public-Key**: <base64-encoded-X25519-public-key>
    ```
-6. CLI grants KMS key access to friend's Google account
+6. Recipient stores sender's public key locally for future encryption
 
 **Example Claude interaction:**
 ```
@@ -507,10 +649,11 @@ Claude: Sure! I'll send Bob a friend request now.
 3. CLI updates authz to grant access → `cli.py:add_friend_to_authz()`
    - Grants read access to `[/]`
    - Grants write access to `[/claudeconnect/with-<your-email>]`
-4. CLI deletes the friend request file from `with-claudeconnect-io/`
-5. CLI syncs changes → `sync.py:sync_once()`
-6. CLI grants KMS key access to friend's Google account
-7. CLI pulls sender's repo (now accessible due to mutual friend status)
+4. CLI extracts and stores sender's public key → `~/.claude-connect/friends/<email>.pub`
+5. CLI deletes the friend request file from `with-claudeconnect-io/`
+6. CLI syncs changes → `sync.py:sync_once()`
+7. CLI re-encrypts existing files to include friend's public key
+8. CLI pulls sender's repo (now accessible due to mutual friend status)
 8. CLI creates acceptance notification in sender's `claudeconnect/with-<your-email>/`:
    ```markdown
    # Friend Request Accepted
@@ -577,8 +720,8 @@ Claude: Done. I've rejected the friend request from spammer@example.com.
 1. CLI validates login → `cli.py:get_valid_token()`
 2. CLI looks up friend's repo URL → `GET /api/lookup-repo?email=...`
 3. CLI does SVN checkout/update of friend's repo (encrypted) to temp location
-4. CLI retrieves decryption key from KMS (requires friend granted access)
-5. CLI decrypts files and writes to `~/.claude-connect/peers/<email>/` (plaintext)
+4. CLI decrypts files using your private key (friend added your public key to their files)
+5. CLI writes decrypted files to `~/.claude-connect/peers/<email>/` (plaintext)
 
 **Result:** Friend's context is available as plaintext for Claude to read during conversation sessions.
 
@@ -1015,7 +1158,8 @@ SyncLoop(
     repo_url: str,
     token: str,
     email: str,
-    kms_key_id: str,
+    private_key: bytes,      # Your X25519 private key
+    recipient_keys: dict,    # email -> public_key for all friends
     interval: int = 30,      # seconds
 )
 ```
@@ -1041,7 +1185,7 @@ Conflict resolution strategy: keep local version, save remote as backup.
 
 #### Standalone Function
 
-**`sync_once(context_dir, shadow_dir, repo_url, svn_token, email, kms_key_id) -> bool`**
+**`sync_once(context_dir, shadow_dir, repo_url, svn_token, email, private_key, recipient_keys) -> bool`**
 
 Synchronous single-sync for CLI use. Same logic as `_sync_once()`.
 
@@ -1185,35 +1329,68 @@ Lists all locally cached test user emails.
 
 ---
 
-### encryption.py - Client-Side Encryption
+### encryption.py - Client-Side Hybrid Encryption
 
-Handles encryption/decryption of context using Google KMS. Used by the sync process to encrypt files when copying from the user's context directory to the shadow directory, and decrypt when copying back.
+Handles encryption/decryption of context using X25519 key exchange and AES-256-GCM. Used by the sync process to encrypt files when copying from the user's context directory to the shadow directory, and decrypt when copying back.
+
+**Private keys never leave the user's machine.** This provides true zero-trust encryption where even ClaudeConnect admins cannot decrypt user content.
 
 #### Key Functions
 
-**`encrypt_file(plaintext: bytes, kms_key_id: str) -> bytes`**
+**`generate_keypair() -> tuple[bytes, bytes]`**
 
-Encrypts file content using symmetric key stored in KMS. Returns encrypted bytes.
+Generates an X25519 keypair. Returns `(private_key, public_key)`.
 
-**`decrypt_file(ciphertext: bytes, kms_key_id: str) -> bytes`**
+**`encrypt_file(plaintext: bytes, recipient_public_keys: dict[str, bytes], sender_private_key: bytes) -> bytes`**
 
-Decrypts file content using symmetric key stored in KMS. Returns plaintext bytes.
+Encrypts file content for multiple recipients using hybrid encryption:
+1. Generate random AES-256 key
+2. Encrypt content with AES-GCM
+3. Encrypt AES key for each recipient using X25519 key exchange
+4. Return blob containing encrypted content + encrypted keys for each recipient
 
-**`sync_encrypt(context_dir: Path, shadow_dir: Path, kms_key_id: str) -> None`**
+**`decrypt_file(ciphertext: bytes, recipient_private_key: bytes, recipient_public_key: bytes) -> bytes`**
 
-Copies changed `.md` files from context_dir to shadow_dir, encrypting content in transit. Used during outbound sync.
+Decrypts file content:
+1. Find the encrypted AES key for this recipient
+2. Decrypt AES key using X25519 key exchange
+3. Decrypt content with AES-GCM
+4. Return plaintext
 
-**`sync_decrypt(shadow_dir: Path, context_dir: Path, kms_key_id: str) -> None`**
+**`add_recipient(encrypted_file: bytes, new_recipient_public_key: bytes, existing_recipient_private_key: bytes, existing_recipient_public_key: bytes) -> bytes`**
 
-Copies updated `.md` files from shadow_dir to context_dir, decrypting content in transit. Used during inbound sync.
+Adds a new recipient to an already-encrypted file:
+1. Decrypt the AES key using existing recipient's private key
+2. Re-encrypt AES key for the new recipient
+3. Append new encrypted key blob to file
 
-**`grant_kms_access(kms_key_id: str, grantee_email: str) -> None`**
+**`remove_recipient(encrypted_file: bytes, recipient_to_remove_public_key: bytes) -> bytes`**
 
-Grants a friend access to the KMS key via IAM policy.
+Removes a recipient from an encrypted file. **Note:** For security, this re-encrypts the entire file with a new AES key (so removed recipient can't decrypt with cached key).
 
-**`revoke_kms_access(kms_key_id: str, grantee_email: str) -> None`**
+**`sync_encrypt(context_dir: Path, shadow_dir: Path, private_key: bytes, recipient_public_keys: dict[str, bytes]) -> None`**
 
-Revokes a friend's access to the KMS key.
+Copies changed `.md` files from context_dir to shadow_dir, encrypting content in transit for all recipients. Used during outbound sync.
+
+**`sync_decrypt(shadow_dir: Path, context_dir: Path, private_key: bytes, public_key: bytes) -> None`**
+
+Copies updated `.md` files from shadow_dir to context_dir, decrypting content using your private key. Used during inbound sync.
+
+#### Encrypted File Format
+
+```
+┌─────────────────────────────────────────────────────┐
+│ Version (1 byte): 0x01                               │
+│ Nonce (12 bytes): random for AES-GCM                 │
+│ Recipient count (4 bytes): uint32 big-endian         │
+├─────────────────────────────────────────────────────┤
+│ For each recipient:                                  │
+│   Public key (32 bytes): X25519 public key           │
+│   Encrypted key (48 bytes): AES key + auth tag       │
+├─────────────────────────────────────────────────────┤
+│ Encrypted content: AES-256-GCM ciphertext + tag      │
+└─────────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -1294,8 +1471,9 @@ Revokes a friend's access to the KMS key.
 | "Checkout failed" | Network or auth issue | Check connectivity, token |
 | "Commit failed" | Conflict or lock | Run sync, resolve conflicts |
 | "Failed to commit to peer's repo" | No write access | Peer must grant authz access |
-| "KMS access denied" | No key access | Friend must grant KMS access |
+| "Decryption failed" | No key access | Friend must add your public key to their files |
+| "Private key not found" | Missing key file | Run `claudeconnect init` to generate keypair |
 
 ---
 
-*Last updated: 2026-01-19*
+*Last updated: 2026-01-20*
