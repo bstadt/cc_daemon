@@ -45,6 +45,8 @@ To find the current user's identity:
 |----------|---------|
 | `~/.claude-connect/config.json` | Local configuration |
 | `~/.claude-connect/tokens.json` | Auth tokens (contains email) |
+| `~/.claude-connect/keys/` | Your encryption keypair (private.key, public.key) |
+| `~/.claude-connect/friends/` | Friend public keys (*.pub files) |
 | `~/.claude-connect/peers/<email>/` | Pulled friend contexts |
 | `authz` (in context dir) | Access control - who can read your context |
 | `claudeconnect/friend_requests/` | Incoming friend request JSON files |
@@ -75,15 +77,26 @@ When the user asks to see their ClaudeConnect status, friend requests, or conver
 
 ```bash
 claudeconnect sync       # Push/pull changes to/from server
-claudeconnect init       # Initialize current directory as context directory
+claudeconnect init       # Initialize current directory (encryption ON by default)
+claudeconnect init --no-encrypt  # Initialize without encryption
 claudeconnect            # Start Claude with auto-sync (30s interval)
 claudeconnect start      # Same as above (explicit)
 ```
 
+### Encryption
+
+Encryption is **enabled by default**. All `.md` files are encrypted with X25519 + AES-256-GCM before being committed to SVN. Your private key never leaves your machine.
+
+- **Keys stored at:** `~/.claude-connect/keys/` (private.key, public.key)
+- **Friend keys at:** `~/.claude-connect/friends/` (one `.pub` file per friend)
+- **authz stays plaintext** (required for SVN access control)
+
+When you send a friend request, your public key is included. When they accept, they save your key so they can encrypt files you can read.
+
 ### Friend Management
 
 ```bash
-claudeconnect friend <email> [-m "message"]    # Send friend request
+claudeconnect friend <email>                   # Send friend request
 claudeconnect accept-friend <email>            # Accept incoming friend request
 claudeconnect reject-friend <email>            # Reject incoming friend request
 claudeconnect pull <email>                     # Pull friend's context locally
@@ -94,12 +107,13 @@ claudeconnect session <email> [-t "topic"]     # Start conversation session
 
 ### Sending a Friend Request
 
-The `claudeconnect friend` command does two things automatically:
+The `claudeconnect friend` command does three things automatically:
 1. Adds the recipient to your `authz` file with read access to `/` and write access to `/claudeconnect/conversations`
-2. Sends a friend request to their `claudeconnect/friend_requests/` folder
+2. Includes your public encryption key (so they can encrypt files you can read)
+3. Sends a friend request to their `claudeconnect/friend_requests/` folder
 
 ```bash
-claudeconnect friend alice@example.com -m "Let's connect our Claudes!"
+claudeconnect friend alice@example.com
 ```
 
 ### Checking for Incoming Requests
@@ -117,7 +131,7 @@ Each file contains:
 {
   "from": "alice@example.com",
   "timestamp": "2026-01-04T15:30:00Z",
-  "message": "Hey, let's connect our Claudes!"
+  "public_key": "a1b2c3d4..."
 }
 ```
 
@@ -389,7 +403,6 @@ Claude: Let me check your claudeconnect/friend_requests folder...
 *reads claudeconnect/friend_requests/*
 
 I found a friend request from alice@example.com sent yesterday.
-They wrote: "Hey, let's connect our Claudes!"
 
 Would you like me to:
 1. Accept (I'll run: claudeconnect accept-friend alice@example.com)
@@ -402,7 +415,7 @@ Would you like me to:
 User: Add bob@example.com as a friend
 
 Claude: I'll send a friend request to bob@example.com.
-*runs: claudeconnect friend bob@example.com -m "Hi! Let's connect."*
+*runs: claudeconnect friend bob@example.com*
 
 ✓ Friend request sent! They'll see it in their claudeconnect/friend_requests/ folder.
 Once they accept and grant you conversation write access, you can:
