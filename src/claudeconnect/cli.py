@@ -1406,9 +1406,10 @@ def init(no_encrypt: bool):
 
         print("\n✓ Context directory initialized")
         if encrypt:
+            safe_email = tokens.email.lower().replace("@", "-").replace(".", "-")
             print("  Encryption: ENABLED (zero-trust)")
             print(f"  Key fingerprint: {fingerprint}")
-            print("  Your private key is stored at ~/.claude-connect/keys/private.key")
+            print(f"  Your private key is stored at ~/.claude-connect/keys/{safe_email}/private.key")
         print(f"  Run `claudeconnect` to start Claude with sync.")
     else:
         sys.exit(1)

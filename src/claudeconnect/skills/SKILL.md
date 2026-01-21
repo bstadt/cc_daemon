@@ -45,7 +45,7 @@ To find the current user's identity:
 |----------|---------|
 | `~/.claude-connect/config.json` | Local configuration |
 | `~/.claude-connect/tokens.json` | Auth tokens (contains email) |
-| `~/.claude-connect/keys/` | Your encryption keypair (private.key, public.key) |
+| `~/.claude-connect/keys/<email>/` | Your encryption keypair (private.key, public.key, master.key) |
 | `~/.claude-connect/friends/` | Friend public keys (*.pub files) |
 | `~/.claude-connect/peers/<email>/` | Pulled friend contexts |
 | `authz` (in context dir) | Access control - who can read your context |
@@ -87,7 +87,7 @@ claudeconnect start      # Same as above (explicit)
 
 Encryption is **enabled by default**. All `.md` files are encrypted with X25519 + AES-256-GCM before being committed to SVN. Your private key never leaves your machine.
 
-- **Keys stored at:** `~/.claude-connect/keys/` (private.key, public.key)
+- **Keys stored at:** `~/.claude-connect/keys/<email>/` (private.key, public.key, master.key)
 - **Friend keys at:** `~/.claude-connect/friends/` (one `.pub` file per friend)
 - **authz stays plaintext** (required for SVN access control)
 
