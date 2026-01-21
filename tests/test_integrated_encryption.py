@@ -264,6 +264,33 @@ class TestIntegratedEncryptionFlow:
         assert (keys_dir / "private.key").exists(), "Private key should exist"
         assert (keys_dir / "public.key").exists(), "Public key should exist"
 
+    def test_init_sets_encryption_enabled_in_config(self, three_test_users, tmp_path):
+        """Verify init sets encryption_enabled=True in config."""
+        import json
+
+        email = three_test_users[0]
+        context_dir = tmp_path / "context"
+        context_dir.mkdir()
+
+        env = {"CC_TEST_USER": email}
+
+        result = run_cli(
+            ["init"],
+            env=env,
+            cwd=str(context_dir),
+            input_text="y\n",
+        )
+
+        assert result.returncode == 0, f"Init should succeed: {result.stderr}\n{result.stdout}"
+
+        # Verify config file has encryption_enabled=True
+        config_file = Path.home() / ".claude-connect" / "config.json"
+        assert config_file.exists(), "Config file should exist"
+
+        config_data = json.loads(config_file.read_text())
+        assert config_data.get("encryption_enabled") is True, \
+            f"Config should have encryption_enabled=True, got: {config_data}"
+
     def test_sync_encrypts_markdown_files(self, three_test_users, tmp_path):
         """Verify sync encrypts .md files when encryption is enabled."""
         email = three_test_users[0]
@@ -335,11 +362,12 @@ class TestIntegratedEncryptionFlow:
         )
 
         # Check if friend request was sent (may fail if server not available)
-        if result.returncode == 0:
-            assert "public key" in result.stdout.lower() or "friend request sent" in result.stdout.lower()
-        else:
-            # Skip if server connectivity issue
+        if result.returncode != 0:
             pytest.skip(f"Friend request failed (server issue?): {result.stderr}")
+
+        # MUST mention public key - this is critical for encryption to work
+        assert "public key" in result.stdout.lower(), \
+            f"Friend request MUST include public key. Output was:\n{result.stdout}"
 
     @pytest.mark.timeout(180)
     def test_full_friend_flow_with_encryption(self, three_test_users, tmp_path):
