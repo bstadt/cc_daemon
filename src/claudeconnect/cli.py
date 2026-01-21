@@ -81,7 +81,7 @@ def display_startup_banner(context_dir: Path, email: str, clear_screen: bool = T
 
     # Two Claude creatures side by side - coral (you) and lime (friend)
     print()
-    print(f" {CORAL}▐{BLACK_BG}▛███▜{RESET}{CORAL}▌{RESET} {YELLOW}✦{RESET} {LIME}▐{BLACK_BG}▛███▜{RESET}{LIME}▌{RESET}   {WHITE}{BOLD}Claude Connect{RESET}")
+    print(f" {CORAL}▐{BLACK_BG}▛███▜{RESET}{CORAL}▌{RESET} {YELLOW}✱{RESET} {LIME}▐{BLACK_BG}▛███▜{RESET}{LIME}▌{RESET}   {WHITE}{BOLD}Claude Connect{RESET}")
     print(f"{CORAL}▝▜█████▛▘{RESET} {LIME}▝▜█████▛▘{RESET}  {DIM}{email}{RESET}")
     print(f"  {CORAL}▘▘ ▝▝{RESET}     {LIME}▘▘ ▝▝{RESET}")
     print()
@@ -1374,6 +1374,30 @@ def pull(peer_email: str):
         print(f"\n✓ Context pulled to: {peer_dir}")
     else:
         print(f"\n✗ Failed to pull context")
+        sys.exit(1)
+
+
+@cli.command()
+@click.argument("peer_email")
+def interactive(peer_email: str):
+    """Start an interactive session with a friend's Claude.
+
+    Opens a new Terminal window where you can chat directly with a Claude
+    instance that has access to your friend's context. The conversation
+    will be captured and can be shared with both parties.
+
+    This command is macOS only. For other platforms, use `claudeconnect session`
+    for autonomous conversations between Claudes.
+
+    Example:
+        claudeconnect interactive alice@example.com
+    """
+    from .session import run_interactive_session
+
+    success, result = run_interactive_session(peer_email)
+
+    if not success:
+        print(f"\n✗ Failed to start interactive session: {result}")
         sys.exit(1)
 
 

@@ -100,7 +100,8 @@ claudeconnect friend <email>                   # Send friend request
 claudeconnect accept-friend <email>            # Accept incoming friend request
 claudeconnect reject-friend <email>            # Reject incoming friend request
 claudeconnect pull <email>                     # Pull friend's context locally
-claudeconnect session <email> [-t "topic"]     # Start conversation session
+claudeconnect session <email> [-t "topic"]     # Autonomous conversation (Claudes talk)
+claudeconnect interactive <email>              # Interactive session (you talk to friend's Claude) [macOS only]
 ```
 
 ## Friend Request Workflow
@@ -203,6 +204,10 @@ Common locations in friend contexts:
 
 ## Conversation Sessions
 
+There are two ways to have conversations with a friend's Claude:
+
+### Autonomous Sessions (Two Claudes Talk)
+
 Start a conversation between your Claude and a friend's Claude:
 
 ```bash
@@ -211,15 +216,55 @@ claudeconnect session friend@email.com -t "Project collaboration"
 
 This:
 1. Pulls their latest context
-2. Runs Claude with both contexts loaded
-3. Generates a conversation transcript
-4. Commits transcript to both repos (yours and theirs)
+2. Runs two Claude instances (one for each person)
+3. Has them converse autonomously
+4. Commits transcript to both repos
+
+### Interactive Sessions (You Talk to Friend's Claude)
+
+**macOS only.** Opens a new Terminal window where you chat directly with a Claude that has access to your friend's context:
+
+```bash
+claudeconnect interactive friend@email.com
+```
+
+This:
+1. Pulls their latest context
+2. Opens a new Terminal window
+3. Starts Claude with your friend's context loaded
+4. Captures the conversation transcript
+5. When done, press Ctrl+D twice to exit
+
+**Example interaction:**
+```
+User: Let me talk to Alice's Claude directly
+
+Claude: I'm opening an interactive session with Alice's Claude in a new terminal window.
+        When you're done, press Ctrl+D twice to exit.
+
+        [New Terminal window opens]
+
+--- In the new Terminal ---
+
+Alice's Claude: Hi! I'm representing Alice in this ClaudeConnect session.
+               I have access to her notes and context. What would you like to know?
+
+You: What's Alice working on lately?
+
+Alice's Claude: Based on Alice's notes, she's been focused on...
+```
+
+**When to use which:**
+- **Autonomous** (`session`): When you want your Claudes to sync up without your involvement
+- **Interactive** (`interactive`): When you want to personally ask questions or have a conversation
+
+### Transcript Locations
 
 Transcripts are saved to:
-- Your repo: `claudeconnect/conversations/with-<friend>/<session-id>.md`
-- Friend's repo: `claudeconnect/conversations/with-<you>/<session-id>.md`
+- Your repo: `claudeconnect/with-<friend>/<session-id>.md`
+- Friend's repo: `claudeconnect/with-<you>/<session-id>.md`
 
-**Note:** For the friend's repo commit to succeed, they must have granted you write access to `[/claudeconnect/conversations]` in their authz.
+**Note:** For the friend's repo commit to succeed, they must have granted you write access to `[/claudeconnect/with-<you>]` in their authz.
 
 ## Excluding Files from Sync
 
@@ -433,6 +478,19 @@ Claude: Let me pull Brandon's latest context...
 *reads ~/.claude-connect/peers/brandon-example-com/work/current.md*
 
 Based on Brandon's context, he's currently working on...
+```
+
+### User wants to talk directly to a friend's Claude
+```
+User: I want to chat with Alice's Claude directly
+
+Claude: I'll open an interactive session with Alice's Claude in a new terminal window.
+*runs: claudeconnect interactive alice@example.com*
+
+✓ Interactive session started! A new Terminal window should have opened where you can
+chat directly with Alice's Claude. It has access to her notes and context.
+
+When you're done, press Ctrl+D twice to exit the session.
 ```
 
 ### User just initialized ClaudeConnect
