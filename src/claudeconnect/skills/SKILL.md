@@ -49,8 +49,8 @@ To find the current user's identity:
 | `~/.claude-connect/friends/` | Friend public keys (*.pub files) |
 | `~/.claude-connect/peers/<email>/` | Pulled friend contexts |
 | `authz` (in context dir) | Access control - who can read your context |
-| `claudeconnect/friend_requests/` | Incoming friend request JSON files |
-| `claudeconnect/conversations/` | Conversation transcripts with friends |
+| `claudeconnect/with-claudeconnect-io/` | System messages including friend requests |
+| `claudeconnect/with-<friend-email>/` | Conversation transcripts with each friend |
 
 ## CLI Commands
 
@@ -108,9 +108,9 @@ claudeconnect session <email> [-t "topic"]     # Start conversation session
 ### Sending a Friend Request
 
 The `claudeconnect friend` command does three things automatically:
-1. Adds the recipient to your `authz` file with read access to `/` and write access to `/claudeconnect/conversations`
+1. Adds the recipient to your `authz` file with read access to `/` and write access to `/claudeconnect/with-<your-email>`
 2. Includes your public encryption key (so they can encrypt files you can read)
-3. Sends a friend request to their `claudeconnect/friend_requests/` folder
+3. Sends a friend request to their `claudeconnect/with-claudeconnect-io/` folder
 
 ```bash
 claudeconnect friend alice@example.com
@@ -118,12 +118,12 @@ claudeconnect friend alice@example.com
 
 ### Checking for Incoming Requests
 
-Look in the `claudeconnect/friend_requests/` folder for `.json` files:
+Look in the `claudeconnect/with-claudeconnect-io/` folder for friend request `.json` files:
 
 ```
-claudeconnect/friend_requests/
-  alice@example.com.json
-  bob@test.org.json
+claudeconnect/with-claudeconnect-io/
+  alice-example-com.json
+  bob-test-org.json
 ```
 
 Each file contains:
@@ -146,7 +146,7 @@ claudeconnect accept-friend alice@example.com
 ```
 
 This command automatically:
-1. Updates your `authz` file with read access to `/` and write access to `/claudeconnect/conversations`
+1. Updates your `authz` file with read access to `/` and write access to `/claudeconnect/with-<their-email>`
 2. Deletes the friend request file
 3. Syncs all changes to the server
 
@@ -172,18 +172,21 @@ owner@email.com = rw           # You have full access
 friend1@example.com = r        # Friend can read your context
 friend2@test.org = r           # Another friend
 
-[/claudeconnect/friend_requests]
+[/claudeconnect/with-claudeconnect-io]
 * = rw                         # Anyone can write friend requests
 owner@email.com = rw
 
-# Friends can write conversations to your repo
-[/claudeconnect/conversations]
+# Each friend gets write access to their conversation folder
+[/claudeconnect/with-friend1-example-com]
 owner@email.com = rw
 friend1@example.com = rw       # Friend can push conversations to you
+
+[/claudeconnect/with-friend2-test-org]
+owner@email.com = rw
 friend2@test.org = rw          # Another friend
 ```
 
-To remove a friend: delete their lines from both `[/]` and `[/claudeconnect/conversations]`, then sync.
+To remove a friend: delete their lines from `[/]` and their `/claudeconnect/with-<email>` section, then sync.
 
 ## Reading Friend Context
 
@@ -199,7 +202,7 @@ Common locations in friend contexts:
 - `work/` - Current projects
 - `journal/` - Daily entries
 - `context/` - Current todos, focus areas
-- `claudeconnect/conversations/` - Past conversation transcripts
+- `claudeconnect/with-<your-email>/` - Past conversation transcripts with you
 
 ## Conversation Sessions
 
@@ -216,10 +219,10 @@ This:
 4. Commits transcript to both repos (yours and theirs)
 
 Transcripts are saved to:
-- Your repo: `claudeconnect/conversations/with-<friend>/<session-id>.md`
-- Friend's repo: `claudeconnect/conversations/with-<you>/<session-id>.md`
+- Your repo: `claudeconnect/with-<friend-email>/<session-id>.md`
+- Friend's repo: `claudeconnect/with-<your-email>/<session-id>.md`
 
-**Note:** For the friend's repo commit to succeed, they must have granted you write access to `[/claudeconnect/conversations]` in their authz.
+**Note:** For the friend's repo commit to succeed, they must have granted you write access to `[/claudeconnect/with-<your-email>]` in their authz.
 
 ## Excluding Files from Sync
 
@@ -378,7 +381,7 @@ Run `claudeconnect init` in your context directory first.
 This means the peer hasn't granted you write access to their conversations folder.
 Ask them to add to their authz:
 ```
-[/claudeconnect/conversations]
+[/claudeconnect/with-your-email-com]
 your@email.com = rw
 ```
 
@@ -399,8 +402,8 @@ For direct API access (requires `Authorization: Bearer {id_token}` header):
 ```
 User: Check if I have any friend requests
 
-Claude: Let me check your claudeconnect/friend_requests folder...
-*reads claudeconnect/friend_requests/*
+Claude: Let me check your claudeconnect/with-claudeconnect-io folder...
+*reads claudeconnect/with-claudeconnect-io/*
 
 I found a friend request from alice@example.com sent yesterday.
 
@@ -417,7 +420,7 @@ User: Add bob@example.com as a friend
 Claude: I'll send a friend request to bob@example.com.
 *runs: claudeconnect friend bob@example.com*
 
-✓ Friend request sent! They'll see it in their claudeconnect/friend_requests/ folder.
+✓ Friend request sent! They'll see it in their claudeconnect/with-claudeconnect-io/ folder.
 Once they accept and grant you conversation write access, you can:
 - Pull their context: claudeconnect pull bob@example.com
 - Start a session: claudeconnect session bob@example.com

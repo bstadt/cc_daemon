@@ -209,6 +209,25 @@ class TestSkillDocumentation:
             "SKILL.md still documents --message/-m option for friend command (removed)"
         )
 
+    def test_no_deprecated_friend_requests_path(self):
+        """Should not document deprecated friend_requests/ path."""
+        skill_content = SKILL_MD_PATH.read_text()
+
+        assert "friend_requests" not in skill_content, (
+            "SKILL.md still documents deprecated 'friend_requests/' path. "
+            "Friend requests now go to 'claudeconnect/with-claudeconnect-io/'"
+        )
+
+    def test_no_deprecated_conversations_path(self):
+        """Should not document deprecated /claudeconnect/conversations path."""
+        skill_content = SKILL_MD_PATH.read_text()
+
+        # The old path was /claudeconnect/conversations - now it's /claudeconnect/with-<email>
+        assert "/claudeconnect/conversations]" not in skill_content, (
+            "SKILL.md still documents deprecated '/claudeconnect/conversations' authz path. "
+            "Conversations now use '/claudeconnect/with-<friend-email>'"
+        )
+
 
 class TestSkillExamples:
     """Tests for example commands in SKILL.md."""
