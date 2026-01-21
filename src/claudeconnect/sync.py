@@ -340,8 +340,9 @@ def _detect_context_changes(context_dir: Path, shadow_dir: Path) -> dict:
             changes['added'].append(Path("authz"))
 
     # Find deleted files (in shadow but not in context)
+    # Exclude claudeconnect/ folder - that's managed by the server, not the user
     for path in shadow_dir.rglob("*.md"):
-        if ".svn" not in path.parts:
+        if ".svn" not in path.parts and "claudeconnect" not in path.parts:
             rel_path = path.relative_to(shadow_dir)
             if rel_path not in context_files:
                 changes['deleted'].append(rel_path)
