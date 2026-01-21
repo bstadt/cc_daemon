@@ -1180,13 +1180,14 @@ async def run_with_sync(
 
 
 @cli.command()
-@click.option("--encrypt", is_flag=True, help="Enable client-side encryption (X25519 + AES-256-GCM)")
-def init(encrypt: bool):
+@click.option("--no-encrypt", is_flag=True, help="Disable client-side encryption")
+def init(no_encrypt: bool):
     """Initialize current directory as context directory.
 
-    Use --encrypt to enable zero-trust client-side encryption.
-    Your private key never leaves your machine.
+    Encryption is enabled by default (X25519 + AES-256-GCM).
+    Use --no-encrypt to disable if you don't need privacy.
     """
+    encrypt = not no_encrypt
     # Check for mock/dev mode
     mock_dir = get_mock_dir()
     if mock_dir:
@@ -1212,11 +1213,11 @@ def init(encrypt: bool):
     cwd = Path.cwd()
 
     # Validate encryption requirements
-    if encrypt:
-        if not HAS_ENCRYPTION:
-            print("Error: Encryption requires cryptography package.")
-            print("  Install with: pip install claudeconnect[encryption]")
-            sys.exit(1)
+    if encrypt and not HAS_ENCRYPTION:
+        print("Warning: Encryption requires cryptography package.")
+        print("  Install with: pip install claudeconnect[encryption]")
+        print("  Continuing without encryption...")
+        encrypt = False
 
     if config.context_dir and Path(config.context_dir) != cwd:
         print(f"Warning: Switching context directory")

@@ -95,7 +95,7 @@ def three_encrypted_contexts(three_test_users, tmp_path):
 
         # Initialize with encryption
         result = run_cli(
-            ["init", "--encrypt"],
+            ["init"],
             env=env,
             cwd=str(context_dir),
             input_text="y\n",  # Confirm directory switch
@@ -240,8 +240,8 @@ class TestIntegratedEncryptionFlow:
     These tests exercise the complete workflow through CLI commands.
     """
 
-    def test_init_with_encryption_creates_keypair(self, three_test_users, tmp_path):
-        """Verify init --encrypt creates encryption keypair."""
+    def test_init_creates_keypair_by_default(self, three_test_users, tmp_path):
+        """Verify init creates encryption keypair by default."""
         email = three_test_users[0]
         context_dir = tmp_path / "context"
         context_dir.mkdir()
@@ -249,7 +249,7 @@ class TestIntegratedEncryptionFlow:
         env = {"CC_TEST_USER": email}
 
         result = run_cli(
-            ["init", "--encrypt"],
+            ["init"],
             env=env,
             cwd=str(context_dir),
             input_text="y\n",
@@ -274,7 +274,7 @@ class TestIntegratedEncryptionFlow:
 
         # Initialize with encryption
         result = run_cli(
-            ["init", "--encrypt"],
+            ["init"],
             env=env,
             cwd=str(context_dir),
             input_text="y\n",
@@ -307,7 +307,7 @@ class TestIntegratedEncryptionFlow:
         alice_env = {"CC_TEST_USER": alice_email}
 
         result = run_cli(
-            ["init", "--encrypt"],
+            ["init"],
             env=alice_env,
             cwd=str(alice_dir),
             input_text="y\n",
@@ -320,7 +320,7 @@ class TestIntegratedEncryptionFlow:
         bob_env = {"CC_TEST_USER": bob_email}
 
         result = run_cli(
-            ["init", "--encrypt"],
+            ["init"],
             env=bob_env,
             cwd=str(bob_dir),
             input_text="y\n",
@@ -374,7 +374,7 @@ class TestIntegratedEncryptionFlow:
             (bob_email, bob_env, bob_dir),
             (carol_email, carol_env, carol_dir),
         ]:
-            result = run_cli(["init", "--encrypt"], env=env, cwd=str(d), input_text="y\n")
+            result = run_cli(["init"], env=env, cwd=str(d), input_text="y\n")
             if result.returncode != 0:
                 pytest.fail(f"Init failed for {email}: {result.stderr}\n{result.stdout}")
 
@@ -451,7 +451,7 @@ class TestEncryptionEdgeCases:
         env = {"CC_TEST_USER": email}
 
         # Init with encryption
-        result = run_cli(["init", "--encrypt"], env=env, cwd=str(context_dir), input_text="y\n")
+        result = run_cli(["init"], env=env, cwd=str(context_dir), input_text="y\n")
         assert result.returncode == 0
 
         # Check authz is plaintext
@@ -465,7 +465,7 @@ class TestEncryptionEdgeCases:
     def test_encryption_without_cryptography(self, three_test_users, tmp_path, monkeypatch):
         """Verify graceful handling when cryptography is not installed."""
         # This test simulates missing cryptography by checking the error message
-        # when init --encrypt is run without the library
+        # when init is run without the cryptography library
         #
         # We can't actually uninstall cryptography during the test,
         # but we verify the error path exists in the code
