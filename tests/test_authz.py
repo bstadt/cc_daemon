@@ -147,32 +147,34 @@ class TestAuthzStructure:
         authz_content = (context_dir / "authz").read_text()
         assert "[/]" in authz_content, "Root section should exist"
 
-    def test_authz_has_friend_requests_section(self, test_context):
-        """Verify authz has friend_requests section."""
+    def test_authz_has_system_messages_section(self, test_context):
+        """Verify authz has with-claudeconnect-io section for system messages."""
         context_dir, test_user = test_context
 
         authz_content = (context_dir / "authz").read_text()
-        assert "[/claudeconnect/friend_requests]" in authz_content, \
-            "friend_requests section should exist"
+        assert "[/claudeconnect/with-claudeconnect-io]" in authz_content, \
+            "with-claudeconnect-io section should exist"
 
-    def test_authz_friend_requests_world_writable(self, test_context):
-        """Verify friend_requests is world-writable for friend requests to work."""
+    def test_authz_system_messages_not_world_writable(self, test_context):
+        """Verify with-claudeconnect-io is NOT world-writable (server uses admin bypass)."""
         context_dir, test_user = test_context
 
         authz_content = (context_dir / "authz").read_text()
 
-        # Find the friend_requests section
-        fr_start = authz_content.find("[/claudeconnect/friend_requests]")
-        assert fr_start != -1, "friend_requests section should exist"
+        # Find the with-claudeconnect-io section
+        section_start = authz_content.find("[/claudeconnect/with-claudeconnect-io]")
+        assert section_start != -1, "with-claudeconnect-io section should exist"
 
         # Get the section content (until next section or end)
-        fr_section = authz_content[fr_start:]
-        next_section = fr_section.find("\n[", 1)
+        section = authz_content[section_start:]
+        next_section = section.find("\n[", 1)
         if next_section != -1:
-            fr_section = fr_section[:next_section]
+            section = section[:next_section]
 
-        assert "* = rw" in fr_section, \
-            "friend_requests should have * = rw for world write access"
+        # Per system2.md, this should NOT be world-writable
+        # Server uses admin bypass to write friend requests
+        assert "* = rw" not in section, \
+            "with-claudeconnect-io should NOT be world-writable (server uses admin bypass)"
 
 
 class TestAuthzEdgeCases:
