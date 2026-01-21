@@ -78,7 +78,15 @@ class SvnClient:
         ]
 
         # Use system CA certs (fixes Homebrew OpenSSL not having Let's Encrypt roots)
-        env = {**os.environ, "SSL_CERT_FILE": "/etc/ssl/cert.pem"}
+        # DYLD_LIBRARY_PATH: On macOS, Homebrew's SVN may be compiled against a newer
+        # SQLite than the system provides, causing "SQLite compiled for X but running
+        # with Y" errors. Pointing to Homebrew's SQLite fixes this. Harmless on other
+        # systems (path ignored if it doesn't exist).
+        env = {
+            **os.environ,
+            "SSL_CERT_FILE": "/etc/ssl/cert.pem",
+            "DYLD_LIBRARY_PATH": "/opt/homebrew/opt/sqlite/lib",
+        }
 
         try:
             result = subprocess.run(
