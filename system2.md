@@ -311,29 +311,48 @@ Using the soft privacy policy defined in `privacy.md`, Claude scans all files fo
 
 **Command:** Part of `claudeconnect init` flow (runs after Step 4)
 
-ClaudeConnect uses **client-side hybrid encryption** for true zero-trust context sharing. Private keys are generated locally and **never leave the user's machine**—not even ClaudeConnect admins can decrypt user content.
+ClaudeConnect uses **master key encryption** for true zero-trust context sharing. Keys are generated locally and **never leave the user's machine**—not even ClaudeConnect admins can decrypt user content.
+
+**Architecture Overview:**
+
+Each user has three keys:
+- **Private key** (X25519): Used for key exchange when friending
+- **Public key** (X25519): Shared with friends, published in authz file
+- **Master key** (AES-256): Used to encrypt all your files
+
+When you friend someone:
+1. You encrypt your master key with their public key
+2. Send the encrypted master key in the friend request
+3. They decrypt it with their private key and store it locally
+4. Now they can decrypt all your files using your master key
 
 **Setup Flow:**
 1. Generate X25519 keypair → `encryption.py:generate_keypair()`
-2. Store private key at `~/.claude-connect/keys/private.key` (mode 0600)
-3. Store public key at `~/.claude-connect/keys/public.key`
-4. Public key is uploaded to server during friend requests
+2. Generate random AES-256 master key → `encryption.py:generate_master_key()`
+3. Store keys at `~/.claude-connect/keys/<email>/` (mode 0600)
+4. Public key is published in authz file header
 
-**Key Storage:**
+**Key Storage (Account-Scoped):**
 ```
 ~/.claude-connect/
 ├── keys/
-│   ├── private.key          # X25519 private key (NEVER leaves machine)
-│   └── public.key           # Your public key (shared with friends)
+│   └── <sanitized-email>/       # Account-scoped key directory
+│       ├── private.key          # X25519 private key (NEVER leaves machine)
+│       ├── public.key           # Your public key (shared with friends)
+│       └── master.key           # AES-256 master key (encrypts your files)
 ├── friends/
-│   ├── bob@example.com.pub  # Bob's public key (received during friending)
-│   └── carol@example.com.pub
+│   ├── bob-example-com.master   # Bob's master key (received when you accepted his request)
+│   ├── bob-example-com.pub      # Bob's public key
+│   └── carol-example-com.master
 └── ...
 ```
 
-**How Hybrid Encryption Works:**
+**Why Account-Scoped Keys:**
+Keys are stored per-account (email) to support multiple ClaudeConnect accounts on the same machine. Each account has its own isolated key directory.
 
-Files are encrypted using the same scheme as PGP, Age, and Signal:
+**How Master Key Encryption Works:**
+
+Files are encrypted with your master AES key. Friends receive your master key (encrypted) during the friend request flow.
 
 ```
 ENCRYPTION (when you commit a file)
@@ -346,40 +365,31 @@ ENCRYPTION (when you commit a file)
                            │
                            ▼
               ┌────────────────────────┐
-              │ Generate random AES key │
-              │ (one-time, 256 bits)    │
+              │ Load YOUR master key   │
+              │ from ~/.claude-connect │
+              │ /keys/<email>/master.key│
               └────────────┬───────────┘
                            │
-           ┌───────────────┼───────────────┐
-           │               │               │
-           ▼               ▼               ▼
-    ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
-    │ Encrypt key │ │ Encrypt key │ │ Encrypt key │
-    │ with YOUR   │ │ with BOB's  │ │ with CAROL's│
-    │ public key  │ │ public key  │ │ public key  │
-    └──────┬──────┘ └──────┬──────┘ └──────┬──────┘
-           │               │               │
-           ▼               ▼               ▼
-        key_you         key_bob        key_carol
-        (32 bytes)      (32 bytes)     (32 bytes)
-           │               │               │
-           └───────────────┼───────────────┘
+                           ▼
+              ┌────────────────────────┐
+              │ Generate random nonce  │
+              │ (12 bytes)             │
+              └────────────┬───────────┘
                            │
                            ▼
               ┌────────────────────────┐
               │ Encrypt file content   │
-              │ with AES key           │
+              │ with AES-256-GCM       │
               └────────────┬───────────┘
                            │
                            ▼
               ┌────────────────────────┐
-              │  ENCRYPTED FILE        │
+              │  ENCRYPTED FILE (v2)   │
               │  ┌──────────────────┐  │
-              │  │ encrypted_content│  │
-              │  ├──────────────────┤  │
-              │  │ key_you: xxx     │  │
-              │  │ key_bob: yyy     │  │
-              │  │ key_carol: zzz   │  │
+              │  │ "CCENC" (5 bytes)│  │  Magic header
+              │  │ Version: 2       │  │  Format version
+              │  │ Nonce (12 bytes) │  │  Random nonce
+              │  │ Ciphertext       │  │  AES-GCM encrypted
               │  └──────────────────┘  │
               └────────────────────────┘
                            │
@@ -387,41 +397,32 @@ ENCRYPTION (when you commit a file)
                     ┌─────────────┐
                     │ SVN COMMIT  │
                     │ (server sees│
-                    │ only gibber-│
-                    │ ish blobs)  │
+                    │ only CCENC  │
+                    │ blob)       │
                     └─────────────┘
 
 
-DECRYPTION (when Bob pulls the file)
-════════════════════════════════════
+DECRYPTION (when you pull the file)
+═══════════════════════════════════
 
               ┌────────────────────────┐
-              │  ENCRYPTED FILE        │
+              │  ENCRYPTED FILE (v2)   │
               │  ┌──────────────────┐  │
-              │  │ encrypted_content│  │
-              │  ├──────────────────┤  │
-              │  │ key_you: xxx     │  │
-              │  │ key_bob: yyy ◄───┼──┼─── Bob uses this one
-              │  │ key_carol: zzz   │  │
+              │  │ "CCENC"          │  │
+              │  │ Version: 2       │  │
+              │  │ Nonce            │  │
+              │  │ Ciphertext       │  │
               │  └──────────────────┘  │
               └────────────┬───────────┘
                            │
                            ▼
               ┌────────────────────────┐
-              │ Decrypt key_bob with   │
-              │ Bob's PRIVATE key      │
-              │ (only Bob has this)    │
+              │ Load YOUR master key   │
               └────────────┬───────────┘
                            │
                            ▼
               ┌────────────────────────┐
-              │ AES key recovered!     │
-              └────────────┬───────────┘
-                           │
-                           ▼
-              ┌────────────────────────┐
-              │ Decrypt file content   │
-              │ with AES key           │
+              │ Decrypt with AES-GCM   │
               └────────────┬───────────┘
                            │
                            ▼
@@ -431,24 +432,72 @@ DECRYPTION (when Bob pulls the file)
                     └─────────────┘
 
 
-ADDING A NEW FRIEND (Dave)
-══════════════════════════
+FRIEND READING YOUR FILE (Bob)
+══════════════════════════════
+
+Bob received your master key when he accepted your friend request.
+It's stored at ~/.claude-connect/friends/<your-email>.master
 
               ┌────────────────────────┐
-              │  ENCRYPTED FILE        │
+              │  YOUR ENCRYPTED FILE   │
               │  ┌──────────────────┐  │
-              │  │ encrypted_content│  │  ← No change needed!
-              │  ├──────────────────┤  │
-              │  │ key_you: xxx     │  │
-              │  │ key_bob: yyy     │  │
-              │  │ key_carol: zzz   │  │
-              │  │ key_dave: ??? ◄──┼──┼─── Just add this
+              │  │ "CCENC"          │  │
+              │  │ Version: 2       │  │
+              │  │ Nonce            │  │
+              │  │ Ciphertext       │  │
               │  └──────────────────┘  │
-              └────────────────────────┘
+              └────────────┬───────────┘
+                           │
+                           ▼
+              ┌────────────────────────┐
+              │ Load YOUR master key   │
+              │ from Bob's friends dir │
+              │ ~/.claude-connect/     │
+              │ friends/<you>.master   │
+              └────────────┬───────────┘
+                           │
+                           ▼
+              ┌────────────────────────┐
+              │ Decrypt with AES-GCM   │
+              └────────────┬───────────┘
+                           │
+                           ▼
+                    ┌─────────────┐
+                    │ notes.md    │
+                    │ (plaintext) │
+                    └─────────────┘
 
-    You decrypt AES key with YOUR private key,
-    re-encrypt it with Dave's public key,
-    append to file. Done!
+
+ADDING A NEW FRIEND (Friending Flow)
+════════════════════════════════════
+
+When you send a friend request to Dave:
+
+    ┌─────────────────────────────────────────────┐
+    │ 1. Fetch Dave's public key from his authz   │
+    └──────────────────────┬──────────────────────┘
+                           │
+                           ▼
+    ┌─────────────────────────────────────────────┐
+    │ 2. Encrypt YOUR master key with Dave's      │
+    │    public key using X25519 + AES-GCM        │
+    └──────────────────────┬──────────────────────┘
+                           │
+                           ▼
+    ┌─────────────────────────────────────────────┐
+    │ 3. Send friend request via API with:        │
+    │    - Your public key                        │
+    │    - Encrypted master key blob              │
+    └──────────────────────┬──────────────────────┘
+                           │
+                           ▼
+    ┌─────────────────────────────────────────────┐
+    │ 4. Dave accepts: decrypts your master key   │
+    │    with his private key, stores it locally  │
+    └─────────────────────────────────────────────┘
+
+    Now Dave can decrypt ALL your files using your master key.
+    No need to re-encrypt individual files!
 ```
 
 **How Encryption Works with Shadow Directory:**
@@ -608,20 +657,25 @@ When a user mentions anything related to ClaudeConnect friending, Claude's skill
 
 **What Happens Behind the Scenes:**
 1. CLI validates login → `cli.py:get_valid_token()`
-2. CLI updates local authz to pre-grant access → `cli.py:add_friend_to_authz()`
+2. CLI fetches peer's public key from their authz → `cli.py:fetch_peer_public_key()`
+3. CLI encrypts YOUR master key for the peer → `encryption.py:encrypt_master_key_for_recipient()`
+4. CLI updates local authz to pre-grant access → `cli.py:add_friend_to_authz()`
    - Grants read access to `[/]`
-   - Grants write access to `[/claudeconnect/with-<your-email>]`
-3. CLI syncs to commit authz changes → `sync.py:sync_once()`
-4. CLI sends friend request via API → `POST /api/friend-request`
-5. Server creates request message in recipient's `claudeconnect/with-claudeconnect-io/`:
+   - Grants write access to `[/claudeconnect/with-<peer-email>]` (where peer writes conversations)
+5. CLI syncs to commit authz changes → `sync.py:sync_once()`
+6. CLI sends friend request via API → `POST /api/friend-request`
+   - Includes your public key
+   - Includes encrypted master key blob
+7. Server creates request message in recipient's `claudeconnect/with-claudeconnect-io/`:
    ```markdown
    # Friend Request from sender@example.com
 
    **From**: sender@example.com
    **Date**: 2026-01-13T12:00:00Z
-   **Public-Key**: <base64-encoded-X25519-public-key>
+   **Public-Key**: <hex-encoded-X25519-public-key>
+   **Encrypted-Master-Key**: <hex-encoded-encrypted-master-key-blob>
    ```
-6. Recipient stores sender's public key locally for future encryption
+8. When recipient accepts, they decrypt and save your master key → can now read all your files
 
 **Example Claude interaction:**
 ```
@@ -645,16 +699,17 @@ Claude: Sure! I'll send Bob a friend request now.
 
 **What Happens Behind the Scenes:**
 1. CLI validates login → `cli.py:get_valid_token()`
-2. CLI verifies friend request exists
-3. CLI updates authz to grant access → `cli.py:add_friend_to_authz()`
+2. CLI verifies friend request exists in `with-claudeconnect-io/`
+3. CLI extracts sender's public key and encrypted master key from request
+4. CLI decrypts sender's master key using YOUR private key → `encryption.py:decrypt_master_key_from_sender()`
+5. CLI saves sender's master key → `~/.claude-connect/friends/<email>.master`
+6. CLI saves sender's public key → `~/.claude-connect/friends/<email>.pub`
+7. CLI updates authz to grant access → `cli.py:add_friend_to_authz()`
    - Grants read access to `[/]`
-   - Grants write access to `[/claudeconnect/with-<your-email>]`
-4. CLI extracts and stores sender's public key → `~/.claude-connect/friends/<email>.pub`
-5. CLI deletes the friend request file from `with-claudeconnect-io/`
-6. CLI syncs changes → `sync.py:sync_once()`
-7. CLI re-encrypts existing files to include friend's public key
-8. CLI pulls sender's repo (now accessible due to mutual friend status)
-8. CLI creates acceptance notification in sender's `claudeconnect/with-<your-email>/`:
+   - Grants write access to `[/claudeconnect/with-<peer-email>]` (where peer writes conversations)
+8. CLI deletes the friend request file from `with-claudeconnect-io/`
+9. CLI syncs changes → `sync.py:sync_once()`
+10. CLI creates acceptance notification in sender's `claudeconnect/with-<your-email>/`:
    ```markdown
    # Friend Request Accepted
    
@@ -1154,30 +1209,31 @@ Background sync loop and manual sync function. Uses the shadow directory archite
 ```python
 SyncLoop(
     context_dir: Path,       # User's plaintext context directory
-    shadow_dir: Path,        # ~/.claude-connect/svn-staging/<email>/
     repo_url: str,
     token: str,
     email: str,
-    private_key: bytes,      # Your X25519 private key
-    recipient_keys: dict,    # email -> public_key for all friends
     interval: int = 30,      # seconds
 )
 ```
 
+**Note:** The shadow directory is automatically determined from the email: `~/.claude-connect/svn-staging/<email>/`. Encryption uses the master key from `~/.claude-connect/keys/<email>/master.key`.
+
 **`_sync_once()`**
 
 Single sync cycle:
-1. **Outbound** (context → shadow → SVN):
-   - Detect changed files in context directory
-   - Encrypt changed `.md` files → write to shadow directory
-   - Copy `authz` to shadow (no encryption)
-   - SVN add/commit from shadow directory
-2. **Inbound** (SVN → shadow → context):
+1. **Inbound** (SVN → shadow → context):
    - SVN update in shadow directory
    - Detect files updated from remote
-   - Decrypt updated `.md` files → write to context directory
-   - Copy `authz` to context (no decryption)
+   - Copy updated files to context directory, **decrypting with master key**
+   - Also check for missing files in context (crash recovery)
+2. **Outbound** (context → shadow → SVN):
+   - Detect changed files in context directory (by mtime comparison)
+   - Copy changed `.md` files to shadow, **encrypting with master key**
+   - Copy `authz` to shadow (no encryption)
+   - SVN add new files, commit changes
 3. Handle conflicts (keep local, save remote as `.theirs.md`)
+
+**Important:** Sync never auto-deletes files. Deletions require explicit user action via a delete command. This prevents accidental data loss.
 
 **`_handle_conflict(path: Path)`**
 
@@ -1185,9 +1241,23 @@ Conflict resolution strategy: keep local version, save remote as backup.
 
 #### Standalone Function
 
-**`sync_once(context_dir, shadow_dir, repo_url, svn_token, email, private_key, recipient_keys) -> bool`**
+**`sync_once(context_dir, repo_url, svn_token, email) -> bool`**
 
 Synchronous single-sync for CLI use. Same logic as `_sync_once()`.
+
+#### Helper Functions
+
+**`_copy_to_shadow(context_dir, shadow_dir, files, email, encryption_enabled)`**
+
+Copies files from context to shadow, encrypting with master key if enabled.
+
+**`_copy_from_shadow(shadow_dir, context_dir, files, email, encryption_enabled)`**
+
+Copies files from shadow to context, decrypting with master key if enabled. Skips directories.
+
+**`_find_missing_in_context(shadow_dir, context_dir) -> list[Path]`**
+
+Finds files in shadow that are missing from context (crash recovery).
 
 ---
 
@@ -1197,12 +1267,26 @@ Manages conversations between Claude instances. Supports both autonomous (two Cl
 
 #### Key Functions
 
+**`pull_peer_context(peer_email: str, svn_token: str, our_email: str) -> Path | None`**
+
+Pulls or updates a peer's context to local cache:
+1. SVN checkout/update peer's repo to `~/.claude-connect/peers/<peer-email>/`
+2. **Decrypt all encrypted files** using peer's master key from `~/.claude-connect/friends/<peer-email>.master`
+3. Return path to decrypted peer context
+
+**`decrypt_peer_context(peer_dir: Path, peer_email: str) -> int`**
+
+Decrypts all encrypted `.md` files in a peer's checked-out context:
+1. Load peer's master key from friends directory
+2. For each `.md` file that starts with `CCENC`, decrypt in place
+3. Return count of files decrypted
+
 **`run_autonomous_session(our_context, peer_context, our_email, peer_email, topic, max_turns) -> str`**
 
 Runs autonomous dual-instance conversation:
 1. Generate prompts for each instance
 2. Run conversation loop (alternating turns)
-3. Generate and save transcript to both repos
+3. Generate and save transcript to both repos (uses sync for own repo, direct SVN for peer repo)
 
 **`run_interactive_session(peer_context, our_email, peer_email) -> str`**
 
@@ -1269,10 +1353,16 @@ Local configuration and credential management.
 
 | Path | Purpose |
 |------|---------|
-| `~/.claude-connect/config.json` | Configuration (includes context_dir path) |
+| `~/.claude-connect/config.json` | Configuration (includes context_dir path, encryption_enabled flag) |
 | `~/.claude-connect/tokens.json` | Auth tokens |
+| `~/.claude-connect/keys/<email>/` | Account-scoped encryption keys |
+| `~/.claude-connect/keys/<email>/private.key` | X25519 private key (NEVER leaves machine) |
+| `~/.claude-connect/keys/<email>/public.key` | X25519 public key (shared with friends) |
+| `~/.claude-connect/keys/<email>/master.key` | AES-256 master key (encrypts your files) |
+| `~/.claude-connect/friends/<email>.master` | Friend's master key (for reading their files) |
+| `~/.claude-connect/friends/<email>.pub` | Friend's public key |
 | `~/.claude-connect/svn-staging/<email>/` | Shadow directory (encrypted SVN working copy) |
-| `~/.claude-connect/peers/<email>/` | Pulled friend contexts (decrypted) |
+| `~/.claude-connect/peers/<email>/` | Pulled friend contexts (decrypted in place) |
 | `~/.claude-connect/transcripts/` | Temporary transcript storage for interactive sessions |
 | `~/.claude-connect/test-users/<email>/credentials.json` | Test user credentials |
 
@@ -1329,68 +1419,96 @@ Lists all locally cached test user emails.
 
 ---
 
-### encryption.py - Client-Side Hybrid Encryption
+### encryption.py - Master Key Encryption
 
-Handles encryption/decryption of context using X25519 key exchange and AES-256-GCM. Used by the sync process to encrypt files when copying from the user's context directory to the shadow directory, and decrypt when copying back.
+Handles encryption/decryption of context using master key (AES-256-GCM) and X25519 key exchange for sharing master keys with friends. Used by the sync process to encrypt files when copying from the user's context directory to the shadow directory, and decrypt when copying back.
 
-**Private keys never leave the user's machine.** This provides true zero-trust encryption where even ClaudeConnect admins cannot decrypt user content.
+**Private keys and master keys never leave the user's machine.** This provides true zero-trust encryption where even ClaudeConnect admins cannot decrypt user content.
 
-#### Key Functions
+#### Key Management Functions
 
-**`generate_keypair() -> tuple[bytes, bytes]`**
+**`generate_keypair(email: str) -> tuple[bytes, bytes]`**
 
-Generates an X25519 keypair. Returns `(private_key, public_key)`.
+Generates an X25519 keypair and saves to account-scoped directory. Returns `(private_key, public_key)`.
 
-**`encrypt_file(plaintext: bytes, recipient_public_keys: dict[str, bytes], sender_private_key: bytes) -> bytes`**
+**`generate_master_key(email: str) -> bytes`**
 
-Encrypts file content for multiple recipients using hybrid encryption:
-1. Generate random AES-256 key
-2. Encrypt content with AES-GCM
-3. Encrypt AES key for each recipient using X25519 key exchange
-4. Return blob containing encrypted content + encrypted keys for each recipient
+Generates a random 256-bit AES master key and saves to account-scoped directory.
 
-**`decrypt_file(ciphertext: bytes, recipient_private_key: bytes, recipient_public_key: bytes) -> bytes`**
+**`load_master_key(email: str) -> bytes`**
 
-Decrypts file content:
-1. Find the encrypted AES key for this recipient
-2. Decrypt AES key using X25519 key exchange
-3. Decrypt content with AES-GCM
-4. Return plaintext
+Loads the user's master key from `~/.claude-connect/keys/<email>/master.key`.
 
-**`add_recipient(encrypted_file: bytes, new_recipient_public_key: bytes, existing_recipient_private_key: bytes, existing_recipient_public_key: bytes) -> bytes`**
+**`load_friend_master_key(friend_email: str) -> bytes`**
 
-Adds a new recipient to an already-encrypted file:
-1. Decrypt the AES key using existing recipient's private key
-2. Re-encrypt AES key for the new recipient
-3. Append new encrypted key blob to file
+Loads a friend's master key from `~/.claude-connect/friends/<friend-email>.master`.
 
-**`remove_recipient(encrypted_file: bytes, recipient_to_remove_public_key: bytes) -> bytes`**
+**`get_keys_dir(email: str) -> Path`**
 
-Removes a recipient from an encrypted file. **Note:** For security, this re-encrypts the entire file with a new AES key (so removed recipient can't decrypt with cached key).
+Returns the account-scoped keys directory: `~/.claude-connect/keys/<sanitized-email>/`
 
-**`sync_encrypt(context_dir: Path, shadow_dir: Path, private_key: bytes, recipient_public_keys: dict[str, bytes]) -> None`**
+#### File Encryption Functions
 
-Copies changed `.md` files from context_dir to shadow_dir, encrypting content in transit for all recipients. Used during outbound sync.
+**`encrypt_file_with_master_key(plaintext: bytes, email: str) -> bytes`**
 
-**`sync_decrypt(shadow_dir: Path, context_dir: Path, private_key: bytes, public_key: bytes) -> None`**
+Encrypts file content using your master key:
+1. Load master key from account-scoped directory
+2. Generate random 12-byte nonce
+3. Encrypt with AES-256-GCM
+4. Return v2 format blob
 
-Copies updated `.md` files from shadow_dir to context_dir, decrypting content using your private key. Used during inbound sync.
+**`decrypt_file_with_master_key(ciphertext: bytes, email: str) -> bytes`**
 
-#### Encrypted File Format
+Decrypts your own files using your master key.
+
+**`decrypt_file_with_friend_master_key(ciphertext: bytes, friend_email: str) -> bytes`**
+
+Decrypts a friend's files using their master key (stored in your friends directory).
+
+#### Master Key Exchange Functions (for Friending)
+
+**`encrypt_master_key_for_recipient(master_key: bytes, recipient_public_key: bytes) -> bytes`**
+
+Encrypts your master key for a specific recipient using X25519 key exchange:
+1. Generate ephemeral X25519 keypair
+2. Derive shared secret via X25519 ECDH
+3. Encrypt master key with derived key using AES-GCM
+4. Return: ephemeral_public_key (32 bytes) + encrypted_master_key (48 bytes)
+
+**`decrypt_master_key_from_sender(encrypted_blob: bytes, recipient_private_key: bytes) -> bytes`**
+
+Decrypts a master key received from a friend:
+1. Extract ephemeral public key from blob
+2. Derive shared secret via X25519 ECDH
+3. Decrypt master key
+4. Return plaintext master key
+
+**`save_friend_master_key(friend_email: str, master_key: bytes)`**
+
+Saves a friend's master key to `~/.claude-connect/friends/<friend-email>.master`.
+
+#### Utility Functions
+
+**`is_encrypted_file(data: bytes) -> bool`**
+
+Checks if file starts with `CCENC` magic bytes.
+
+**`should_encrypt_file(path: Path) -> bool`**
+
+Returns True for `.md` files, False for `authz` and `.keep` files.
+
+#### Encrypted File Format (v2 - Master Key)
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│ Version (1 byte): 0x01                               │
+│ Magic (5 bytes): "CCENC"                             │
+│ Version (1 byte): 0x02                               │
 │ Nonce (12 bytes): random for AES-GCM                 │
-│ Recipient count (4 bytes): uint32 big-endian         │
-├─────────────────────────────────────────────────────┤
-│ For each recipient:                                  │
-│   Public key (32 bytes): X25519 public key           │
-│   Encrypted key (48 bytes): AES key + auth tag       │
-├─────────────────────────────────────────────────────┤
-│ Encrypted content: AES-256-GCM ciphertext + tag      │
+│ Ciphertext: AES-256-GCM encrypted content + tag      │
 └─────────────────────────────────────────────────────┘
 ```
+
+**Note:** The v2 format is much simpler than v1 (multi-recipient) because all files are encrypted with a single master key. Friends receive the master key separately during the friend request flow.
 
 ---
 
@@ -1476,4 +1594,4 @@ Copies updated `.md` files from shadow_dir to context_dir, decrypting content us
 
 ---
 
-*Last updated: 2026-01-20*
+*Last updated: 2026-01-21*
