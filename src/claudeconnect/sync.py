@@ -143,6 +143,17 @@ class SyncLoop:
             logger.error(f"Update failed: {e}")
             return
 
+        # Also ensure any files in shadow are in context (handles crashed syncs)
+        missing_in_context = await loop.run_in_executor(
+            None, _find_missing_in_context, self.shadow_dir, self.context_dir
+        )
+        if missing_in_context:
+            logger.info(f"Syncing {len(missing_in_context)} missing files to context")
+            await loop.run_in_executor(
+                None, _copy_from_shadow, self.shadow_dir, self.context_dir,
+                missing_in_context, self.email, self.encryption_enabled
+            )
+
         # Check for conflicts in shadow dir
         status = await loop.run_in_executor(None, self.svn.status)
         if status.has_conflicts:
@@ -250,6 +261,13 @@ def sync_once(
             # Copy from shadow to context (decrypting)
             _copy_from_shadow(shadow_dir, context_dir, updated, email, encryption_enabled)
 
+        # Also ensure any files in shadow (especially claudeconnect/) are in context
+        # This handles cases where a previous sync crashed mid-copy
+        missing_in_context = _find_missing_in_context(shadow_dir, context_dir)
+        if missing_in_context:
+            print(f"  Syncing {len(missing_in_context)} missing files to context")
+            _copy_from_shadow(shadow_dir, context_dir, missing_in_context, email, encryption_enabled)
+
         # OUTBOUND: Detect changes in context dir
         changed_files = _detect_context_changes(context_dir, shadow_dir)
 
@@ -326,6 +344,28 @@ def _detect_context_changes(context_dir: Path, shadow_dir: Path) -> dict:
     # Users must explicitly delete files via a delete skill
 
     return changes
+
+
+def _find_missing_in_context(shadow_dir: Path, context_dir: Path) -> list[Path]:
+    """
+    Find files in shadow_dir that are missing from context_dir.
+
+    This handles cases where a previous sync crashed mid-copy,
+    leaving files in shadow but not in context.
+
+    Returns:
+        List of relative paths that need to be copied to context
+    """
+    missing = []
+
+    for path in shadow_dir.rglob("*.md"):
+        if ".svn" not in path.parts:
+            rel_path = path.relative_to(shadow_dir)
+            context_path = context_dir / rel_path
+            if not context_path.exists():
+                missing.append(rel_path)
+
+    return missing
 
 
 def _copy_to_shadow(
