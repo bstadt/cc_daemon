@@ -87,44 +87,52 @@ def display_startup_banner(context_dir: Path, email: str, clear_screen: bool = T
     print()
 
     # Check for friend requests and conversations
-    friend_requests_dir = context_dir / "claudeconnect" / "friend_requests"
-    conversations_dir = context_dir / "claudeconnect" / "conversations"
+    # New structure per system2.md:
+    # - Friend requests: claudeconnect/with-claudeconnect-io/
+    # - Conversations & acceptances: claudeconnect/with-<peer-email>/
+    claudeconnect_dir = context_dir / "claudeconnect"
+    system_messages_dir = claudeconnect_dir / "with-claudeconnect-io"
 
     # Collect friend request notifications (pending requests + accepted notifications)
     friend_notifications = []  # List of (display_text, is_accepted)
 
-    if friend_requests_dir.exists():
-        for f in friend_requests_dir.glob("*.md"):
+    # Check for pending friend requests in with-claudeconnect-io/
+    if system_messages_dir.exists():
+        for f in system_messages_dir.glob("*.md"):
             try:
                 content = f.read_text()
-                # Check for pending requests
-                if "status: pending" in content:
+                # Friend request files contain "Friend Request from" in title
+                if "Friend Request from" in content or "friend request" in content.lower():
+                    # Extract email from **From**: line
                     for line in content.split("\n"):
-                        if line.startswith("from:"):
+                        if "**From**:" in line or "From:" in line:
                             sender = line.split(":", 1)[1].strip()
+                            sender = sender.replace("**", "").strip()
                             friend_notifications.append((sender, False))
                             break
             except Exception:
                 pass
 
-    # Check conversations for accepted friend requests
+    # Check with-<peer>/ folders for accepted friend requests and conversations
     accepted_friends = []
-    if conversations_dir.exists():
-        for conv_dir in conversations_dir.iterdir():
-            if conv_dir.is_dir() and conv_dir.name.startswith("with-"):
-                # Look for friend-accepted.md file
-                accepted_file = conv_dir / "friend-accepted.md"
-                if accepted_file.exists():
+    if claudeconnect_dir.exists():
+        for peer_dir in claudeconnect_dir.iterdir():
+            if peer_dir.is_dir() and peer_dir.name.startswith("with-"):
+                # Skip system messages folder
+                if peer_dir.name == "with-claudeconnect-io":
+                    continue
+                # Look for acceptance notifications (friend-request-accepted type)
+                for f in peer_dir.glob("*.md"):
                     try:
-                        content = accepted_file.read_text()
-                        if "friend-request-accepted" in content.lower():
+                        content = f.read_text()
+                        if "friend-request-accepted" in content.lower() or "accepted your friend request" in content.lower():
                             # Extract email from **From**: line
                             for line in content.split("\n"):
                                 if "**From**:" in line or "From:" in line:
                                     email_part = line.split(":", 1)[1].strip()
-                                    # Remove markdown bold if present
                                     email_part = email_part.replace("**", "").strip()
-                                    accepted_friends.append(email_part)
+                                    if email_part not in accepted_friends:
+                                        accepted_friends.append(email_part)
                                     break
                     except Exception:
                         pass
@@ -136,12 +144,16 @@ def display_startup_banner(context_dir: Path, email: str, clear_screen: bool = T
         friend_notifications.append((f"{username} accepted your request!", True))
 
     # Get recent conversations (last 30 days) with topic preview
+    # Conversations are now in claudeconnect/with-<peer-email>/<session-id>.md
     recent_convos = []  # List of (peer_email, topic_preview, mtime)
-    if conversations_dir.exists():
+    if claudeconnect_dir.exists():
         month_ago = datetime.datetime.now().timestamp() - (30 * 24 * 60 * 60)
-        for conv_dir in conversations_dir.iterdir():
-            if conv_dir.is_dir() and conv_dir.name.startswith("with-"):
-                peer_name = conv_dir.name[5:]  # Remove "with-" prefix
+        for peer_dir in claudeconnect_dir.iterdir():
+            if peer_dir.is_dir() and peer_dir.name.startswith("with-"):
+                # Skip system messages folder
+                if peer_dir.name == "with-claudeconnect-io":
+                    continue
+                peer_name = peer_dir.name[5:]  # Remove "with-" prefix
                 # Convert back to email format (replace - with . and @)
                 peer_email = peer_name.replace("-", ".")
                 # Fix common email pattern: user.example.com -> user@example.com
@@ -152,10 +164,14 @@ def display_startup_banner(context_dir: Path, email: str, clear_screen: bool = T
 
                 latest_file = None
                 latest_time = 0
-                for f in conv_dir.glob("*.md"):
-                    # Skip friend-accepted.md files for conversation listing
-                    if f.name == "friend-accepted.md":
-                        continue
+                for f in peer_dir.glob("*.md"):
+                    # Skip acceptance notification files
+                    try:
+                        content = f.read_text()
+                        if "friend-request-accepted" in content.lower():
+                            continue
+                    except Exception:
+                        pass
                     try:
                         mtime = f.stat().st_mtime
                         if mtime > latest_time:
@@ -1632,8 +1648,9 @@ def accept_friend(peer_email: str):
 
     # Check if friend request exists in with-claudeconnect-io/ (per system2.md)
     system_messages_dir = context_dir / "claudeconnect" / "with-claudeconnect-io"
-    # Server writes friend requests as markdown files
-    request_file = system_messages_dir / f"friend-request-{peer_email}.md"
+    # Server writes friend requests with sanitized email in filename
+    peer_email_sanitized = email_to_repo_name(peer_email)
+    request_file = system_messages_dir / f"friend-request-{peer_email_sanitized}.md"
 
     if not request_file.exists():
         print(f"No friend request found from {peer_email}")
@@ -1720,8 +1737,9 @@ def reject_friend(peer_email: str):
 
     # Check if friend request exists in with-claudeconnect-io/ (per system2.md)
     system_messages_dir = context_dir / "claudeconnect" / "with-claudeconnect-io"
-    # Server writes friend requests as markdown files
-    request_file = system_messages_dir / f"friend-request-{peer_email}.md"
+    # Server writes friend requests with sanitized email in filename
+    peer_email_sanitized = email_to_repo_name(peer_email)
+    request_file = system_messages_dir / f"friend-request-{peer_email_sanitized}.md"
 
     if not request_file.exists():
         print(f"No friend request found from {peer_email}")
