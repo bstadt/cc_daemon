@@ -1637,10 +1637,10 @@ def add_friend_to_authz(authz_path: Path, my_email: str, peer_email: str) -> boo
 
 def fetch_peer_public_key(peer_email: str) -> bytes | None:
     """
-    Fetch a peer's public key from their authz file.
+    Fetch a peer's public key from the server API.
 
-    The public key is stored as a comment at the top of the authz:
-    # Public-Key: <64-char-hex>
+    The public key is stored in their authz file and exposed via
+    /api/public-key/<email> endpoint.
 
     Args:
         peer_email: Peer's email address
@@ -1648,20 +1648,18 @@ def fetch_peer_public_key(peer_email: str) -> bytes | None:
     Returns:
         Public key bytes (32 bytes) or None if not found
     """
-    import re
-
-    # Authz is globally readable from the SVN repo
-    peer_repo_name = email_to_repo_name(peer_email)
-    authz_url = f"https://v2.claudeconnect.io/svn/{peer_repo_name}/authz"
+    api_url = f"https://v2.claudeconnect.io/api/public-key/{peer_email}"
 
     try:
-        response = httpx.get(authz_url, timeout=10)
+        response = httpx.get(api_url, timeout=10)
         if response.status_code == 200:
-            content = response.text
-            # Look for public key comment
-            match = re.search(r'^# Public-Key:\s*([a-fA-F0-9]{64})', content, re.MULTILINE)
-            if match:
-                return bytes.fromhex(match.group(1))
+            data = response.json()
+            public_key_hex = data.get("public_key")
+            if public_key_hex and len(public_key_hex) == 64:
+                return bytes.fromhex(public_key_hex)
+        elif response.status_code == 404:
+            # User not found or no public key
+            pass
     except Exception as e:
         print(f"  Warning: Could not fetch peer's public key: {e}")
 
