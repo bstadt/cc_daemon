@@ -1565,16 +1565,16 @@ def friend(peer_email: str):
 
     add_friend_to_authz(authz_path, my_email, peer_email)
 
-    # Step 2: Get our public key if encryption is enabled (to include in request)
-    config = get_config()
+    # Step 2: Get our public key to include in request (if keys exist)
+    # Always try to include public key - it enables the friend to encrypt files for us
     my_public_key_hex = None
-    if config.encryption_enabled and HAS_ENCRYPTION:
+    if HAS_ENCRYPTION:
         try:
             my_public_key = load_public_key()
             my_public_key_hex = my_public_key.hex()
             print(f"  Will share your public key with friend request")
         except FileNotFoundError:
-            print("  Warning: No encryption keys found. Run `claudeconnect init --encrypt` first.")
+            print("  Warning: No encryption keys found. Run `claudeconnect init` to generate keys.")
 
     # Step 3: Sync to commit authz changes
     svn_token = get_svn_token(tokens.id_token)
@@ -1669,8 +1669,8 @@ def accept_friend(peer_email: str):
     add_friend_to_authz(authz_path, my_email, peer_email)
 
     # Step 2: Extract and save friend's public key if present in request
-    config = get_config()
-    if config.encryption_enabled and HAS_ENCRYPTION:
+    # Always try to save the key if present - enables encryption even if config wasn't set
+    if HAS_ENCRYPTION:
         try:
             # Read friend request to extract public key
             request_content = request_file.read_text()
