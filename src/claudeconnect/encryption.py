@@ -1089,11 +1089,15 @@ def should_encrypt_file(file_path: Path) -> bool:
     - Only files with extensions in ENCRYPTED_EXTENSIONS (.md) are encrypted
 
     Args:
-        file_path: Path to the file (can be relative or absolute)
+        file_path: Path to the file (can be relative or absolute, or string)
 
     Returns:
         True if the file should be encrypted
     """
+    # Handle both Path and string inputs
+    if isinstance(file_path, str):
+        file_path = Path(file_path)
+
     name = file_path.name
 
     # Never encrypt system files
