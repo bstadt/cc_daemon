@@ -230,6 +230,68 @@ class SvnClient:
 
         return added
 
+    def add_batch(self, paths: list[Path], batch_size: int = 50) -> tuple[list[Path], list[Path]]:
+        """
+        Add multiple files to version control in batches.
+
+        More efficient than adding files one at a time for large uploads.
+        Processes files in batches to avoid command line length limits.
+
+        Args:
+            paths: List of file paths relative to working directory.
+            batch_size: Number of files to add per SVN command (default 50).
+
+        Returns:
+            Tuple of (successfully_added, failed) path lists.
+        """
+        added = []
+        failed = []
+
+        # Process in batches to avoid command line length limits
+        for i in range(0, len(paths), batch_size):
+            batch = paths[i:i + batch_size]
+
+            # Build command with all paths in this batch
+            args = ["add", "--parents"]
+            args.extend(str(p) for p in batch)
+
+            result = self._run(args)
+
+            if result.returncode == 0:
+                added.extend(batch)
+            else:
+                # Batch failed - fall back to one-by-one to identify failures
+                for path in batch:
+                    if self.add(path, parents=True):
+                        added.append(path)
+                    else:
+                        failed.append(path)
+
+        return added, failed
+
+    def get_unversioned_files(self, pattern: str = "**/*.md") -> list[Path]:
+        """
+        Get list of unversioned files matching pattern.
+
+        Uses svn status which is faster than checking each file individually.
+
+        Args:
+            pattern: Glob pattern to match files (default: all markdown files)
+
+        Returns:
+            List of unversioned file paths relative to working directory.
+        """
+        status = self.status()
+
+        # Filter unversioned files by pattern
+        import fnmatch
+        unversioned = []
+        for path in status.unversioned:
+            if fnmatch.fnmatch(str(path), pattern) or path.suffix == ".md":
+                unversioned.append(path)
+
+        return unversioned
+
     def delete(self, path: Path) -> bool:
         """
         Mark a file for deletion from version control.
