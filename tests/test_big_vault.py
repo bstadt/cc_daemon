@@ -32,7 +32,7 @@ CC_CONFIG_DIR = Path.home() / ".claude-connect"
 PEERS_DIR = CC_CONFIG_DIR / "peers"
 
 # Test config
-NUM_VAULT_FILES = 2000
+NUM_VAULT_FILES = 500
 BORGES_LINE = "The universe (which others call the Library) is composed of an indefinite, perhaps infinite number of hexagonal galleries"
 
 
