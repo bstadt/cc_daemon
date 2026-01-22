@@ -10,10 +10,19 @@ import datetime
 import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+# Terminal detection - Unix only
+try:
+    import fcntl
+    import termios
+    HAS_TERMINAL_DETECTION = True
+except ImportError:
+    HAS_TERMINAL_DETECTION = False
 
 import click
 import httpx
@@ -35,7 +44,9 @@ def is_mock_mode() -> bool:
 
 # ANSI color codes - matching Claude Code's aesthetic
 CORAL = '\033[38;5;209m'      # Coral/salmon matching Claude Code
+CORAL_BG = '\033[48;5;209m'   # Coral background
 LIME = '\033[38;5;114m'       # Muted lime green for friend Claude
+LIME_BG = '\033[48;5;114m'    # Lime background
 WHITE = '\033[97m'            # Bright white for main text
 BOLD = '\033[1m'              # Bold text
 DIM = '\033[2m'               # Dim for secondary text
@@ -44,6 +55,70 @@ BLACK_BG = '\033[40m'         # Black background for transparency
 YELLOW = '\033[38;5;228m'     # Soft yellow for sparkles
 RESET = '\033[0m'
 CLEAR = '\033[2J\033[H'       # Clear screen and move cursor to top
+
+
+def get_cell_aspect_ratio() -> float | None:
+    """Get the height/width ratio of a terminal cell.
+
+    Returns the aspect ratio (height/width) of terminal cells, or None if
+    detection is unavailable (e.g., Windows, some SSH sessions).
+
+    Standard terminal fonts have ratio ~2.0 (cells twice as tall as wide).
+    Squarer fonts have ratio ~1.5-1.8.
+    """
+    if not HAS_TERMINAL_DETECTION:
+        return None
+
+    try:
+        with open(os.ctermid(), 'r') as fd:
+            packed = fcntl.ioctl(fd, termios.TIOCGWINSZ, struct.pack('HHHH', 0, 0, 0, 0))
+            rows, cols, h_pixels, v_pixels = struct.unpack('HHHH', packed)
+
+            if h_pixels == 0 or v_pixels == 0 or rows == 0 or cols == 0:
+                return None  # Pixel dimensions not supported
+
+            cell_width = h_pixels / cols
+            cell_height = v_pixels / rows
+            return cell_height / cell_width
+    except (OSError, IOError):
+        return None
+
+
+def get_banner_style() -> str:
+    """Determine which banner style to use.
+
+    Returns "standard" or "compact" based on:
+    1. CC_BANNER env var override
+    2. Terminal program detection
+    3. Cell aspect ratio detection
+    4. Default to compact (safest)
+    """
+    # 1. Manual override via env var
+    banner_override = os.environ.get("CC_BANNER", "").lower()
+    if banner_override in ("compact", "standard"):
+        return banner_override
+
+    # 2. Detect terminal program
+    term_program = os.environ.get("TERM_PROGRAM", "").lower()
+
+    # Terminals known to render block chars correctly
+    good_terminals = ["ghostty", "iterm.app", "alacritty", "kitty", "wezterm", "hyper"]
+    if any(t in term_program for t in good_terminals):
+        return "standard"
+
+    # Terminals known to have issues (e.g., Apple Terminal reports 2.0 ratio but renders poorly)
+    problematic_terminals = ["apple_terminal"]
+    if any(t in term_program for t in problematic_terminals):
+        return "compact"
+
+    # 3. Fall back to aspect ratio detection
+    ratio = get_cell_aspect_ratio()
+    if ratio is not None and ratio >= 1.8:
+        return "standard"
+
+    # 4. Default to compact (safer for unknown terminals)
+    return "compact"
+
 
 from .auth import login as do_login, ensure_valid_token, decode_jwt_payload, refresh_token
 from .config import (
@@ -85,11 +160,25 @@ def display_startup_banner(context_dir: Path, email: str, clear_screen: bool = T
     if clear_screen:
         print(CLEAR, end='')
 
-    # Two Claude creatures side by side - coral (you) and lime (friend)
+    style = get_banner_style()
     print()
-    print(f" {CORAL}▐{BLACK_BG}▛███▜{RESET}{CORAL}▌{RESET} {YELLOW}✱{RESET} {LIME}▐{BLACK_BG}▛███▜{RESET}{LIME}▌{RESET}   {WHITE}{BOLD}Claude Connect{RESET}")
-    print(f"{CORAL}▝▜█████▛▘{RESET} {LIME}▝▜█████▛▘{RESET}  {DIM}{email}{RESET}")
-    print(f"  {CORAL}▘▘ ▝▝{RESET}     {LIME}▘▘ ▝▝{RESET}")
+
+    if style == "compact":
+        # Compact style - Claude Code inspired, with colored background fill
+        # Two creatures side by side
+        double_creature = f"""
+{CORAL}▗{CORAL_BG} {RESET}{CORAL_BG}{BLACK}▗{RESET}{CORAL_BG}   {RESET}{CORAL_BG}{BLACK}▖{RESET}{CORAL_BG} {RESET}{CORAL}▖{RESET} {YELLOW}✱{RESET} {LIME}▗{LIME_BG} {RESET}{LIME_BG}{BLACK}▗{RESET}{LIME_BG}   {RESET}{LIME_BG}{BLACK}▖{RESET}{LIME_BG} {RESET}{LIME}▖{RESET}
+ {CORAL_BG}       {RESET}     {LIME_BG}       {RESET}
+{CORAL}  ▘▘ ▝▝    {RESET} {LIME}  ▘▘ ▝▝    {RESET}
+"""
+        print(double_creature)
+
+    else:
+        # Standard style - original design
+        print(f" {CORAL}▐{BLACK_BG}▛███▜▌{RESET} {YELLOW}✱{RESET} {LIME}▐{BLACK_BG}▛███▜{RESET}{LIME}▌{RESET}   {WHITE}{BOLD}Claude Connect{RESET}")
+        print(f"{CORAL}▝▜█████▛▘{RESET} {LIME}▝▜█████▛▘{RESET}  {DIM}{email}{RESET}")
+        print(f"  {CORAL}▘▘ ▝▝{RESET}     {LIME}▘▘ ▝▝{RESET}")
+
     print()
 
     # Check for friend requests and conversations
