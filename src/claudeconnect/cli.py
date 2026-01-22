@@ -50,6 +50,7 @@ from .config import (
     get_config, get_tokens, Config, Tokens, is_logged_in, get_email,
     get_test_user_email, get_test_user_credentials, list_test_users,
     TestUserCredentials, TEST_USERS_DIR, get_shadow_dir, sanitize_email,
+    SERVER_URL,
 )
 from .scanner import scan_directory
 from .svn_ops import SvnClient, SvnError, email_to_repo_name, repo_url_for_email
@@ -74,9 +75,6 @@ try:
     HAS_ENCRYPTION = is_encryption_available()
 except ImportError:
     HAS_ENCRYPTION = False
-
-
-SERVER_URL = "https://v2.claudeconnect.io"
 
 
 def display_startup_banner(context_dir: Path, email: str, clear_screen: bool = True) -> None:
@@ -460,33 +458,25 @@ def _init_mock_environment(mock_dir: Path) -> bool:
     mock_dir.mkdir(parents=True, exist_ok=True)
 
     # Create directory structure
-    (mock_dir / "claudeconnect" / "friend_requests").mkdir(parents=True, exist_ok=True)
+    (mock_dir / "claudeconnect" / "with-claudeconnect-io").mkdir(parents=True, exist_ok=True)
     (mock_dir / "claudeconnect" / "conversations" / "with-alice-example-com").mkdir(parents=True, exist_ok=True)
     (mock_dir / "claudeconnect" / "conversations" / "with-bob-example-com").mkdir(parents=True, exist_ok=True)
     (mock_dir / "notes").mkdir(parents=True, exist_ok=True)
     (mock_dir / ".mock" / "config").mkdir(parents=True, exist_ok=True)
 
     # Sample friend request 1
-    (mock_dir / "claudeconnect" / "friend_requests" / "carol@example.com.md").write_text(
-        """# Friend Request
+    (mock_dir / "claudeconnect" / "with-claudeconnect-io" / "friend-request-carol-example-com.md").write_text(
+        """# Friend Request from carol@example.com
 
-from: carol@example.com
-date: 2026-01-20T10:00:00Z
-status: pending
-
-Hi! I'd like to connect our Claude instances to collaborate on projects.
+Received: 2026-01-20T10:00:00Z
 """
     )
 
     # Sample friend request 2
-    (mock_dir / "claudeconnect" / "friend_requests" / "david@example.com.md").write_text(
-        """# Friend Request
+    (mock_dir / "claudeconnect" / "with-claudeconnect-io" / "friend-request-david-example-com.md").write_text(
+        """# Friend Request from david@example.com
 
-from: david@example.com
-date: 2026-01-19T15:30:00Z
-status: pending
-
-Hey, let's share context!
+Received: 2026-01-19T15:30:00Z
 """
     )
 
@@ -549,7 +539,7 @@ dev@example.com = rw
 alice@example.com = r
 bob@example.com = r
 
-[/claudeconnect/friend_requests]
+[/claudeconnect/with-claudeconnect-io]
 * = rw
 dev@example.com = rw
 
@@ -1654,7 +1644,7 @@ def fetch_peer_public_key(peer_email: str) -> bytes | None:
     Returns:
         Public key bytes (32 bytes) or None if not found
     """
-    api_url = f"https://v2.claudeconnect.io/api/public-key/{peer_email}"
+    api_url = f"{SERVER_URL}/api/public-key/{peer_email}"
 
     try:
         response = httpx.get(api_url, timeout=10)

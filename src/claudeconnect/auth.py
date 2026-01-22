@@ -13,10 +13,9 @@ from dataclasses import dataclass
 
 import httpx
 
-from .config import Tokens, CONFIG_DIR
+from .config import Tokens, CONFIG_DIR, SERVER_URL
 
 
-SERVER_URL = "https://v2.claudeconnect.io"
 LOCAL_PORT = 3407
 
 

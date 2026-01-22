@@ -13,6 +13,8 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional, List
 
+from .config import SVN_BASE_URL
+
 
 @dataclass
 class SvnStatus:
@@ -410,16 +412,18 @@ def email_to_repo_name(email: str) -> str:
     return email.replace("@", "-").replace(".", "-").lower()
 
 
-def repo_url_for_email(email: str, base_url: str = "https://v2.claudeconnect.io/svn") -> str:
+def repo_url_for_email(email: str, base_url: str | None = None) -> str:
     """
     Get SVN repo URL for an email.
 
     Args:
         email: User email
-        base_url: Base SVN URL
+        base_url: Base SVN URL (defaults to SVN_BASE_URL from config)
 
     Returns:
         Full repo URL
     """
+    if base_url is None:
+        base_url = SVN_BASE_URL
     repo_name = email_to_repo_name(email)
     return f"{base_url}/{repo_name}"
