@@ -136,6 +136,14 @@ def pull_peer_context(peer_email: str, svn_token: str, our_email: str) -> Path |
             updated = svn.update()
             if updated:
                 print(f"  Pulled {len(updated)} updates")
+
+            # Resolve any conflicts by accepting theirs (we always want the remote version)
+            status = svn.status()
+            if status.has_conflicts:
+                print(f"  Resolving {len(status.conflicted)} conflicts (accepting remote)...")
+                for conflicted_path in status.conflicted:
+                    svn.resolve_conflict(conflicted_path, accept="theirs-full")
+
             # Decrypt any encrypted files
             decrypted = decrypt_peer_context(peer_dir, peer_email)
             if decrypted:
