@@ -141,24 +141,58 @@ class SvnClient:
             path: Path relative to repo root (empty for root).
 
         Returns:
-            List of item names in the directory.
+            List of item names. Directories end with '/'.
         """
         url = f"{self.repo_url}/{path}" if path else self.repo_url
         result = self._run(["list", url], timeout=60)
         if result.returncode != 0:
             return []
-        return [line.rstrip("/") for line in result.stdout.splitlines() if line.strip()]
+        # Keep trailing '/' on directories so we can distinguish them from files
+        return [line for line in result.stdout.splitlines() if line.strip()]
 
-    def checkout_incremental(self, base_timeout: int = 120, timeout_per_100_files: int = 30) -> int:
+    def update_files_batched(self, dir_name: str, files: list[str], batch_size: int = 100) -> int:
         """
-        Checkout the repository incrementally, directory by directory.
-
-        This is slower overall but provides progress feedback and avoids
-        timeout issues with large repositories. Timeout scales with directory size.
+        Update specific files in a directory in batches.
 
         Args:
-            base_timeout: Base timeout per directory in seconds (default 120s).
-            timeout_per_100_files: Additional seconds per 100 files (default 30s).
+            dir_name: Directory name relative to working copy.
+            files: List of filenames within the directory.
+            batch_size: Number of files per batch (default 100).
+
+        Returns:
+            Number of files successfully updated.
+        """
+        updated = 0
+        total = len(files)
+        num_batches = (total + batch_size - 1) // batch_size
+
+        for batch_num, i in enumerate(range(0, total, batch_size), 1):
+            batch = files[i:i + batch_size]
+            # Build paths relative to working copy
+            paths = [f"{dir_name}/{f}" for f in batch]
+
+            result = self._run(["update"] + paths, timeout=120)
+            if result.returncode == 0:
+                updated += len(batch)
+            else:
+                # Try one by one on failure
+                for path in paths:
+                    if self._run(["update", path], timeout=30).returncode == 0:
+                        updated += 1
+
+            print(f"      [{updated}/{total}] Pulled batch {batch_num}/{num_batches}")
+
+        return updated
+
+    def checkout_incremental(self, batch_size: int = 100) -> int:
+        """
+        Checkout the repository incrementally with batched file pulls.
+
+        For small directories (<batch_size files), pulls everything at once.
+        For large directories, pulls files in batches with progress indication.
+
+        Args:
+            batch_size: Files per batch for large directories (default 100).
 
         Returns:
             Total number of files checked out.
@@ -187,33 +221,53 @@ class SvnClient:
 
         total_files = 0
 
-        # Step 3: Update each directory to full depth with progress
+        # Step 3: Update each directory with appropriate strategy
         if dirs_to_update:
             print(f"    Found {len(dirs_to_update)} directories to sync...")
             for i, dir_name in enumerate(dirs_to_update, 1):
-                # Check remote size to scale timeout
+                # Check remote size
                 remote_items = self.list_remote(dir_name)
                 item_count = len(remote_items)
-                # Scale timeout: base + 30s per 100 files
-                timeout = base_timeout + (item_count // 100) * timeout_per_100_files
-                timeout = min(timeout, 1200)  # Cap at 20 minutes
 
-                if item_count > 100:
-                    print(f"    [{i}/{len(dirs_to_update)}] {dir_name}/ (~{item_count} items, {timeout}s timeout)...")
+                if item_count <= batch_size:
+                    # Small directory - pull all at once
+                    result = self._run(
+                        ["update", "--set-depth", "infinity", dir_name],
+                        timeout=120
+                    )
+                    if result.returncode != 0:
+                        print(f"    Warning: Failed to update {dir_name}: {result.stderr}")
+                        continue
+                    dir_path = self.working_dir / dir_name
+                    file_count = len(list(dir_path.rglob("*"))) if dir_path.is_dir() else 0
+                    total_files += file_count
+                    print(f"    [{i}/{len(dirs_to_update)}] {dir_name}/ ({file_count} files)")
+                else:
+                    # Large directory - pull in batches
+                    print(f"    [{i}/{len(dirs_to_update)}] {dir_name}/ ({item_count} files, batched)...")
 
-                result = self._run(
-                    ["update", "--set-depth", "infinity", dir_name],
-                    timeout=timeout
-                )
-                if result.returncode != 0:
-                    print(f"    Warning: Failed to update {dir_name}: {result.stderr}")
-                    continue
+                    # Separate files from subdirectories
+                    files = [f for f in remote_items if not f.endswith("/")]
+                    subdirs = [f for f in remote_items if f.endswith("/")]
 
-                # Count files in this directory
-                dir_path = self.working_dir / dir_name
-                file_count = len(list(dir_path.rglob("*"))) if dir_path.is_dir() else 0
-                total_files += file_count
-                print(f"    [{i}/{len(dirs_to_update)}] {dir_name}/ ({file_count} files)")
+                    # First, update any subdirectories normally
+                    if subdirs:
+                        for subdir in subdirs:
+                            subpath = f"{dir_name}/{subdir.rstrip('/')}"
+                            self._run(["update", "--set-depth", "infinity", subpath], timeout=120)
+
+                    # Then batch-pull files
+                    if files:
+                        pulled = self.update_files_batched(dir_name, files, batch_size)
+                        total_files += pulled
+
+                    # Count any nested files from subdirs
+                    dir_path = self.working_dir / dir_name
+                    if dir_path.is_dir():
+                        for subdir in subdirs:
+                            subpath = dir_path / subdir.rstrip("/")
+                            if subpath.is_dir():
+                                total_files += len(list(subpath.rglob("*")))
 
         # Also count top-level files
         top_level_files = len([f for f in self.working_dir.iterdir() if f.is_file()])
