@@ -68,8 +68,14 @@ class SvnClient:
         self.username = username
         self.password = password
 
-    def _run(self, args: list[str], cwd: Optional[Path] = None) -> subprocess.CompletedProcess:
-        """Run an SVN command with authentication."""
+    def _run(self, args: list[str], cwd: Optional[Path] = None, timeout: int = 120) -> subprocess.CompletedProcess:
+        """Run an SVN command with authentication.
+
+        Args:
+            args: SVN command arguments
+            cwd: Working directory override
+            timeout: Command timeout in seconds (default 120)
+        """
         cmd = [
             "svn",
             "--non-interactive",
@@ -96,16 +102,19 @@ class SvnClient:
                 cwd=cwd or self.working_dir,
                 capture_output=True,
                 text=True,
-                timeout=120,
+                timeout=timeout,
                 env=env,
             )
             return result
         except subprocess.TimeoutExpired as e:
-            raise SvnError(f"SVN command timed out: {' '.join(args)}") from e
+            raise SvnError(f"SVN command timed out after {timeout}s: {' '.join(args)}") from e
 
-    def checkout(self) -> bool:
+    def checkout(self, timeout: int = 600) -> bool:
         """
         Checkout the repository to the working directory.
+
+        Args:
+            timeout: Command timeout in seconds (default 600 for large repos).
 
         Returns:
             True if successful.
@@ -117,16 +126,161 @@ class SvnClient:
         parent = self.working_dir.parent
         name = self.working_dir.name
 
-        result = self._run(["checkout", self.repo_url, name], cwd=parent)
+        result = self._run(["checkout", self.repo_url, name], cwd=parent, timeout=timeout)
 
         if result.returncode != 0:
             raise SvnError(f"Checkout failed: {result.stderr}")
 
         return True
 
-    def update(self) -> list[str]:
+    def list_remote(self, path: str = "") -> list[str]:
+        """
+        List contents of a remote path in the repository.
+
+        Args:
+            path: Path relative to repo root (empty for root).
+
+        Returns:
+            List of item names. Directories end with '/'.
+        """
+        url = f"{self.repo_url}/{path}" if path else self.repo_url
+        result = self._run(["list", url], timeout=60)
+        if result.returncode != 0:
+            return []
+        # Keep trailing '/' on directories so we can distinguish them from files
+        return [line for line in result.stdout.splitlines() if line.strip()]
+
+    def update_files_batched(self, dir_name: str, files: list[str], batch_size: int = 100) -> int:
+        """
+        Update specific files in a directory in batches.
+
+        Args:
+            dir_name: Directory name relative to working copy.
+            files: List of filenames within the directory.
+            batch_size: Number of files per batch (default 100).
+
+        Returns:
+            Number of files successfully updated.
+        """
+        updated = 0
+        total = len(files)
+        num_batches = (total + batch_size - 1) // batch_size
+
+        for batch_num, i in enumerate(range(0, total, batch_size), 1):
+            batch = files[i:i + batch_size]
+            # Build paths relative to working copy
+            paths = [f"{dir_name}/{f}" for f in batch]
+
+            result = self._run(["update"] + paths, timeout=120)
+            if result.returncode == 0:
+                updated += len(batch)
+            else:
+                # Try one by one on failure
+                for path in paths:
+                    if self._run(["update", path], timeout=30).returncode == 0:
+                        updated += 1
+
+            print(f"      [{updated}/{total}] Pulled batch {batch_num}/{num_batches}")
+
+        return updated
+
+    def checkout_incremental(self, batch_size: int = 100) -> int:
+        """
+        Checkout the repository incrementally with batched file pulls.
+
+        For small directories (<batch_size files), pulls everything at once.
+        For large directories, pulls files in batches with progress indication.
+
+        Args:
+            batch_size: Files per batch for large directories (default 100).
+
+        Returns:
+            Total number of files checked out.
+
+        Raises:
+            SvnError: If checkout fails.
+        """
+        parent = self.working_dir.parent
+        name = self.working_dir.name
+
+        # Step 1: Shallow checkout (just top-level files and directory stubs)
+        print(f"    Initializing checkout...")
+        result = self._run(
+            ["checkout", "--depth", "immediates", self.repo_url, name],
+            cwd=parent,
+            timeout=120
+        )
+        if result.returncode != 0:
+            raise SvnError(f"Shallow checkout failed: {result.stderr}")
+
+        # Step 2: Get list of directories to fully populate
+        dirs_to_update = []
+        for item in self.working_dir.iterdir():
+            if item.is_dir() and item.name != ".svn":
+                dirs_to_update.append(item.name)
+
+        total_files = 0
+
+        # Step 3: Update each directory with appropriate strategy
+        if dirs_to_update:
+            print(f"    Found {len(dirs_to_update)} directories to sync...")
+            for i, dir_name in enumerate(dirs_to_update, 1):
+                # Check remote size
+                remote_items = self.list_remote(dir_name)
+                item_count = len(remote_items)
+
+                if item_count <= batch_size:
+                    # Small directory - pull all at once
+                    result = self._run(
+                        ["update", "--set-depth", "infinity", dir_name],
+                        timeout=120
+                    )
+                    if result.returncode != 0:
+                        print(f"    Warning: Failed to update {dir_name}: {result.stderr}")
+                        continue
+                    dir_path = self.working_dir / dir_name
+                    file_count = len(list(dir_path.rglob("*"))) if dir_path.is_dir() else 0
+                    total_files += file_count
+                    print(f"    [{i}/{len(dirs_to_update)}] {dir_name}/ ({file_count} files)")
+                else:
+                    # Large directory - pull in batches
+                    print(f"    [{i}/{len(dirs_to_update)}] {dir_name}/ ({item_count} files, batched)...")
+
+                    # Separate files from subdirectories
+                    files = [f for f in remote_items if not f.endswith("/")]
+                    subdirs = [f for f in remote_items if f.endswith("/")]
+
+                    # First, update any subdirectories normally
+                    if subdirs:
+                        for subdir in subdirs:
+                            subpath = f"{dir_name}/{subdir.rstrip('/')}"
+                            self._run(["update", "--set-depth", "infinity", subpath], timeout=120)
+
+                    # Then batch-pull files
+                    if files:
+                        pulled = self.update_files_batched(dir_name, files, batch_size)
+                        total_files += pulled
+
+                    # Count any nested files from subdirs
+                    dir_path = self.working_dir / dir_name
+                    if dir_path.is_dir():
+                        for subdir in subdirs:
+                            subpath = dir_path / subdir.rstrip("/")
+                            if subpath.is_dir():
+                                total_files += len(list(subpath.rglob("*")))
+
+        # Also count top-level files
+        top_level_files = len([f for f in self.working_dir.iterdir() if f.is_file()])
+        total_files += top_level_files
+
+        return total_files
+
+    def update(self, timeout: int = 600) -> list[str]:
         """
         Update working copy from repository.
+
+        Args:
+            timeout: Command timeout in seconds (default 600 for large repos).
 
         Returns:
             List of updated file paths.
@@ -134,7 +288,7 @@ class SvnClient:
         Raises:
             SvnError: If update fails.
         """
-        result = self._with_cleanup_retry("update", ["update", "--accept", "postpone"])
+        result = self._with_cleanup_retry("update", ["update", "--accept", "postpone"], timeout=timeout)
 
         if result.returncode != 0:
             raise SvnError(f"Update failed: {result.stderr}")
@@ -230,6 +384,68 @@ class SvnClient:
 
         return added
 
+    def add_batch(self, paths: list[Path], batch_size: int = 50) -> tuple[list[Path], list[Path]]:
+        """
+        Add multiple files to version control in batches.
+
+        More efficient than adding files one at a time for large uploads.
+        Processes files in batches to avoid command line length limits.
+
+        Args:
+            paths: List of file paths relative to working directory.
+            batch_size: Number of files to add per SVN command (default 50).
+
+        Returns:
+            Tuple of (successfully_added, failed) path lists.
+        """
+        added = []
+        failed = []
+
+        # Process in batches to avoid command line length limits
+        for i in range(0, len(paths), batch_size):
+            batch = paths[i:i + batch_size]
+
+            # Build command with all paths in this batch
+            args = ["add", "--parents"]
+            args.extend(str(p) for p in batch)
+
+            result = self._run(args)
+
+            if result.returncode == 0:
+                added.extend(batch)
+            else:
+                # Batch failed - fall back to one-by-one to identify failures
+                for path in batch:
+                    if self.add(path, parents=True):
+                        added.append(path)
+                    else:
+                        failed.append(path)
+
+        return added, failed
+
+    def get_unversioned_files(self, pattern: str = "**/*.md") -> list[Path]:
+        """
+        Get list of unversioned files matching pattern.
+
+        Uses svn status which is faster than checking each file individually.
+
+        Args:
+            pattern: Glob pattern to match files (default: all markdown files)
+
+        Returns:
+            List of unversioned file paths relative to working directory.
+        """
+        status = self.status()
+
+        # Filter unversioned files by pattern
+        import fnmatch
+        unversioned = []
+        for path in status.unversioned:
+            if fnmatch.fnmatch(str(path), pattern) or path.suffix == ".md":
+                unversioned.append(path)
+
+        return unversioned
+
     def delete(self, path: Path) -> bool:
         """
         Mark a file for deletion from version control.
@@ -259,12 +475,13 @@ class SvnClient:
 
         return deleted
 
-    def commit(self, message: str) -> Optional[int]:
+    def commit(self, message: str, timeout: int = 600) -> Optional[int]:
         """
         Commit changes to the repository.
 
         Args:
             message: Commit message.
+            timeout: Command timeout in seconds (default 600 for large commits).
 
         Returns:
             Revision number if successful, None if nothing to commit.
@@ -272,7 +489,7 @@ class SvnClient:
         Raises:
             SvnError: If commit fails.
         """
-        result = self._with_cleanup_retry("commit", ["commit", "-m", message])
+        result = self._with_cleanup_retry("commit", ["commit", "-m", message], timeout=timeout)
 
         if result.returncode != 0:
             if "nothing to commit" in result.stderr.lower():
@@ -374,7 +591,7 @@ class SvnClient:
         result = self._run(args)
         return result.returncode == 0
 
-    def _with_cleanup_retry(self, operation: str, args: list[str], cwd: Optional[Path] = None) -> subprocess.CompletedProcess:
+    def _with_cleanup_retry(self, operation: str, args: list[str], cwd: Optional[Path] = None, timeout: int = 120) -> subprocess.CompletedProcess:
         """
         Run an SVN command with automatic cleanup retry on lock errors.
 
@@ -382,6 +599,7 @@ class SvnClient:
             operation: Human-readable operation name for error messages.
             args: SVN command arguments.
             cwd: Working directory override.
+            timeout: Command timeout in seconds (default 120).
 
         Returns:
             CompletedProcess result.
@@ -389,12 +607,12 @@ class SvnClient:
         Raises:
             SvnError: If operation fails even after cleanup retry.
         """
-        result = self._run(args, cwd)
+        result = self._run(args, cwd, timeout=timeout)
 
         if result.returncode != 0 and is_lock_error(result.stderr):
             # Working copy is locked - try cleanup and retry once
             self.cleanup()
-            result = self._run(args, cwd)
+            result = self._run(args, cwd, timeout=timeout)
 
         return result
 

@@ -71,6 +71,8 @@ try:
         decrypt_received_master_key,
         save_friend_master_key,
         has_friend_master_key,
+        should_encrypt_file,
+        encrypt_file_with_master_key,
     )
     HAS_ENCRYPTION = is_encryption_available()
 except ImportError:
@@ -945,18 +947,7 @@ def init_context_dir(
 
     # Copy existing markdown files from context dir to shadow dir
     if md_files:
-        print("  Copying files to shadow directory...")
-        for md_file in md_files:
-            rel_path = md_file.relative_to(context_dir)
-            shadow_file = shadow_dir / rel_path
-            shadow_file.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(md_file, shadow_file)
-
-        # Add files to SVN in shadow directory
-        added = svn.add_all_markdown()
-        print(f"  Added {len(added)} markdown files to SVN")
-
-        # Set ignore patterns for non-markdown
+        # Set ignore patterns for non-markdown first
         svn.set_ignore([
             "*.py",
             "*.json",
@@ -974,14 +965,65 @@ def init_context_dir(
             ".venv",
         ])
 
-        # Initial commit from shadow directory
-        try:
-            rev = svn.commit("Initial sync from claudeconnect")
-            if rev:
-                print(f"  Committed initial sync (revision {rev})")
-        except SvnError as e:
-            print(f"  Initial commit failed: {e}")
-            return False
+        # For large file sets, use batched commits for reliability and progress
+        BATCH_SIZE = 100
+        total_files = len(md_files)
+
+        if total_files >= BATCH_SIZE:
+            print(f"  Using batched commits ({BATCH_SIZE} files per commit)...")
+            total_committed = 0
+
+            for batch_start in range(0, total_files, BATCH_SIZE):
+                batch_end = min(batch_start + BATCH_SIZE, total_files)
+                batch = md_files[batch_start:batch_end]
+                batch_num = (batch_start // BATCH_SIZE) + 1
+                total_batches = (total_files + BATCH_SIZE - 1) // BATCH_SIZE
+
+                # Copy batch to shadow
+                rel_paths = []
+                for md_file in batch:
+                    rel_path = md_file.relative_to(context_dir)
+                    shadow_file = shadow_dir / rel_path
+                    shadow_file.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(md_file, shadow_file)
+                    rel_paths.append(rel_path)
+
+                # Add batch to SVN
+                added, failed = svn.add_batch(rel_paths)
+
+                # Commit batch
+                try:
+                    rev = svn.commit(f"Initial sync batch {batch_num}/{total_batches}: {len(batch)} files")
+                    if rev:
+                        total_committed += len(batch)
+                        print(f"  [{total_committed}/{total_files}] Committed batch {batch_num}/{total_batches} (rev {rev})")
+                except SvnError as e:
+                    print(f"  Batch {batch_num} commit failed: {e}")
+                    return False
+
+            print(f"  Completed: {total_committed} files in {total_batches} batches")
+
+        else:
+            # Small file set - single commit
+            print("  Copying files to shadow directory...")
+            for md_file in md_files:
+                rel_path = md_file.relative_to(context_dir)
+                shadow_file = shadow_dir / rel_path
+                shadow_file.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(md_file, shadow_file)
+
+            # Add files to SVN in shadow directory
+            added = svn.add_all_markdown()
+            print(f"  Added {len(added)} markdown files to SVN")
+
+            # Initial commit from shadow directory
+            try:
+                rev = svn.commit("Initial sync from claudeconnect")
+                if rev:
+                    print(f"  Committed initial sync (revision {rev})")
+            except SvnError as e:
+                print(f"  Initial commit failed: {e}")
+                return False
 
     # Ensure authz and directory structure exist in both locations
     ensure_authz_exists(context_dir, shadow_dir, svn, email, private_files, public_key_hex)
@@ -1433,6 +1475,170 @@ def sync():
         print("✓ Sync complete")
     else:
         sys.exit(1)
+
+
+@cli.command()
+@click.argument("source_dir", type=click.Path(exists=True, file_okay=False, dir_okay=True))
+@click.option("--dry-run", is_flag=True, help="Show what would be uploaded without uploading")
+@click.option("--pattern", default="**/*.md", help="Glob pattern for files to upload (default: **/*.md)")
+def upload(source_dir: str, dry_run: bool, pattern: str):
+    """Upload a directory of files to your context.
+
+    Efficiently uploads large collections of files with progress tracking.
+    By default, uploads all markdown files (*.md) from the source directory.
+
+    Examples:
+        claudeconnect upload ~/my-notes
+        claudeconnect upload ~/docs --dry-run
+    """
+    from datetime import datetime
+
+    tokens = get_valid_token()
+    config = get_config()
+
+    if not tokens:
+        print("Not logged in or token expired. Run `claudeconnect login` first.")
+        sys.exit(1)
+
+    if not config.context_dir:
+        print("No context directory configured. Run `claudeconnect init` first.")
+        sys.exit(1)
+
+    # Get SVN token
+    svn_token = get_svn_token(tokens.id_token)
+    if not svn_token:
+        print("Failed to get SVN token")
+        sys.exit(1)
+
+    source_path = Path(source_dir).resolve()
+    context_dir = Path(config.context_dir)
+    shadow_dir = get_shadow_dir(tokens.email)
+    repo_url = repo_url_for_email(tokens.email)
+
+    # Check encryption settings
+    encryption_enabled = config.encryption_enabled and HAS_ENCRYPTION
+
+    # Find all matching files
+    print(f"Scanning {source_path} for files matching '{pattern}'...")
+    files_to_upload = list(source_path.glob(pattern))
+    files_to_upload = [f for f in files_to_upload if f.is_file() and ".svn" not in f.parts]
+
+    if not files_to_upload:
+        print(f"No files found matching '{pattern}'")
+        return
+
+    print(f"Found {len(files_to_upload)} files to upload")
+
+    if dry_run:
+        print("\nDry run - files that would be uploaded:")
+        for f in files_to_upload[:20]:
+            rel = f.relative_to(source_path)
+            print(f"  {rel}")
+        if len(files_to_upload) > 20:
+            print(f"  ... and {len(files_to_upload) - 20} more")
+        return
+
+    # Initialize SVN client
+    svn = SvnClient(shadow_dir, repo_url, svn_token, tokens.email)
+
+    # Ensure shadow dir is up to date
+    print("Updating from server...")
+    try:
+        svn.update()
+    except SvnError as e:
+        print(f"  Warning: Update failed: {e}")
+
+    # Process files with progress tracking
+    print(f"\nUploading {len(files_to_upload)} files...")
+    copied = []
+    failed = []
+    skipped = []
+
+    for i, src_file in enumerate(files_to_upload, 1):
+        rel_path = src_file.relative_to(source_path)
+        context_path = context_dir / rel_path
+        shadow_path = shadow_dir / rel_path
+
+        # Progress indicator
+        progress = f"[{i}/{len(files_to_upload)}]"
+
+        try:
+            # Check if file already exists
+            if context_path.exists():
+                # Compare content
+                if context_path.read_bytes() == src_file.read_bytes():
+                    skipped.append(rel_path)
+                    continue
+
+            # Create parent directories
+            context_path.parent.mkdir(parents=True, exist_ok=True)
+            shadow_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # Read source content
+            content = src_file.read_bytes()
+
+            # Write to context dir (plaintext)
+            context_path.write_bytes(content)
+
+            # Write to shadow dir (encrypted if enabled)
+            if encryption_enabled and HAS_ENCRYPTION:
+                if should_encrypt_file(rel_path):
+                    try:
+                        content = encrypt_file_with_master_key(content, tokens.email)
+                    except Exception as e:
+                        print(f"{progress} Warning: Could not encrypt {rel_path}: {e}")
+
+            shadow_path.write_bytes(content)
+            copied.append(rel_path)
+
+            # Print progress every 10 files or for small batches
+            if len(files_to_upload) <= 20 or i % 10 == 0 or i == len(files_to_upload):
+                print(f"{progress} Processed {rel_path}")
+
+        except Exception as e:
+            print(f"{progress} Failed: {rel_path} - {e}")
+            failed.append((rel_path, str(e)))
+
+    if not copied:
+        if skipped:
+            print(f"\n✓ All {len(skipped)} files already up to date")
+        else:
+            print("\nNo files were uploaded")
+        return
+
+    # Add new files to SVN in batch
+    print(f"\nAdding {len(copied)} files to version control...")
+    added, add_failed = svn.add_batch(copied)
+
+    if add_failed:
+        print(f"  Warning: {len(add_failed)} files failed to add")
+        failed.extend((p, "SVN add failed") for p in add_failed)
+
+    # Commit
+    if added:
+        print("Committing...")
+        try:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            message = f"Batch upload: {len(added)} files ({timestamp})"
+            rev = svn.commit(message)
+            if rev:
+                print(f"  Committed revision {rev}")
+        except SvnError as e:
+            print(f"  Commit failed: {e}")
+            sys.exit(1)
+
+    # Summary
+    print(f"\n{'─' * 40}")
+    print("Upload complete!")
+    print(f"  ✓ Uploaded: {len(added)} files")
+    if skipped:
+        print(f"  ○ Skipped (unchanged): {len(skipped)} files")
+    if failed:
+        print(f"  ✗ Failed: {len(failed)} files")
+        for path, error in failed[:5]:
+            print(f"    - {path}: {error}")
+        if len(failed) > 5:
+            print(f"    ... and {len(failed) - 5} more")
 
 
 @cli.command()
