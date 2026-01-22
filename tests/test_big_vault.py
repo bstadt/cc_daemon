@@ -191,20 +191,35 @@ def init_account(account_name: str, temp_dir: Path) -> str:
     """Initialize an account and return email."""
     log(f"Initializing {account_name}...")
     wait_for_user(f"{account_name} logged in. Ready to init.")
-    # Pass "y" to confirm switching context directory if prompted
-    # Use longer timeout for init with many files
-    claudeconnect("init", cwd=temp_dir, input_text="y\n", timeout=1200)
+    # Run with live output to show progress during file scanning
+    # Pass "y" via stdin to confirm switching context directory if prompted
+    result = subprocess.run(
+        ["claudeconnect", "init"],
+        cwd=temp_dir,
+        input="y\n",
+        text=True,
+        timeout=1200,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Init failed for {account_name}")
     email = get_current_email()
     log(f"{account_name} initialized: {email}")
     return email
 
 
 def sync(account_name: str, temp_dir: Path, timeout: int = 600):
-    """Sync an account with extended timeout."""
+    """Sync an account with extended timeout and live progress output."""
     log(f"Syncing {account_name}...")
     start_time = time.time()
-    claudeconnect("sync", cwd=temp_dir, timeout=timeout)
+    # Run with live output (not captured) to show progress
+    result = subprocess.run(
+        ["claudeconnect", "sync"],
+        cwd=temp_dir,
+        timeout=timeout,
+    )
     elapsed = time.time() - start_time
+    if result.returncode != 0:
+        raise RuntimeError(f"Sync failed for {account_name}")
     log(f"{account_name} synced in {elapsed:.1f}s")
 
 
@@ -242,8 +257,15 @@ def pull_and_verify_vault(temp_dir: Path, peer_email: str, expected_files: int =
     log(f"Pulling {peer_email}'s context (expecting {expected_files} vault files)...")
     start_time = time.time()
 
-    # Pull with extended timeout
-    claudeconnect("pull", peer_email, cwd=temp_dir, timeout=1200)
+    # Pull with live output to show progress
+    result = subprocess.run(
+        ["claudeconnect", "pull", peer_email],
+        cwd=temp_dir,
+        timeout=1200,
+    )
+    if result.returncode != 0:
+        error(f"Pull failed")
+        return False
 
     elapsed = time.time() - start_time
     log(f"Pull completed in {elapsed:.1f}s")
