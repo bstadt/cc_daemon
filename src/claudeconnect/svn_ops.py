@@ -68,8 +68,14 @@ class SvnClient:
         self.username = username
         self.password = password
 
-    def _run(self, args: list[str], cwd: Optional[Path] = None) -> subprocess.CompletedProcess:
-        """Run an SVN command with authentication."""
+    def _run(self, args: list[str], cwd: Optional[Path] = None, timeout: int = 120) -> subprocess.CompletedProcess:
+        """Run an SVN command with authentication.
+
+        Args:
+            args: SVN command arguments
+            cwd: Working directory override
+            timeout: Command timeout in seconds (default 120)
+        """
         cmd = [
             "svn",
             "--non-interactive",
@@ -96,12 +102,12 @@ class SvnClient:
                 cwd=cwd or self.working_dir,
                 capture_output=True,
                 text=True,
-                timeout=120,
+                timeout=timeout,
                 env=env,
             )
             return result
         except subprocess.TimeoutExpired as e:
-            raise SvnError(f"SVN command timed out: {' '.join(args)}") from e
+            raise SvnError(f"SVN command timed out after {timeout}s: {' '.join(args)}") from e
 
     def checkout(self) -> bool:
         """
@@ -321,12 +327,13 @@ class SvnClient:
 
         return deleted
 
-    def commit(self, message: str) -> Optional[int]:
+    def commit(self, message: str, timeout: int = 600) -> Optional[int]:
         """
         Commit changes to the repository.
 
         Args:
             message: Commit message.
+            timeout: Command timeout in seconds (default 600 for large commits).
 
         Returns:
             Revision number if successful, None if nothing to commit.
@@ -334,7 +341,7 @@ class SvnClient:
         Raises:
             SvnError: If commit fails.
         """
-        result = self._with_cleanup_retry("commit", ["commit", "-m", message])
+        result = self._with_cleanup_retry("commit", ["commit", "-m", message], timeout=timeout)
 
         if result.returncode != 0:
             if "nothing to commit" in result.stderr.lower():
@@ -436,7 +443,7 @@ class SvnClient:
         result = self._run(args)
         return result.returncode == 0
 
-    def _with_cleanup_retry(self, operation: str, args: list[str], cwd: Optional[Path] = None) -> subprocess.CompletedProcess:
+    def _with_cleanup_retry(self, operation: str, args: list[str], cwd: Optional[Path] = None, timeout: int = 120) -> subprocess.CompletedProcess:
         """
         Run an SVN command with automatic cleanup retry on lock errors.
 
@@ -444,6 +451,7 @@ class SvnClient:
             operation: Human-readable operation name for error messages.
             args: SVN command arguments.
             cwd: Working directory override.
+            timeout: Command timeout in seconds (default 120).
 
         Returns:
             CompletedProcess result.
@@ -451,12 +459,12 @@ class SvnClient:
         Raises:
             SvnError: If operation fails even after cleanup retry.
         """
-        result = self._run(args, cwd)
+        result = self._run(args, cwd, timeout=timeout)
 
         if result.returncode != 0 and is_lock_error(result.stderr):
             # Working copy is locked - try cleanup and retry once
             self.cleanup()
-            result = self._run(args, cwd)
+            result = self._run(args, cwd, timeout=timeout)
 
         return result
 
