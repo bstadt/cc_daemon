@@ -18,12 +18,15 @@ Run with: pytest tests/integration.py -s
 (the -s flag is required for interactive prompts)
 """
 
+from __future__ import annotations
+
 import json
 import os
 import subprocess
 import tempfile
 import shutil
 from pathlib import Path
+from typing import Optional
 
 import pytest
 
@@ -97,11 +100,6 @@ def wait_for_user(msg: str):
     input("Press Enter to continue...")
 
 
-def clear_tokens():
-    """Clear tokens file to allow new login."""
-    tokens_file = CC_CONFIG_DIR / "tokens.json"
-    if tokens_file.exists():
-        tokens_file.unlink()
 
 
 def clean_server():
@@ -293,7 +291,6 @@ def test_full_flow(temp_dirs):
 
     # Account 2 setup
     os.chdir(temp2)
-    clear_tokens()
     login("Account 2", temp2)
     account2_email = init_account("Account 2", temp2)
     create_poetry_file(temp2)
@@ -302,7 +299,6 @@ def test_full_flow(temp_dirs):
 
     # Account 1 receives and accepts
     os.chdir(temp1)
-    clear_tokens()
     login("Account 1", temp1)
     init_account("Account 1", temp1)
     sync("Account 1", temp1)
@@ -310,13 +306,12 @@ def test_full_flow(temp_dirs):
     accept_friend_request(temp1, account2_email)
 
     # Session
-    start_session(temp1, account2_email, "poetry and the widening gyre")
+    start_session(temp1, account2_email, "talk about poetry!")
     verify_transcript("Account 1", temp1)
     pull_and_verify_poetry(temp1, account2_email)
 
     # Account 2 verifies
     os.chdir(temp2)
-    clear_tokens()
     login("Account 2", temp2)
     init_account("Account 2", temp2)
     sync("Account 2", temp2)
@@ -347,7 +342,6 @@ def main():
         account1_email = init_account("Account 1", temp1)
 
         os.chdir(temp2)
-        clear_tokens()
         login("Account 2", temp2)
         account2_email = init_account("Account 2", temp2)
         create_poetry_file(temp2)
@@ -355,7 +349,6 @@ def main():
         send_friend_request(temp2, account1_email)
 
         os.chdir(temp1)
-        clear_tokens()
         login("Account 1", temp1)
         init_account("Account 1", temp1)
         sync("Account 1", temp1)
@@ -367,7 +360,6 @@ def main():
         pull_and_verify_poetry(temp1, account2_email)
 
         os.chdir(temp2)
-        clear_tokens()
         login("Account 2", temp2)
         init_account("Account 2", temp2)
         sync("Account 2", temp2)
