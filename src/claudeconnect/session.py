@@ -91,17 +91,29 @@ def decrypt_peer_context(peer_dir: Path, peer_email: str) -> int:
         print(f"  Warning: No master key for {peer_email}, cannot decrypt their files")
         return 0
 
-    decrypted_count = 0
-    for md_file in peer_dir.rglob("*.md"):
-        if ".svn" in md_file.parts:
-            continue
+    # First, collect all files to decrypt for progress tracking
+    md_files = [f for f in peer_dir.rglob("*.md") if ".svn" not in f.parts]
+    total_files = len(md_files)
 
+    # Only show progress for large file sets
+    show_progress = total_files >= 100
+    progress_interval = max(1, total_files // 10)  # ~10 progress updates
+
+    if show_progress:
+        print(f"  Decrypting {total_files} files...")
+
+    decrypted_count = 0
+    for i, md_file in enumerate(md_files, 1):
         try:
             content = md_file.read_bytes()
             if is_encrypted_file(content):
                 plaintext = decrypt_file_with_friend_master_key(content, peer_email)
                 md_file.write_bytes(plaintext)
                 decrypted_count += 1
+
+                # Progress output
+                if show_progress and (decrypted_count % progress_interval == 0):
+                    print(f"  [{decrypted_count}/{total_files}] Decrypting...")
         except Exception as e:
             print(f"  Warning: Could not decrypt {md_file.name}: {e}")
 
@@ -153,13 +165,14 @@ def pull_peer_context(peer_email: str, svn_token: str, our_email: str) -> Path |
             print(f"  Update failed: {e}")
             return None
     else:
-        # Fresh checkout
+        # Fresh checkout - use incremental for large repos
         print(f"  Checking out {peer_email}'s context...")
         peer_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            svn.checkout()
-            print(f"  Checked out to {peer_dir}")
+            # Use incremental checkout with progress for reliability
+            total_files = svn.checkout_incremental()
+            print(f"  Checked out {total_files} files to {peer_dir}")
             # Decrypt any encrypted files
             decrypted = decrypt_peer_context(peer_dir, peer_email)
             if decrypted:

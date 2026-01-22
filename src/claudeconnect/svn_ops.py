@@ -109,9 +109,12 @@ class SvnClient:
         except subprocess.TimeoutExpired as e:
             raise SvnError(f"SVN command timed out after {timeout}s: {' '.join(args)}") from e
 
-    def checkout(self) -> bool:
+    def checkout(self, timeout: int = 600) -> bool:
         """
         Checkout the repository to the working directory.
+
+        Args:
+            timeout: Command timeout in seconds (default 600 for large repos).
 
         Returns:
             True if successful.
@@ -123,16 +126,81 @@ class SvnClient:
         parent = self.working_dir.parent
         name = self.working_dir.name
 
-        result = self._run(["checkout", self.repo_url, name], cwd=parent)
+        result = self._run(["checkout", self.repo_url, name], cwd=parent, timeout=timeout)
 
         if result.returncode != 0:
             raise SvnError(f"Checkout failed: {result.stderr}")
 
         return True
 
-    def update(self) -> list[str]:
+    def checkout_incremental(self, timeout_per_dir: int = 120) -> int:
+        """
+        Checkout the repository incrementally, directory by directory.
+
+        This is slower overall but provides progress feedback and avoids
+        timeout issues with large repositories.
+
+        Args:
+            timeout_per_dir: Timeout per directory update (default 120s).
+
+        Returns:
+            Total number of files checked out.
+
+        Raises:
+            SvnError: If checkout fails.
+        """
+        parent = self.working_dir.parent
+        name = self.working_dir.name
+
+        # Step 1: Shallow checkout (just top-level files and directory stubs)
+        print(f"    Initializing checkout...")
+        result = self._run(
+            ["checkout", "--depth", "immediates", self.repo_url, name],
+            cwd=parent,
+            timeout=120
+        )
+        if result.returncode != 0:
+            raise SvnError(f"Shallow checkout failed: {result.stderr}")
+
+        # Step 2: Get list of directories to fully populate
+        dirs_to_update = []
+        for item in self.working_dir.iterdir():
+            if item.is_dir() and item.name != ".svn":
+                dirs_to_update.append(item.name)
+
+        # Also update top-level files to infinity depth
+        total_files = 0
+
+        # Step 3: Update each directory to full depth with progress
+        if dirs_to_update:
+            print(f"    Found {len(dirs_to_update)} directories to sync...")
+            for i, dir_name in enumerate(dirs_to_update, 1):
+                result = self._run(
+                    ["update", "--set-depth", "infinity", dir_name],
+                    timeout=timeout_per_dir
+                )
+                if result.returncode != 0:
+                    print(f"    Warning: Failed to update {dir_name}: {result.stderr}")
+                    continue
+
+                # Count files in this directory
+                dir_path = self.working_dir / dir_name
+                file_count = len(list(dir_path.rglob("*"))) if dir_path.is_dir() else 0
+                total_files += file_count
+                print(f"    [{i}/{len(dirs_to_update)}] {dir_name}/ ({file_count} files)")
+
+        # Also count top-level files
+        top_level_files = len([f for f in self.working_dir.iterdir() if f.is_file()])
+        total_files += top_level_files
+
+        return total_files
+
+    def update(self, timeout: int = 600) -> list[str]:
         """
         Update working copy from repository.
+
+        Args:
+            timeout: Command timeout in seconds (default 600 for large repos).
 
         Returns:
             List of updated file paths.
@@ -140,7 +208,7 @@ class SvnClient:
         Raises:
             SvnError: If update fails.
         """
-        result = self._with_cleanup_retry("update", ["update", "--accept", "postpone"])
+        result = self._with_cleanup_retry("update", ["update", "--accept", "postpone"], timeout=timeout)
 
         if result.returncode != 0:
             raise SvnError(f"Update failed: {result.stderr}")
