@@ -60,9 +60,9 @@ def prompt(msg: str):
     print(f"{Colors.YELLOW}[ACTION REQUIRED]{Colors.RESET} {msg}")
 
 
-def run(cmd: list[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
+def run(cmd: list[str], cwd: Path | None = None, check: bool = True, input_text: str | None = None) -> subprocess.CompletedProcess:
     """Run a command and return result."""
-    result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, input=input_text)
     if check and result.returncode != 0:
         error(f"Command failed: {' '.join(cmd)}")
         error(f"stdout: {result.stdout}")
@@ -77,9 +77,9 @@ def ssh_server(cmd: str) -> str:
     return result.stdout.strip()
 
 
-def claudeconnect(*args, cwd: Path | None = None) -> subprocess.CompletedProcess:
+def claudeconnect(*args, cwd: Path | None = None, input_text: str | None = None) -> subprocess.CompletedProcess:
     """Run claudeconnect CLI command."""
-    return run(["claudeconnect", *args], cwd=cwd)
+    return run(["claudeconnect", *args], cwd=cwd, input_text=input_text)
 
 
 def get_current_email() -> str:
@@ -139,7 +139,8 @@ def init_account(account_name: str, temp_dir: Path) -> str:
     """Initialize an account and return email."""
     log(f"Initializing {account_name}...")
     wait_for_user(f"{account_name} logged in. Ready to init.")
-    claudeconnect("init", cwd=temp_dir)
+    # Pass "y" to confirm switching context directory if prompted
+    claudeconnect("init", cwd=temp_dir, input_text="y\n")
     email = get_current_email()
     log(f"{account_name} initialized: {email}")
     return email
