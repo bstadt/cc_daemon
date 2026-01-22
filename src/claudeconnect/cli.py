@@ -50,6 +50,7 @@ from .config import (
     get_config, get_tokens, Config, Tokens, is_logged_in, get_email,
     get_test_user_email, get_test_user_credentials, list_test_users,
     TestUserCredentials, TEST_USERS_DIR, get_shadow_dir, sanitize_email,
+    SERVER_URL,
 )
 from .scanner import scan_directory
 from .svn_ops import SvnClient, SvnError, email_to_repo_name, repo_url_for_email
@@ -74,9 +75,6 @@ try:
     HAS_ENCRYPTION = is_encryption_available()
 except ImportError:
     HAS_ENCRYPTION = False
-
-
-SERVER_URL = "https://v2.claudeconnect.io"
 
 
 def display_startup_banner(context_dir: Path, email: str, clear_screen: bool = True) -> None:
@@ -1654,7 +1652,7 @@ def fetch_peer_public_key(peer_email: str) -> bytes | None:
     Returns:
         Public key bytes (32 bytes) or None if not found
     """
-    api_url = f"https://v2.claudeconnect.io/api/public-key/{peer_email}"
+    api_url = f"{SERVER_URL}/api/public-key/{peer_email}"
 
     try:
         response = httpx.get(api_url, timeout=10)

@@ -18,7 +18,7 @@ from uuid import uuid4
 
 import httpx
 
-from .config import get_config, get_tokens, Tokens, get_shadow_dir
+from .config import get_config, get_tokens, Tokens, get_shadow_dir, SERVER_URL
 from .svn_ops import SvnClient, SvnError, email_to_repo_name, repo_url_for_email
 from .sync import sync_once
 
@@ -41,7 +41,6 @@ TRANSCRIPTS_DIR = Path.home() / ".claude-connect" / "transcripts"
 
 # Cache directory for peer contexts
 PEERS_DIR = Path.home() / ".claude-connect" / "peers"
-SERVER_URL = "https://v2.claudeconnect.io"
 
 
 def get_svn_token(id_token: str) -> str | None:
