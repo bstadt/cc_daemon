@@ -275,36 +275,69 @@ def sync_once(
         total_changes = len(all_changes)
 
         added_count = 0
+        total_committed = 0
+
         if total_changes > 0:
             print(f"  Processing {total_changes} files ({len(changed_files['added'])} new, {len(changed_files['modified'])} modified)")
 
-            # Copy changed/added files from context to shadow (encrypting) with progress
-            _copy_to_shadow_with_progress(
-                context_dir, shadow_dir,
-                all_changes,
-                email, encryption_enabled
-            )
+            # For large batches, commit in chunks for better progress and reliability
+            BATCH_SIZE = 100
+            if total_changes >= BATCH_SIZE:
+                print(f"  Using batched commits ({BATCH_SIZE} files per commit)...")
 
-            # Add new files to SVN using batch operation
-            if changed_files['added']:
-                print(f"  Adding {len(changed_files['added'])} new files to version control...")
-                added, failed = svn.add_batch(changed_files['added'])
-                added_count = len(added)
-                if failed:
-                    print(f"  Warning: {len(failed)} files failed to add")
+                # Process in batches
+                for batch_start in range(0, total_changes, BATCH_SIZE):
+                    batch_end = min(batch_start + BATCH_SIZE, total_changes)
+                    batch = all_changes[batch_start:batch_end]
+                    batch_num = (batch_start // BATCH_SIZE) + 1
+                    total_batches = (total_changes + BATCH_SIZE - 1) // BATCH_SIZE
+
+                    # Copy batch to shadow (encrypting)
+                    _copy_to_shadow(context_dir, shadow_dir, batch, email, encryption_enabled)
+
+                    # Add new files in this batch
+                    new_in_batch = [f for f in batch if f in changed_files['added']]
+                    if new_in_batch:
+                        added, failed = svn.add_batch(new_in_batch)
+                        added_count += len(added)
+
+                    # Commit this batch
+                    status = svn.status()
+                    if status.has_changes:
+                        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        rev = svn.commit(f"Batch {batch_num}/{total_batches}: {len(batch)} files ({timestamp})")
+                        if rev:
+                            total_committed += len(batch)
+                            print(f"  [{total_committed}/{total_changes}] Committed batch {batch_num}/{total_batches} (rev {rev})")
+
+            else:
+                # Small batch - single commit as before
+                _copy_to_shadow_with_progress(
+                    context_dir, shadow_dir,
+                    all_changes,
+                    email, encryption_enabled
+                )
+
+                # Add new files to SVN using batch operation
+                if changed_files['added']:
+                    added, failed = svn.add_batch(changed_files['added'])
+                    added_count = len(added)
+                    if failed:
+                        print(f"  Warning: {len(failed)} files failed to add")
+
+                # NOTE: No auto-deletion - users must explicitly delete via skill
+
+                # Commit
+                status = svn.status()
+                if status.has_changes or added_count:
+                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    rev = svn.commit(f"Auto-sync {timestamp}")
+                    if rev:
+                        total_committed = total_changes
+                        print(f"  Committed revision {rev}")
 
             if added_count:
-                print(f"  Added {added_count} files")
-
-            # NOTE: No auto-deletion - users must explicitly delete via skill
-
-            # Commit
-            status = svn.status()
-            if status.has_changes or added_count:
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                rev = svn.commit(f"Auto-sync {timestamp}")
-                if rev:
-                    print(f"  Committed revision {rev}")
+                print(f"  Added {added_count} new files total")
 
         return True
 

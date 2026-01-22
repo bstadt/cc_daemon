@@ -947,18 +947,7 @@ def init_context_dir(
 
     # Copy existing markdown files from context dir to shadow dir
     if md_files:
-        print("  Copying files to shadow directory...")
-        for md_file in md_files:
-            rel_path = md_file.relative_to(context_dir)
-            shadow_file = shadow_dir / rel_path
-            shadow_file.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(md_file, shadow_file)
-
-        # Add files to SVN in shadow directory
-        added = svn.add_all_markdown()
-        print(f"  Added {len(added)} markdown files to SVN")
-
-        # Set ignore patterns for non-markdown
+        # Set ignore patterns for non-markdown first
         svn.set_ignore([
             "*.py",
             "*.json",
@@ -976,14 +965,65 @@ def init_context_dir(
             ".venv",
         ])
 
-        # Initial commit from shadow directory
-        try:
-            rev = svn.commit("Initial sync from claudeconnect")
-            if rev:
-                print(f"  Committed initial sync (revision {rev})")
-        except SvnError as e:
-            print(f"  Initial commit failed: {e}")
-            return False
+        # For large file sets, use batched commits for reliability and progress
+        BATCH_SIZE = 100
+        total_files = len(md_files)
+
+        if total_files >= BATCH_SIZE:
+            print(f"  Using batched commits ({BATCH_SIZE} files per commit)...")
+            total_committed = 0
+
+            for batch_start in range(0, total_files, BATCH_SIZE):
+                batch_end = min(batch_start + BATCH_SIZE, total_files)
+                batch = md_files[batch_start:batch_end]
+                batch_num = (batch_start // BATCH_SIZE) + 1
+                total_batches = (total_files + BATCH_SIZE - 1) // BATCH_SIZE
+
+                # Copy batch to shadow
+                rel_paths = []
+                for md_file in batch:
+                    rel_path = md_file.relative_to(context_dir)
+                    shadow_file = shadow_dir / rel_path
+                    shadow_file.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(md_file, shadow_file)
+                    rel_paths.append(rel_path)
+
+                # Add batch to SVN
+                added, failed = svn.add_batch(rel_paths)
+
+                # Commit batch
+                try:
+                    rev = svn.commit(f"Initial sync batch {batch_num}/{total_batches}: {len(batch)} files")
+                    if rev:
+                        total_committed += len(batch)
+                        print(f"  [{total_committed}/{total_files}] Committed batch {batch_num}/{total_batches} (rev {rev})")
+                except SvnError as e:
+                    print(f"  Batch {batch_num} commit failed: {e}")
+                    return False
+
+            print(f"  Completed: {total_committed} files in {total_batches} batches")
+
+        else:
+            # Small file set - single commit
+            print("  Copying files to shadow directory...")
+            for md_file in md_files:
+                rel_path = md_file.relative_to(context_dir)
+                shadow_file = shadow_dir / rel_path
+                shadow_file.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(md_file, shadow_file)
+
+            # Add files to SVN in shadow directory
+            added = svn.add_all_markdown()
+            print(f"  Added {len(added)} markdown files to SVN")
+
+            # Initial commit from shadow directory
+            try:
+                rev = svn.commit("Initial sync from claudeconnect")
+                if rev:
+                    print(f"  Committed initial sync (revision {rev})")
+            except SvnError as e:
+                print(f"  Initial commit failed: {e}")
+                return False
 
     # Ensure authz and directory structure exist in both locations
     ensure_authz_exists(context_dir, shadow_dir, svn, email, private_files, public_key_hex)
