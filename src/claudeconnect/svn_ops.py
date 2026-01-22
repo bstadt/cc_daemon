@@ -133,15 +133,32 @@ class SvnClient:
 
         return True
 
-    def checkout_incremental(self, timeout_per_dir: int = 120) -> int:
+    def list_remote(self, path: str = "") -> list[str]:
+        """
+        List contents of a remote path in the repository.
+
+        Args:
+            path: Path relative to repo root (empty for root).
+
+        Returns:
+            List of item names in the directory.
+        """
+        url = f"{self.repo_url}/{path}" if path else self.repo_url
+        result = self._run(["list", url], timeout=60)
+        if result.returncode != 0:
+            return []
+        return [line.rstrip("/") for line in result.stdout.splitlines() if line.strip()]
+
+    def checkout_incremental(self, base_timeout: int = 120, timeout_per_100_files: int = 30) -> int:
         """
         Checkout the repository incrementally, directory by directory.
 
         This is slower overall but provides progress feedback and avoids
-        timeout issues with large repositories.
+        timeout issues with large repositories. Timeout scales with directory size.
 
         Args:
-            timeout_per_dir: Timeout per directory update (default 120s).
+            base_timeout: Base timeout per directory in seconds (default 120s).
+            timeout_per_100_files: Additional seconds per 100 files (default 30s).
 
         Returns:
             Total number of files checked out.
@@ -168,16 +185,25 @@ class SvnClient:
             if item.is_dir() and item.name != ".svn":
                 dirs_to_update.append(item.name)
 
-        # Also update top-level files to infinity depth
         total_files = 0
 
         # Step 3: Update each directory to full depth with progress
         if dirs_to_update:
             print(f"    Found {len(dirs_to_update)} directories to sync...")
             for i, dir_name in enumerate(dirs_to_update, 1):
+                # Check remote size to scale timeout
+                remote_items = self.list_remote(dir_name)
+                item_count = len(remote_items)
+                # Scale timeout: base + 30s per 100 files
+                timeout = base_timeout + (item_count // 100) * timeout_per_100_files
+                timeout = min(timeout, 1200)  # Cap at 20 minutes
+
+                if item_count > 100:
+                    print(f"    [{i}/{len(dirs_to_update)}] {dir_name}/ (~{item_count} items, {timeout}s timeout)...")
+
                 result = self._run(
                     ["update", "--set-depth", "infinity", dir_name],
-                    timeout=timeout_per_dir
+                    timeout=timeout
                 )
                 if result.returncode != 0:
                     print(f"    Warning: Failed to update {dir_name}: {result.stderr}")
