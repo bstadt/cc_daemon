@@ -103,10 +103,16 @@ def wait_for_user(msg: str):
 
 
 def clean_server():
-    """Remove all repos on server."""
-    log("Cleaning server repos...")
-    ssh_server("sudo rm -rf /var/svn/repos/*")
-    log("Server repos cleaned.")
+    """Remove test account repos on server."""
+    log("Cleaning test account repos...")
+    # Only remove repos for test accounts, not all repos
+    test_repos = [
+        "brandonduderstadt-gmail-com",
+        "thisismysignupacct-gmail-com",
+    ]
+    for repo in test_repos:
+        ssh_server(f"sudo rm -rf /var/svn/repos/{repo}")
+    log("Test account repos cleaned.")
 
 
 def clean_client():
@@ -205,7 +211,7 @@ def sync(account_name: str, temp_dir: Path):
 def send_friend_request(temp_dir: Path, to_email: str):
     """Send friend request."""
     log(f"Sending friend request to {to_email}...")
-    claudeconnect("friend", to_email, "-m", "Let's connect!", cwd=temp_dir)
+    claudeconnect("friend", to_email, cwd=temp_dir)
     log(f"Friend request sent.")
 
 

@@ -14,7 +14,7 @@ RESET='\033[0m'
 
 # Context directory
 CONTEXT_DIR="${CLAUDE_CONTEXT_DIR:-$HOME/claude}"
-FRIEND_REQUESTS_DIR="$CONTEXT_DIR/claudeconnect/friend_requests"
+SYSTEM_DIR="$CONTEXT_DIR/claudeconnect/with-claudeconnect-io"
 CONVERSATIONS_DIR="$CONTEXT_DIR/claudeconnect/conversations"
 
 # Get email from config
@@ -63,18 +63,20 @@ make_box_footer() {
     printf "┘\n"
 }
 
-# Count friend requests
+# Count friend requests (in with-claudeconnect-io directory)
 FR_COUNT=0
 FR_ITEMS=()
-if [ -d "$FRIEND_REQUESTS_DIR" ]; then
-    for f in "$FRIEND_REQUESTS_DIR"/*.md 2>/dev/null; do
+if [ -d "$SYSTEM_DIR" ]; then
+    for f in "$SYSTEM_DIR"/friend-request-*.md 2>/dev/null; do
         [ -f "$f" ] || continue
-        if grep -q "status: pending" "$f" 2>/dev/null; then
-            sender=$(grep "^from:" "$f" 2>/dev/null | head -1 | cut -d: -f2 | tr -d ' ')
-            if [ -n "$sender" ]; then
-                FR_ITEMS+=("∙ $sender")
-                ((FR_COUNT++))
-            fi
+        # Extract sender email from filename: friend-request-user-example-com.md -> user@example.com
+        basename_f=$(basename "$f" .md)
+        sender_sanitized="${basename_f#friend-request-}"
+        # Convert sanitized email back to normal format (approximation)
+        sender=$(echo "$sender_sanitized" | sed 's/-gmail-com$/@gmail.com/' | sed 's/-example-com$/@example.com/')
+        if [ -n "$sender" ]; then
+            FR_ITEMS+=("∙ $sender")
+            ((FR_COUNT++))
         fi
     done
 fi

@@ -458,33 +458,25 @@ def _init_mock_environment(mock_dir: Path) -> bool:
     mock_dir.mkdir(parents=True, exist_ok=True)
 
     # Create directory structure
-    (mock_dir / "claudeconnect" / "friend_requests").mkdir(parents=True, exist_ok=True)
+    (mock_dir / "claudeconnect" / "with-claudeconnect-io").mkdir(parents=True, exist_ok=True)
     (mock_dir / "claudeconnect" / "conversations" / "with-alice-example-com").mkdir(parents=True, exist_ok=True)
     (mock_dir / "claudeconnect" / "conversations" / "with-bob-example-com").mkdir(parents=True, exist_ok=True)
     (mock_dir / "notes").mkdir(parents=True, exist_ok=True)
     (mock_dir / ".mock" / "config").mkdir(parents=True, exist_ok=True)
 
     # Sample friend request 1
-    (mock_dir / "claudeconnect" / "friend_requests" / "carol@example.com.md").write_text(
-        """# Friend Request
+    (mock_dir / "claudeconnect" / "with-claudeconnect-io" / "friend-request-carol-example-com.md").write_text(
+        """# Friend Request from carol@example.com
 
-from: carol@example.com
-date: 2026-01-20T10:00:00Z
-status: pending
-
-Hi! I'd like to connect our Claude instances to collaborate on projects.
+Received: 2026-01-20T10:00:00Z
 """
     )
 
     # Sample friend request 2
-    (mock_dir / "claudeconnect" / "friend_requests" / "david@example.com.md").write_text(
-        """# Friend Request
+    (mock_dir / "claudeconnect" / "with-claudeconnect-io" / "friend-request-david-example-com.md").write_text(
+        """# Friend Request from david@example.com
 
-from: david@example.com
-date: 2026-01-19T15:30:00Z
-status: pending
-
-Hey, let's share context!
+Received: 2026-01-19T15:30:00Z
 """
     )
 
@@ -547,7 +539,7 @@ dev@example.com = rw
 alice@example.com = r
 bob@example.com = r
 
-[/claudeconnect/friend_requests]
+[/claudeconnect/with-claudeconnect-io]
 * = rw
 dev@example.com = rw
 
