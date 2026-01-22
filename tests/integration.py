@@ -13,6 +13,9 @@ Tests the full flow:
 8. Context pull verification
 
 Requires two Google accounts with manual OAuth at each login.
+
+Run with: pytest tests/integration.py -s
+(the -s flag is required for interactive prompts)
 """
 
 import json
@@ -21,6 +24,8 @@ import subprocess
 import tempfile
 import shutil
 from pathlib import Path
+
+import pytest
 
 # Server config
 SERVER = "v2.claudeconnect.io"
@@ -338,21 +343,92 @@ def step_23_verify_transcript_account2(temp2: Path):
         return False
 
 
+@pytest.fixture
+def temp_dirs():
+    """Create and cleanup temp directories for both accounts."""
+    temp1 = Path(tempfile.mkdtemp(prefix="cc_test_account1_"))
+    temp2 = Path(tempfile.mkdtemp(prefix="cc_test_account2_"))
+    log(f"Created {temp1} (Account 1)")
+    log(f"Created {temp2} (Account 2)")
+
+    yield temp1, temp2
+
+    # Cleanup
+    if temp1.exists():
+        log(f"Cleaning up {temp1}")
+        shutil.rmtree(temp1)
+    if temp2.exists():
+        log(f"Cleaning up {temp2}")
+        shutil.rmtree(temp2)
+
+
+@pytest.mark.integration
+def test_full_flow(temp_dirs):
+    """
+    Full integration test for ClaudeConnect.
+
+    Run with: pytest tests/integration.py -s -m integration
+    """
+    temp1, temp2 = temp_dirs
+
+    # Setup
+    step_1_clean_server()
+    step_2_clean_client()
+
+    # Account 1 first login
+    step_4_login_account1(temp1)
+    account1_email = step_5_init_account1(temp1)
+
+    # Account 2 setup
+    step_6_switch_to_temp2(temp2)
+    step_7_login_account2(temp2)
+    account2_email = step_8_init_account2(temp2)
+    step_9_create_poetry(temp2)
+    step_10_sync_account2(temp2)
+    step_11_send_friend_request(temp2, account1_email)
+
+    # Account 1 receives and accepts
+    step_12_switch_to_temp1(temp1)
+    step_13_relogin_account1(temp1)
+    step_14_reinit_account1(temp1)
+    step_15_sync_check_friend_request(temp1, account2_email)
+    step_16_accept_friend_request(temp1, account2_email)
+
+    # Session
+    step_17_start_session(temp1, account2_email)
+    step_18_verify_transcript_account1(temp1)
+    step_19_pull_and_verify_poetry(temp1, account2_email)
+
+    # Account 2 verifies
+    step_20_switch_to_temp2(temp2)
+    step_21_relogin_account2(temp2)
+    step_22_reinit_account2(temp2)
+    success = step_23_verify_transcript_account2(temp2)
+
+    # Summary
+    print()
+    log("==========================================")
+    log("Integration test complete!")
+    log("==========================================")
+    log(f"Account 1: {account1_email}")
+    log(f"Account 2: {account2_email}")
+
+    assert success, "Transcript did not sync to Account 2"
+
+
 def main():
+    """Run as standalone script."""
     temp1 = None
     temp2 = None
 
     try:
-        # Setup
         step_1_clean_server()
         step_2_clean_client()
         temp1, temp2 = step_3_create_temp_dirs()
 
-        # Account 1 first login
         step_4_login_account1(temp1)
         account1_email = step_5_init_account1(temp1)
 
-        # Account 2 setup
         step_6_switch_to_temp2(temp2)
         step_7_login_account2(temp2)
         account2_email = step_8_init_account2(temp2)
@@ -360,44 +436,34 @@ def main():
         step_10_sync_account2(temp2)
         step_11_send_friend_request(temp2, account1_email)
 
-        # Account 1 receives and accepts
         step_12_switch_to_temp1(temp1)
         step_13_relogin_account1(temp1)
         step_14_reinit_account1(temp1)
         step_15_sync_check_friend_request(temp1, account2_email)
         step_16_accept_friend_request(temp1, account2_email)
 
-        # Session
         step_17_start_session(temp1, account2_email)
         step_18_verify_transcript_account1(temp1)
         step_19_pull_and_verify_poetry(temp1, account2_email)
 
-        # Account 2 verifies
         step_20_switch_to_temp2(temp2)
         step_21_relogin_account2(temp2)
         step_22_reinit_account2(temp2)
         step_23_verify_transcript_account2(temp2)
 
-        # Summary
-        print()
         log("==========================================")
         log("Integration test complete!")
         log("==========================================")
         log(f"Account 1: {account1_email}")
         log(f"Account 2: {account2_email}")
-        log(f"Temp1: {temp1}")
-        log(f"Temp2: {temp2}")
 
     except Exception as e:
         error(f"Test failed: {e}")
         raise
     finally:
-        # Cleanup
         if temp1 and temp1.exists():
-            log(f"Cleaning up {temp1}")
             shutil.rmtree(temp1)
         if temp2 and temp2.exists():
-            log(f"Cleaning up {temp2}")
             shutil.rmtree(temp2)
 
 
