@@ -19,14 +19,11 @@ from .auth import login as do_login, ensure_valid_token, decode_jwt_payload, ref
 from .config import (
     get_config, get_tokens, Config, Tokens, is_logged_in, get_email,
     get_test_user_email, get_test_user_credentials, list_test_users,
-    TestUserCredentials, TEST_USERS_DIR,
+    TestUserCredentials, TEST_USERS_DIR, SERVER_URL,
 )
 from .scanner import scan_directory
 from .svn_ops import SvnClient, SvnError, email_to_repo_name, repo_url_for_email
 from .sync import SyncLoop, sync_once
-
-
-SERVER_URL = "https://claudeconnect.io"
 
 
 def get_svn_token(id_token: str) -> str | None:

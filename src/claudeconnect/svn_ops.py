@@ -1,7 +1,7 @@
 """SVN operations wrapper for Claude Connect.
 
 Wraps the SVN CLI with clean Python functions for checkout, update, commit, etc.
-All operations use Bearer token authentication for claudeconnect.io.
+All operations use Bearer token authentication for the configured server.
 """
 
 from __future__ import annotations
@@ -12,6 +12,8 @@ import json
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional, List
+
+from .config import SVN_BASE_URL
 
 
 @dataclass
@@ -381,16 +383,18 @@ def email_to_repo_name(email: str) -> str:
     return email.replace("@", "-").replace(".", "-").lower()
 
 
-def repo_url_for_email(email: str, base_url: str = "https://claudeconnect.io/svn") -> str:
+def repo_url_for_email(email: str, base_url: str | None = None) -> str:
     """
     Get SVN repo URL for an email.
 
     Args:
         email: User email
-        base_url: Base SVN URL
+        base_url: Base SVN URL (defaults to SVN_BASE_URL from config)
 
     Returns:
         Full repo URL
     """
+    if base_url is None:
+        base_url = SVN_BASE_URL
     repo_name = email_to_repo_name(email)
     return f"{base_url}/{repo_name}"
