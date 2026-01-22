@@ -271,19 +271,27 @@ def sync_once(
         # OUTBOUND: Detect changes in context dir
         changed_files = _detect_context_changes(context_dir, shadow_dir)
 
+        all_changes = changed_files['modified'] + changed_files['added']
+        total_changes = len(all_changes)
+
         added_count = 0
-        if changed_files['modified'] or changed_files['added']:
-            # Copy changed/added files from context to shadow (encrypting)
-            _copy_to_shadow(
+        if total_changes > 0:
+            print(f"  Processing {total_changes} files ({len(changed_files['added'])} new, {len(changed_files['modified'])} modified)")
+
+            # Copy changed/added files from context to shadow (encrypting) with progress
+            _copy_to_shadow_with_progress(
                 context_dir, shadow_dir,
-                changed_files['modified'] + changed_files['added'],
+                all_changes,
                 email, encryption_enabled
             )
 
-            # Add new files to SVN
-            for path in changed_files['added']:
-                if svn.add(path, parents=True):
-                    added_count += 1
+            # Add new files to SVN using batch operation
+            if changed_files['added']:
+                print(f"  Adding {len(changed_files['added'])} new files to version control...")
+                added, failed = svn.add_batch(changed_files['added'])
+                added_count = len(added)
+                if failed:
+                    print(f"  Warning: {len(failed)} files failed to add")
 
             if added_count:
                 print(f"  Added {added_count} files")
@@ -412,6 +420,59 @@ def _copy_to_shadow(
 
         # Write to shadow dir
         shadow_path.write_bytes(content)
+
+
+def _copy_to_shadow_with_progress(
+    context_dir: Path,
+    shadow_dir: Path,
+    files: list[Path],
+    email: str,
+    encryption_enabled: bool
+) -> None:
+    """
+    Copy files from context_dir to shadow_dir with progress output.
+
+    Same as _copy_to_shadow but prints progress for large batches.
+
+    Args:
+        context_dir: User's plaintext directory
+        shadow_dir: SVN working copy directory
+        files: List of relative paths to copy
+        email: User's email (unused in v2, kept for API compat)
+        encryption_enabled: Whether to encrypt files
+    """
+    total = len(files)
+    # Only show progress for large batches
+    show_progress = total >= 20
+    progress_interval = max(1, total // 10)  # Show ~10 progress updates
+
+    for i, rel_path in enumerate(files, 1):
+        context_path = context_dir / rel_path
+        shadow_path = shadow_dir / rel_path
+
+        if not context_path.exists():
+            continue
+
+        # Ensure parent directory exists in shadow
+        shadow_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Read plaintext from context
+        content = context_path.read_bytes()
+
+        # Encrypt if enabled and file should be encrypted
+        if encryption_enabled and HAS_ENCRYPTION:
+            if should_encrypt_file(rel_path) and not is_encrypted_file(content):
+                try:
+                    content = encrypt_file_with_master_key(content, email)
+                except Exception as e:
+                    logger.error(f"Failed to encrypt {rel_path}: {e}")
+
+        # Write to shadow dir
+        shadow_path.write_bytes(content)
+
+        # Progress output
+        if show_progress and (i % progress_interval == 0 or i == total):
+            print(f"  [{i}/{total}] Encrypting and staging files...")
 
 
 def _copy_from_shadow(
