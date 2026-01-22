@@ -11,7 +11,7 @@ from dataclasses import dataclass, asdict
 
 # Server configuration - single source of truth
 # Override with CLAUDECONNECT_SERVER environment variable
-DEFAULT_SERVER_URL = "https://claudeconnect.io"
+DEFAULT_SERVER_URL = "https://v2.claudeconnect.io"
 SERVER_URL = os.environ.get("CLAUDECONNECT_SERVER", DEFAULT_SERVER_URL)
 SVN_BASE_URL = f"{SERVER_URL}/svn"
 
