@@ -1,21 +1,13 @@
 #!/usr/bin/env python3
 """
-ClaudeConnect Integration Test
+ClaudeConnect File Operations Integration Test
 
-Tests the full flow:
-1. Server cleanup (purge all repos)
-2. Client cleanup (~/.claude-connect)
-3. Two-account login/init
-4. File creation and sync
-5. Friend request flow
-6. Session between accounts
-7. Transcript verification
-8. Context pull verification
+Extends the base integration test to verify file add/sync operations:
+1. Full base flow (login, init, friend request, session)
+2. Account 2 adds philosophy.md and syncs
+3. Account 1 pulls and verifies philosophy.md content
 
-Requires two Google accounts with manual OAuth at each login.
-
-Run with: pytest tests/integration.py -s
-(the -s flag is required for interactive prompts)
+Run with: pytest tests/test_fileops.py -s -m integration
 """
 
 from __future__ import annotations
@@ -100,12 +92,9 @@ def wait_for_user(msg: str):
     input("Press Enter to continue...")
 
 
-
-
 def clean_server():
     """Remove test account repos on server."""
     log("Cleaning test account repos...")
-    # Only remove repos for test accounts, not all repos
     test_repos = [
         "brandonduderstadt-gmail-com",
         "thisismysignupacct-gmail-com",
@@ -198,6 +187,34 @@ def create_poetry_file(temp_dir: Path):
     poetry_file = temp_dir / "poetry.md"
     poetry_file.write_text("# Poetry Collection\n\nturning and turning in the widening gyre\n")
     log("Created poetry.md")
+
+
+def create_philosophy_file(temp_dir: Path):
+    """Create philosophy.md in context."""
+    log("Creating philosophy.md...")
+    philosophy_file = temp_dir / "philosophy.md"
+    philosophy_file.write_text(
+        "# Philosophy\n\n"
+        "Truth, with a capital T, is kind of like God - God isnt relative to anything, "
+        "and so there is nothing to be said about it. This is why theologians talk about ineffability.\n"
+    )
+    log("Created philosophy.md")
+
+
+def update_poetry_file(temp_dir: Path):
+    """Update poetry.md with new content."""
+    log("Updating poetry.md...")
+    poetry_file = temp_dir / "poetry.md"
+    poetry_file.write_text(
+        "# Poetry Collection\n\n"
+        "come on you primate, describe those visions\n"
+        "you had in the wild\n"
+        "that led you to crawl\n"
+        "from the chaotic animal\n"
+        "dimension of things\n"
+        "into the springtime of mind.\n"
+    )
+    log("Updated poetry.md")
 
 
 def sync(account_name: str, temp_dir: Path):
@@ -306,6 +323,118 @@ def pull_and_verify_poetry(temp_dir: Path, peer_email: str) -> bool:
         return False
 
 
+def pull_and_verify_philosophy(temp_dir: Path, peer_email: str) -> bool:
+    """Pull peer's context and verify philosophy.md."""
+    log(f"Pulling {peer_email}'s context for philosophy.md...")
+    claudeconnect("pull", peer_email, cwd=temp_dir)
+
+    repo_name = email_to_repo_name(peer_email)
+    peer_philosophy = PEERS_DIR / repo_name / "philosophy.md"
+
+    if peer_philosophy.exists():
+        content = peer_philosophy.read_text()
+        log("Pulled philosophy.md:")
+        print(content)
+        if "ineffability" in content:
+            log("Content verified - 'ineffability' found!")
+            return True
+        else:
+            error("Content verification failed - 'ineffability' not found")
+            return False
+    else:
+        error(f"Could not find: {peer_philosophy}")
+        if PEERS_DIR.exists():
+            warn("Peers directory contents:")
+            for p in PEERS_DIR.iterdir():
+                print(f"  {p}")
+                # List files in peer dir
+                peer_dir = PEERS_DIR / p.name
+                if peer_dir.is_dir():
+                    for f in peer_dir.iterdir():
+                        print(f"    {f.name}")
+        return False
+
+
+def pull_and_verify_updated_poetry(temp_dir: Path, peer_email: str) -> bool:
+    """Pull peer's context and verify poetry.md has been updated."""
+    log(f"Verifying updated poetry.md from {peer_email}...")
+
+    repo_name = email_to_repo_name(peer_email)
+    peer_poetry = PEERS_DIR / repo_name / "poetry.md"
+
+    if peer_poetry.exists():
+        content = peer_poetry.read_text()
+        log("Pulled updated poetry.md:")
+        print(content)
+        if "primate" in content and "springtime of mind" in content:
+            log("Content verified - updated poetry found ('primate', 'springtime of mind')!")
+            return True
+        elif "widening gyre" in content:
+            error("Content verification failed - still has OLD poetry content ('widening gyre')")
+            return False
+        else:
+            error("Content verification failed - unexpected content")
+            return False
+    else:
+        error(f"Could not find: {peer_poetry}")
+        return False
+
+
+def pull_and_verify_phase2_files(temp_dir: Path, peer_email: str) -> tuple[bool, bool]:
+    """
+    Pull peer's context and verify both philosophy.md (new) and poetry.md (updated).
+
+    Returns:
+        Tuple of (philosophy_success, poetry_success)
+    """
+    log(f"Pulling {peer_email}'s context for Phase 2 verification...")
+    claudeconnect("pull", peer_email, cwd=temp_dir)
+
+    repo_name = email_to_repo_name(peer_email)
+    peer_dir = PEERS_DIR / repo_name
+
+    # Verify philosophy.md
+    peer_philosophy = peer_dir / "philosophy.md"
+    philosophy_success = False
+    if peer_philosophy.exists():
+        content = peer_philosophy.read_text()
+        log("Pulled philosophy.md:")
+        print(content)
+        if "ineffability" in content:
+            log("✓ philosophy.md verified - 'ineffability' found!")
+            philosophy_success = True
+        else:
+            error("✗ philosophy.md verification failed - 'ineffability' not found")
+    else:
+        error(f"✗ Could not find: {peer_philosophy}")
+
+    # Verify updated poetry.md
+    peer_poetry = peer_dir / "poetry.md"
+    poetry_success = False
+    if peer_poetry.exists():
+        try:
+            content = peer_poetry.read_text()
+            log("Pulled updated poetry.md:")
+            print(content)
+            if "primate" in content and "springtime of mind" in content:
+                log("✓ poetry.md verified - updated content found ('primate', 'springtime of mind')!")
+                poetry_success = True
+            elif "widening gyre" in content:
+                error("✗ poetry.md verification failed - still has OLD content ('widening gyre')")
+            else:
+                error("✗ poetry.md verification failed - unexpected content")
+        except UnicodeDecodeError as e:
+            error(f"✗ poetry.md appears to still be encrypted (not decrypted by pull)")
+            # Show raw bytes for debugging
+            raw = peer_poetry.read_bytes()
+            log(f"  File size: {len(raw)} bytes")
+            log(f"  First 50 bytes (hex): {raw[:50].hex()}")
+    else:
+        error(f"✗ Could not find: {peer_poetry}")
+
+    return philosophy_success, poetry_success
+
+
 @pytest.fixture
 def temp_dirs():
     """Create and cleanup temp directories for both accounts."""
@@ -326,13 +455,23 @@ def temp_dirs():
 
 
 @pytest.mark.integration
-def test_full_flow(temp_dirs):
+def test_fileops_flow(temp_dirs):
     """
-    Full integration test for ClaudeConnect.
+    File operations integration test for ClaudeConnect.
 
-    Run with: pytest tests/integration.py -s -m integration
+    Extends base flow to test adding files after initial setup:
+    1. Base flow: login, init, friend request, poetry session
+    2. Account 2 adds philosophy.md and syncs
+    3. Account 1 pulls and verifies philosophy.md
+    4. Account 1 starts philosophy session
+
+    Run with: pytest tests/test_fileops.py -s -m integration
     """
     temp1, temp2 = temp_dirs
+
+    # ==========================================
+    # PHASE 1: Base flow (same as integration.py)
+    # ==========================================
 
     # Setup
     clean_server()
@@ -360,27 +499,71 @@ def test_full_flow(temp_dirs):
     check_friend_request(temp1, account2_email)
     accept_friend_request(temp1, account2_email)
 
-    # Session
+    # Poetry session
     start_session(temp1, account2_email, "talk about poetry!")
     verify_transcript("Account 1", temp1, account2_email)
     pull_and_verify_poetry(temp1, account2_email)
 
-    # Account 2 verifies
+    # Account 2 verifies poetry transcript
     os.chdir(temp2)
     login("Account 2", temp2)
     init_account("Account 2", temp2)
     sync("Account 2", temp2)
-    success = verify_transcript("Account 2", temp2, account1_email)
+    poetry_transcript_success = verify_transcript("Account 2", temp2, account1_email)
+    assert poetry_transcript_success, "Poetry transcript did not sync to Account 2"
 
+    # ==========================================
+    # PHASE 2: File operations - add philosophy.md
+    # ==========================================
+
+    log("")
+    log("==========================================")
+    log("PHASE 2: Adding philosophy.md + updating poetry.md")
+    log("==========================================")
+
+    # Account 2 adds philosophy.md AND updates poetry.md
+    create_philosophy_file(temp2)
+    update_poetry_file(temp2)
+    sync("Account 2", temp2)
+    log("Account 2 synced philosophy.md (new) and poetry.md (updated)")
+
+    # Account 1 pulls and verifies both files
+    os.chdir(temp1)
+    login("Account 1", temp1)
+    init_account("Account 1", temp1)
+    sync("Account 1", temp1)
+
+    philosophy_success, poetry_update_success = pull_and_verify_phase2_files(temp1, account2_email)
+    assert philosophy_success, "Failed to pull and verify philosophy.md"
+    assert poetry_update_success, "Failed to pull and verify updated poetry.md"
+
+    # Start philosophy session
+    start_session(temp1, account2_email, "talk about philosophy!")
+    philosophy_transcript_success = verify_transcript("Account 1", temp1, account2_email)
+
+    # Account 2 verifies philosophy transcript
+    os.chdir(temp2)
+    login("Account 2", temp2)
+    init_account("Account 2", temp2)
+    sync("Account 2", temp2)
+    account2_philosophy_transcript = verify_transcript("Account 2", temp2, account1_email)
+
+    # ==========================================
     # Summary
+    # ==========================================
     print()
     log("==========================================")
-    log("Integration test complete!")
+    log("File operations test complete!")
     log("==========================================")
     log(f"Account 1: {account1_email}")
     log(f"Account 2: {account2_email}")
+    log(f"Poetry transcript synced: {poetry_transcript_success}")
+    log(f"Philosophy.md pulled: {philosophy_success}")
+    log(f"Poetry.md updated: {poetry_update_success}")
+    log(f"Philosophy transcript (Account 1): {philosophy_transcript_success}")
+    log(f"Philosophy transcript (Account 2): {account2_philosophy_transcript}")
 
-    assert success, "Transcript did not sync to Account 2"
+    assert account2_philosophy_transcript, "Philosophy transcript did not sync to Account 2"
 
 
 def main():
@@ -393,6 +576,7 @@ def main():
         clean_client()
         temp1, temp2 = create_temp_dirs()
 
+        # Phase 1: Base flow
         login("Account 1", temp1)
         account1_email = init_account("Account 1", temp1)
         verify_init_structure("Account 1", temp1)
@@ -422,8 +606,33 @@ def main():
         sync("Account 2", temp2)
         verify_transcript("Account 2", temp2, account1_email)
 
+        # Phase 2: Add philosophy.md + update poetry.md
+        log("")
         log("==========================================")
-        log("Integration test complete!")
+        log("PHASE 2: Adding philosophy.md + updating poetry.md")
+        log("==========================================")
+
+        create_philosophy_file(temp2)
+        update_poetry_file(temp2)
+        sync("Account 2", temp2)
+
+        os.chdir(temp1)
+        login("Account 1", temp1)
+        init_account("Account 1", temp1)
+        sync("Account 1", temp1)
+        pull_and_verify_phase2_files(temp1, account2_email)
+
+        start_session(temp1, account2_email, "philosophy")
+        verify_transcript("Account 1", temp1, account2_email)
+
+        os.chdir(temp2)
+        login("Account 2", temp2)
+        init_account("Account 2", temp2)
+        sync("Account 2", temp2)
+        verify_transcript("Account 2", temp2, account1_email)
+
+        log("==========================================")
+        log("File operations test complete!")
         log("==========================================")
         log(f"Account 1: {account1_email}")
         log(f"Account 2: {account2_email}")
