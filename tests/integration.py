@@ -97,24 +97,31 @@ def wait_for_user(msg: str):
     input("Press Enter to continue...")
 
 
-def step_1_clean_server():
+def clear_tokens():
+    """Clear tokens file to allow new login."""
+    tokens_file = CC_CONFIG_DIR / "tokens.json"
+    if tokens_file.exists():
+        tokens_file.unlink()
+
+
+def clean_server():
     """Remove all repos on server."""
-    log("Step 1: Cleaning server repos...")
+    log("Cleaning server repos...")
     ssh_server("sudo rm -rf /var/svn/repos/*")
     log("Server repos cleaned.")
 
 
-def step_2_clean_client():
+def clean_client():
     """Remove local ~/.claude-connect."""
-    log("Step 2: Removing local ~/.claude-connect...")
+    log("Removing local ~/.claude-connect...")
     if CC_CONFIG_DIR.exists():
         shutil.rmtree(CC_CONFIG_DIR)
     log("Local config removed.")
 
 
-def step_3_create_temp_dirs() -> tuple[Path, Path]:
+def create_temp_dirs() -> tuple[Path, Path]:
     """Create temp directories for both accounts."""
-    log("Step 3: Creating temp directories...")
+    log("Creating temp directories...")
     temp1 = Path(tempfile.mkdtemp(prefix="cc_test_account1_"))
     temp2 = Path(tempfile.mkdtemp(prefix="cc_test_account2_"))
     log(f"Created {temp1} (Account 1)")
@@ -122,104 +129,51 @@ def step_3_create_temp_dirs() -> tuple[Path, Path]:
     return temp1, temp2
 
 
-def step_4_login_account1(temp1: Path):
-    """Login as Account 1."""
-    log("Step 4: Logging in as Account 1...")
-    os.chdir(temp1)
-    wait_for_user("Please login with ACCOUNT 1 (first Google account)")
-    claudeconnect("login", cwd=temp1)
+def login(account_name: str, temp_dir: Path):
+    """Login to an account."""
+    log(f"Logging in as {account_name}...")
+    os.chdir(temp_dir)
+    wait_for_user(f"Please login with {account_name}")
+    claudeconnect("login", cwd=temp_dir)
 
 
-def step_5_init_account1(temp1: Path) -> str:
-    """Initialize Account 1."""
-    log("Step 5: Initializing Account 1...")
-    wait_for_user("Account 1 logged in. Ready to init.")
-    claudeconnect("init", cwd=temp1)
+def init_account(account_name: str, temp_dir: Path) -> str:
+    """Initialize an account and return email."""
+    log(f"Initializing {account_name}...")
+    wait_for_user(f"{account_name} logged in. Ready to init.")
+    claudeconnect("init", cwd=temp_dir)
     email = get_current_email()
-    log(f"Account 1 initialized: {email}")
+    log(f"{account_name} initialized: {email}")
     return email
 
 
-def step_6_switch_to_temp2(temp2: Path):
-    """Switch to Account 2 directory."""
-    log("Step 6: Switching to Account 2 directory...")
-    os.chdir(temp2)
-    # Clear tokens for new login
-    tokens_file = CC_CONFIG_DIR / "tokens.json"
-    if tokens_file.exists():
-        tokens_file.unlink()
-
-
-def step_7_login_account2(temp2: Path):
-    """Login as Account 2."""
-    log("Step 7: Logging in as Account 2...")
-    wait_for_user("Please login with ACCOUNT 2 (second Google account)")
-    claudeconnect("login", cwd=temp2)
-
-
-def step_8_init_account2(temp2: Path) -> str:
-    """Initialize Account 2."""
-    log("Step 8: Initializing Account 2...")
-    wait_for_user("Account 2 logged in. Ready to init.")
-    claudeconnect("init", cwd=temp2)
-    email = get_current_email()
-    log(f"Account 2 initialized: {email}")
-    return email
-
-
-def step_9_create_poetry(temp2: Path):
-    """Create poetry.md in Account 2's context."""
-    log("Step 9: Creating poetry.md...")
-    poetry_file = temp2 / "poetry.md"
+def create_poetry_file(temp_dir: Path):
+    """Create poetry.md in context."""
+    log("Creating poetry.md...")
+    poetry_file = temp_dir / "poetry.md"
     poetry_file.write_text("# Poetry Collection\n\nturning and turning in the widening gyre\n")
     log("Created poetry.md")
 
 
-def step_10_sync_account2(temp2: Path):
-    """Sync Account 2."""
-    log("Step 10: Syncing Account 2...")
-    claudeconnect("sync", cwd=temp2)
-    log("Account 2 synced.")
+def sync(account_name: str, temp_dir: Path):
+    """Sync an account."""
+    log(f"Syncing {account_name}...")
+    claudeconnect("sync", cwd=temp_dir)
+    log(f"{account_name} synced.")
 
 
-def step_11_send_friend_request(temp2: Path, account1_email: str):
-    """Send friend request from Account 2 to Account 1."""
-    log("Step 11: Sending friend request...")
-    claudeconnect("friend", account1_email, "-m", "Let's connect!", cwd=temp2)
-    log(f"Friend request sent to {account1_email}")
+def send_friend_request(temp_dir: Path, to_email: str):
+    """Send friend request."""
+    log(f"Sending friend request to {to_email}...")
+    claudeconnect("friend", to_email, "-m", "Let's connect!", cwd=temp_dir)
+    log(f"Friend request sent.")
 
 
-def step_12_switch_to_temp1(temp1: Path):
-    """Switch back to Account 1 directory."""
-    log("Step 12: Switching to Account 1 directory...")
-    os.chdir(temp1)
-    tokens_file = CC_CONFIG_DIR / "tokens.json"
-    if tokens_file.exists():
-        tokens_file.unlink()
+def check_friend_request(temp_dir: Path, from_email: str):
+    """Check if friend request exists."""
+    log("Checking for friend request...")
+    friend_requests_dir = temp_dir / "claudeconnect" / "friend_requests"
 
-
-def step_13_relogin_account1(temp1: Path):
-    """Re-login as Account 1."""
-    log("Step 13: Re-logging in as Account 1...")
-    wait_for_user("Please login with ACCOUNT 1 again")
-    claudeconnect("login", cwd=temp1)
-
-
-def step_14_reinit_account1(temp1: Path):
-    """Re-init Account 1."""
-    log("Step 14: Re-initializing Account 1...")
-    wait_for_user("Ready to re-init Account 1.")
-    claudeconnect("init", cwd=temp1)
-
-
-def step_15_sync_check_friend_request(temp1: Path, account2_email: str):
-    """Sync and verify friend request exists."""
-    log("Step 15: Syncing and checking for friend request...")
-    claudeconnect("sync", cwd=temp1)
-
-    friend_requests_dir = temp1 / "claudeconnect" / "friend_requests"
-
-    # Check for friend request file
     found = False
     if friend_requests_dir.exists():
         for f in friend_requests_dir.iterdir():
@@ -238,94 +192,24 @@ def step_15_sync_check_friend_request(temp1: Path, account2_email: str):
             warn("friend_requests directory doesn't exist")
 
 
-def step_16_accept_friend_request(temp1: Path, account2_email: str):
-    """Accept the friend request."""
-    log("Step 16: Accepting friend request...")
-    claudeconnect("accept-friend", account2_email, cwd=temp1)
+def accept_friend_request(temp_dir: Path, from_email: str):
+    """Accept friend request."""
+    log(f"Accepting friend request from {from_email}...")
+    claudeconnect("accept-friend", from_email, cwd=temp_dir)
     log("Friend request accepted.")
 
 
-def step_17_start_session(temp1: Path, account2_email: str):
-    """Start a session about poetry."""
-    log("Step 17: Starting session about poetry...")
+def start_session(temp_dir: Path, peer_email: str, topic: str):
+    """Start a session with peer."""
+    log(f"Starting session about {topic}...")
     wait_for_user("Ready to start Claude session between accounts.")
-    claudeconnect("session", account2_email, "-t", "poetry and the widening gyre", cwd=temp1)
+    claudeconnect("session", peer_email, "-t", topic, cwd=temp_dir)
 
 
-def step_18_verify_transcript_account1(temp1: Path):
-    """Verify transcript saved in Account 1."""
-    log("Step 18: Verifying transcript in Account 1...")
-    conv_dir = temp1 / "claudeconnect" / "conversations"
-
-    if not conv_dir.exists():
-        error(f"Conversations directory not found: {conv_dir}")
-        return
-
-    transcripts = list(conv_dir.rglob("*.md"))
-    if transcripts:
-        log(f"Found {len(transcripts)} transcript(s)")
-        for t in transcripts:
-            log(f"  {t}")
-        # Show preview
-        log("Preview of first transcript:")
-        print(transcripts[0].read_text()[:1000])
-    else:
-        error("No transcripts found!")
-
-
-def step_19_pull_and_verify_poetry(temp1: Path, account2_email: str):
-    """Pull Account 2's context and verify poetry.md."""
-    log("Step 19: Pulling Account 2's context...")
-    claudeconnect("pull", account2_email, cwd=temp1)
-
-    repo_name = email_to_repo_name(account2_email)
-    peer_poetry = PEERS_DIR / repo_name / "poetry.md"
-
-    if peer_poetry.exists():
-        content = peer_poetry.read_text()
-        log(f"Pulled poetry.md:")
-        print(content)
-        if "widening gyre" in content:
-            log("Content verified - 'widening gyre' found!")
-        else:
-            error("Content verification failed")
-    else:
-        error(f"Could not find: {peer_poetry}")
-        if PEERS_DIR.exists():
-            warn("Peers directory contents:")
-            for p in PEERS_DIR.iterdir():
-                print(f"  {p}")
-
-
-def step_20_switch_to_temp2(temp2: Path):
-    """Switch back to Account 2."""
-    log("Step 20: Switching to Account 2 directory...")
-    os.chdir(temp2)
-    tokens_file = CC_CONFIG_DIR / "tokens.json"
-    if tokens_file.exists():
-        tokens_file.unlink()
-
-
-def step_21_relogin_account2(temp2: Path):
-    """Re-login as Account 2."""
-    log("Step 21: Re-logging in as Account 2...")
-    wait_for_user("Please login with ACCOUNT 2 again")
-    claudeconnect("login", cwd=temp2)
-
-
-def step_22_reinit_account2(temp2: Path):
-    """Re-init Account 2."""
-    log("Step 22: Re-initializing Account 2...")
-    wait_for_user("Ready to re-init Account 2.")
-    claudeconnect("init", cwd=temp2)
-
-
-def step_23_verify_transcript_account2(temp2: Path):
-    """Sync and verify transcript arrived at Account 2."""
-    log("Step 23: Syncing and verifying transcript in Account 2...")
-    claudeconnect("sync", cwd=temp2)
-
-    conv_dir = temp2 / "claudeconnect" / "conversations"
+def verify_transcript(account_name: str, temp_dir: Path) -> bool:
+    """Verify transcript exists."""
+    log(f"Verifying transcript in {account_name}...")
+    conv_dir = temp_dir / "claudeconnect" / "conversations"
 
     if not conv_dir.exists():
         error(f"Conversations directory not found: {conv_dir}")
@@ -333,13 +217,41 @@ def step_23_verify_transcript_account2(temp2: Path):
 
     transcripts = list(conv_dir.rglob("*.md"))
     if transcripts:
-        log(f"Found {len(transcripts)} transcript(s) in Account 2")
+        log(f"Found {len(transcripts)} transcript(s)")
         for t in transcripts:
             log(f"  {t}")
-        log("SUCCESS: Transcript synced to Account 2!")
+        log("Preview of first transcript:")
+        print(transcripts[0].read_text()[:1000])
         return True
     else:
-        error("No transcripts found in Account 2!")
+        error("No transcripts found!")
+        return False
+
+
+def pull_and_verify_poetry(temp_dir: Path, peer_email: str) -> bool:
+    """Pull peer's context and verify poetry.md."""
+    log(f"Pulling {peer_email}'s context...")
+    claudeconnect("pull", peer_email, cwd=temp_dir)
+
+    repo_name = email_to_repo_name(peer_email)
+    peer_poetry = PEERS_DIR / repo_name / "poetry.md"
+
+    if peer_poetry.exists():
+        content = peer_poetry.read_text()
+        log("Pulled poetry.md:")
+        print(content)
+        if "widening gyre" in content:
+            log("Content verified - 'widening gyre' found!")
+            return True
+        else:
+            error("Content verification failed")
+            return False
+    else:
+        error(f"Could not find: {peer_poetry}")
+        if PEERS_DIR.exists():
+            warn("Peers directory contents:")
+            for p in PEERS_DIR.iterdir():
+                print(f"  {p}")
         return False
 
 
@@ -372,38 +284,43 @@ def test_full_flow(temp_dirs):
     temp1, temp2 = temp_dirs
 
     # Setup
-    step_1_clean_server()
-    step_2_clean_client()
+    clean_server()
+    clean_client()
 
     # Account 1 first login
-    step_4_login_account1(temp1)
-    account1_email = step_5_init_account1(temp1)
+    login("Account 1", temp1)
+    account1_email = init_account("Account 1", temp1)
 
     # Account 2 setup
-    step_6_switch_to_temp2(temp2)
-    step_7_login_account2(temp2)
-    account2_email = step_8_init_account2(temp2)
-    step_9_create_poetry(temp2)
-    step_10_sync_account2(temp2)
-    step_11_send_friend_request(temp2, account1_email)
+    os.chdir(temp2)
+    clear_tokens()
+    login("Account 2", temp2)
+    account2_email = init_account("Account 2", temp2)
+    create_poetry_file(temp2)
+    sync("Account 2", temp2)
+    send_friend_request(temp2, account1_email)
 
     # Account 1 receives and accepts
-    step_12_switch_to_temp1(temp1)
-    step_13_relogin_account1(temp1)
-    step_14_reinit_account1(temp1)
-    step_15_sync_check_friend_request(temp1, account2_email)
-    step_16_accept_friend_request(temp1, account2_email)
+    os.chdir(temp1)
+    clear_tokens()
+    login("Account 1", temp1)
+    init_account("Account 1", temp1)
+    sync("Account 1", temp1)
+    check_friend_request(temp1, account2_email)
+    accept_friend_request(temp1, account2_email)
 
     # Session
-    step_17_start_session(temp1, account2_email)
-    step_18_verify_transcript_account1(temp1)
-    step_19_pull_and_verify_poetry(temp1, account2_email)
+    start_session(temp1, account2_email, "poetry and the widening gyre")
+    verify_transcript("Account 1", temp1)
+    pull_and_verify_poetry(temp1, account2_email)
 
     # Account 2 verifies
-    step_20_switch_to_temp2(temp2)
-    step_21_relogin_account2(temp2)
-    step_22_reinit_account2(temp2)
-    success = step_23_verify_transcript_account2(temp2)
+    os.chdir(temp2)
+    clear_tokens()
+    login("Account 2", temp2)
+    init_account("Account 2", temp2)
+    sync("Account 2", temp2)
+    success = verify_transcript("Account 2", temp2)
 
     # Summary
     print()
@@ -422,34 +339,39 @@ def main():
     temp2 = None
 
     try:
-        step_1_clean_server()
-        step_2_clean_client()
-        temp1, temp2 = step_3_create_temp_dirs()
+        clean_server()
+        clean_client()
+        temp1, temp2 = create_temp_dirs()
 
-        step_4_login_account1(temp1)
-        account1_email = step_5_init_account1(temp1)
+        login("Account 1", temp1)
+        account1_email = init_account("Account 1", temp1)
 
-        step_6_switch_to_temp2(temp2)
-        step_7_login_account2(temp2)
-        account2_email = step_8_init_account2(temp2)
-        step_9_create_poetry(temp2)
-        step_10_sync_account2(temp2)
-        step_11_send_friend_request(temp2, account1_email)
+        os.chdir(temp2)
+        clear_tokens()
+        login("Account 2", temp2)
+        account2_email = init_account("Account 2", temp2)
+        create_poetry_file(temp2)
+        sync("Account 2", temp2)
+        send_friend_request(temp2, account1_email)
 
-        step_12_switch_to_temp1(temp1)
-        step_13_relogin_account1(temp1)
-        step_14_reinit_account1(temp1)
-        step_15_sync_check_friend_request(temp1, account2_email)
-        step_16_accept_friend_request(temp1, account2_email)
+        os.chdir(temp1)
+        clear_tokens()
+        login("Account 1", temp1)
+        init_account("Account 1", temp1)
+        sync("Account 1", temp1)
+        check_friend_request(temp1, account2_email)
+        accept_friend_request(temp1, account2_email)
 
-        step_17_start_session(temp1, account2_email)
-        step_18_verify_transcript_account1(temp1)
-        step_19_pull_and_verify_poetry(temp1, account2_email)
+        start_session(temp1, account2_email, "poetry and the widening gyre")
+        verify_transcript("Account 1", temp1)
+        pull_and_verify_poetry(temp1, account2_email)
 
-        step_20_switch_to_temp2(temp2)
-        step_21_relogin_account2(temp2)
-        step_22_reinit_account2(temp2)
-        step_23_verify_transcript_account2(temp2)
+        os.chdir(temp2)
+        clear_tokens()
+        login("Account 2", temp2)
+        init_account("Account 2", temp2)
+        sync("Account 2", temp2)
+        verify_transcript("Account 2", temp2)
 
         log("==========================================")
         log("Integration test complete!")
