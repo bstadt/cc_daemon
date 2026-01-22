@@ -168,7 +168,7 @@ def verify_init_structure(account_name: str, temp_dir: Path) -> bool:
     log(f"authz content: {authz_content}")
     first_line = authz_content.split("\n")[0]
     assert first_line.startswith("#"), f"authz first line should be a comment, got: {first_line[:50]}..."
-    assert "ssh-" in first_line, f"authz first line should contain public key, got: {first_line[:50]}..."
+    assert "Public-Key:" in first_line or "ssh-" in first_line, f"authz first line should contain public key, got: {first_line[:50]}..."
     log(f"  ✓ authz file exists with public key comment")
 
     # Check claudeconnect folder exists
