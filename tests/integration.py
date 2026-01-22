@@ -255,16 +255,18 @@ def start_session(temp_dir: Path, peer_email: str, topic: str):
     )
 
 
-def verify_transcript(account_name: str, temp_dir: Path) -> bool:
-    """Verify transcript exists."""
+def verify_transcript(account_name: str, temp_dir: Path, peer_email: str) -> bool:
+    """Verify transcript exists in with-<peer> directory."""
     log(f"Verifying transcript in {account_name}...")
-    conv_dir = temp_dir / "claudeconnect" / "conversations"
+    peer_dir_name = f"with-{email_to_repo_name(peer_email)}"
+    conv_dir = temp_dir / "claudeconnect" / peer_dir_name
 
     if not conv_dir.exists():
-        error(f"Conversations directory not found: {conv_dir}")
+        error(f"Peer directory not found: {conv_dir}")
         return False
 
-    transcripts = list(conv_dir.rglob("*.md"))
+    # Look for transcript files (exclude friend-request files)
+    transcripts = [f for f in conv_dir.glob("*.md") if "friend-request" not in f.name]
     if transcripts:
         log(f"Found {len(transcripts)} transcript(s)")
         for t in transcripts:
@@ -360,7 +362,7 @@ def test_full_flow(temp_dirs):
 
     # Session
     start_session(temp1, account2_email, "talk about poetry!")
-    verify_transcript("Account 1", temp1)
+    verify_transcript("Account 1", temp1, account2_email)
     pull_and_verify_poetry(temp1, account2_email)
 
     # Account 2 verifies
@@ -368,7 +370,7 @@ def test_full_flow(temp_dirs):
     login("Account 2", temp2)
     init_account("Account 2", temp2)
     sync("Account 2", temp2)
-    success = verify_transcript("Account 2", temp2)
+    success = verify_transcript("Account 2", temp2, account1_email)
 
     # Summary
     print()
@@ -411,14 +413,14 @@ def main():
         accept_friend_request(temp1, account2_email)
 
         start_session(temp1, account2_email, "poetry")
-        verify_transcript("Account 1", temp1)
+        verify_transcript("Account 1", temp1, account2_email)
         pull_and_verify_poetry(temp1, account2_email)
 
         os.chdir(temp2)
         login("Account 2", temp2)
         init_account("Account 2", temp2)
         sync("Account 2", temp2)
-        verify_transcript("Account 2", temp2)
+        verify_transcript("Account 2", temp2, account1_email)
 
         log("==========================================")
         log("Integration test complete!")
