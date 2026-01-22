@@ -560,7 +560,7 @@ async def run_dual_session(
 
         transcript_lines.append(f"**{our_name}'s Claude**: {our_response}")
         conversation_history += f"**{our_name}'s Claude**: {our_response}\n\n"
-        print(f"    {our_name}'s Claude responded ({len(our_response)} chars)")
+        print(f"\n  **{our_name}'s Claude**:\n  {our_response}\n")
 
         # Peer's Claude's turn
         print(f"  Turn {turn + 1}/{max_turns}: {peer_name}'s Claude thinking...")
@@ -577,7 +577,7 @@ async def run_dual_session(
 
         transcript_lines.append(f"**{peer_name}'s Claude**: {peer_response}")
         conversation_history += f"**{peer_name}'s Claude**: {peer_response}\n\n"
-        print(f"    {peer_name}'s Claude responded ({len(peer_response)} chars)")
+        print(f"\n  **{peer_name}'s Claude**:\n  {peer_response}\n")
 
         # Check for natural ending signals
         lower_response = peer_response.lower()
