@@ -11,18 +11,15 @@ from dataclasses import dataclass, asdict
 
 # Server configuration - single source of truth
 # Override with CLAUDECONNECT_SERVER environment variable
-DEFAULT_SERVER_URL = "https://v2s.claudeconnect.io"
+DEFAULT_SERVER_URL = "https://claudeconnect.io"
 SERVER_URL = os.environ.get("CLAUDECONNECT_SERVER", DEFAULT_SERVER_URL)
 API_BASE_URL = f"{SERVER_URL}/api"
-
-# Legacy SVN URL (to be removed)
-SVN_BASE_URL = f"{SERVER_URL}/svn"
 
 CONFIG_DIR = Path.home() / ".claude-connect"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 TOKENS_FILE = CONFIG_DIR / "tokens.json"
 TEST_USERS_DIR = CONFIG_DIR / "test-users"
-SVN_STAGING_DIR = CONFIG_DIR / "svn-staging"
+SHADOW_DIR = CONFIG_DIR / "shadow"  # Local encrypted file cache for sync
 
 
 def sanitize_email(email: str) -> str:
@@ -38,20 +35,23 @@ def sanitize_email(email: str) -> str:
     return email.replace("@", "-").replace(".", "-").lower()
 
 
+# Alias for backwards compatibility
+email_to_repo_name = sanitize_email
+
+
 def get_shadow_dir(email: str) -> Path:
     """
     Get the shadow directory path for a user.
 
-    The shadow directory contains the SVN working copy with encrypted files.
-    The user's context directory remains plaintext with no .svn/ metadata.
+    The shadow directory stores encrypted files locally for sync comparison.
 
     Args:
         email: User email
 
     Returns:
-        Path to shadow directory (~/.claude-connect/svn-staging/<sanitized-email>/)
+        Path to shadow directory (~/.claude-connect/shadow/<sanitized-email>/)
     """
-    return SVN_STAGING_DIR / sanitize_email(email)
+    return SHADOW_DIR / sanitize_email(email)
 
 
 @dataclass
@@ -84,10 +84,7 @@ class Tokens:
 class Config:
     """Claude Connect configuration."""
     context_dir: Optional[str] = None
-    svn_username: Optional[str] = None
-    svn_password: Optional[str] = None
     encryption_enabled: bool = False  # Whether to encrypt context files
-    # Note: kms_key_id removed - now using client-side X25519 keys at ~/.claude-connect/keys/<email>/
 
     def save(self):
         """Save config to disk."""
@@ -101,7 +98,10 @@ class Config:
             return cls()
         try:
             data = json.loads(CONFIG_FILE.read_text())
-            return cls(**data)
+            # Filter to only known fields (backwards compatibility)
+            known_fields = {"context_dir", "encryption_enabled"}
+            filtered = {k: v for k, v in data.items() if k in known_fields}
+            return cls(**filtered)
         except (json.JSONDecodeError, TypeError):
             return cls()
 
@@ -136,7 +136,7 @@ def get_email() -> Optional[str]:
 class TestUserCredentials:
     """Credentials for an ephemeral test user."""
     email: str
-    svn_token: str
+    api_token: str
     repo_url: str
     expires_at: int
     context_dir: Optional[str] = None

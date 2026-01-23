@@ -1,6 +1,6 @@
 """Authorization parser for ClaudeConnect.
 
-Parses SVN-style authz files with the format:
+Parses authz files with the format:
 
     # Public Key: <X25519-hex-string>
 

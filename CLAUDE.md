@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-ClaudeConnect is a peer-to-peer system that enables different Claude Code instances to share context and communicate. It uses SVN for versioned context storage, Google OAuth for authentication, and allows personalized Claude instances on different machines to maintain friendships and share contexts.
+ClaudeConnect is a peer-to-peer system that enables different Claude Code instances to share context and communicate. It uses HTTP for file sync, Google OAuth for authentication, and allows personalized Claude instances on different machines to maintain friendships and share contexts.
 
-**Key design principle**: User sovereignty - each user controls their own SVN repo and authz file. No central permissions authority. Friending means updating YOUR permissions to grant access to YOUR repo.
+**Key design principle**: User sovereignty - each user controls their own repo and authz file. No central permissions authority. Friending means updating YOUR permissions to grant access to YOUR repo.
 
 ## Commands
 
@@ -32,7 +32,7 @@ CC_MOCK_DIR=./mock-env claudeconnect start  # Run with mock data
 ## Architecture
 
 ```
-User → Google OAuth → Server → SVN Repository
+User → Google OAuth → Server → HTTP File Storage
                               ↓
                 Local context directory (~/claude/)
                               ↓
@@ -42,11 +42,10 @@ User → Google OAuth → Server → SVN Repository
 **Core modules** (`src/claudeconnect/`):
 - `cli.py` - Entry point, all CLI commands, context initialization
 - `auth.py` - OAuth flow, JWT tokens, token refresh
-- `svn_ops.py` - SVN client wrapper with lock resilience
-- `sync.py` - Background sync loop (30-second polling), conflict resolution
-- `session.py` - Conversation sessions (dual-instance mode default)
+- `session.py` - Conversation sessions (dual-instance mode default), HTTP sync functions
 - `scanner.py` - Sensitive content detection, auto-privatization
 - `config.py` - Local config/token storage at `~/.claude-connect/`
+- `encryption.py` - X25519 + AES-256-GCM client-side encryption
 
 ## Documentation Requirements
 
@@ -54,13 +53,8 @@ User → Google OAuth → Server → SVN Repository
 
 ## Common Pitfalls
 
-**SVN Operations:**
-- `svn.add()` takes a single `Path`, not a list - iterate and add individually
-- Always use `parents=True` when adding files in subdirectories
-
 **Authentication:**
 - Always use `get_valid_token()` not `get_tokens()` (handles expiry/refresh)
-- SVN token ≠ OAuth token - exchange via API
 
 **Authz:**
 - Paths must start with `/`
@@ -78,5 +72,4 @@ Tests use ephemeral test users created on the server. Key fixtures in `tests/con
 
 - Type hints required for all function parameters and returns
 - Use `from __future__ import annotations` for forward references
-- Raise `SvnError` for SVN operation failures
 - Exit code 1 on failure, 0 on success for CLI commands

@@ -128,12 +128,9 @@ from .config import (
     get_config, get_tokens, Config, Tokens, is_logged_in, get_email,
     get_test_user_email, get_test_user_credentials, list_test_users,
     TestUserCredentials, TEST_USERS_DIR, get_shadow_dir, sanitize_email,
-    SERVER_URL, API_BASE_URL,
+    SERVER_URL, API_BASE_URL, email_to_repo_name,
 )
 from .scanner import scan_directory
-# SVN imports: email_to_repo_name is used for naming; others are deprecated (used by legacy commands)
-from .svn_ops import SvnClient, SvnError, email_to_repo_name, repo_url_for_email
-from .sync import SyncLoop, sync_once
 
 # Encryption is optional - only available if cryptography is installed
 try:
@@ -357,56 +354,6 @@ def display_startup_banner(context_dir: Path, email: str, clear_screen: bool = T
                 print(f" {line}")
 
         print()
-
-
-def get_svn_token(id_token: str) -> str | None:
-    """
-    Exchange Google JWT for a short Fernet token for SVN auth.
-
-    For mock mode (CC_MOCK_DIR) and test users (CC_TEST_USER), returns mock/stored token.
-
-    Args:
-        id_token: Google OAuth id_token (ignored for mock/test users)
-
-    Returns:
-        Fernet token string, or None on failure.
-    """
-    # Check for mock/dev mode first
-    mock_dir = get_mock_dir()
-    if mock_dir:
-        mock_token_file = mock_dir / ".mock" / "api-svn-token.json"
-        if mock_token_file.exists():
-            data = json.loads(mock_token_file.read_text())
-            return data.get("svn_token", "mock-svn-token")
-        return "mock-svn-token"
-
-    # Check for test user mode
-    test_user_email = get_test_user_email()
-    if test_user_email:
-        creds = get_test_user_credentials(test_user_email)
-        if creds:
-            return creds.svn_token
-        return None
-
-    # Normal OAuth flow
-    try:
-        response = httpx.post(
-            f"{SERVER_URL}/api/svn-token",
-            headers={"Authorization": f"Bearer {id_token}"},
-            timeout=30,
-        )
-
-        if response.status_code != 200:
-            data = response.json()
-            print(f"Failed to get SVN token: {data.get('error', 'Unknown error')}")
-            return None
-
-        data = response.json()
-        return data.get("svn_token")
-
-    except Exception as e:
-        print(f"Error getting SVN token: {e}")
-        return None
 
 
 def get_valid_token() -> Tokens | None:
@@ -662,10 +609,6 @@ This file controls what friends can see in your context.
     )
 
     # Mock API response files
-    (mock_dir / ".mock" / "api-svn-token.json").write_text(
-        '{"svn_token": "mock-svn-token-for-dev"}'
-    )
-
     (mock_dir / ".mock" / "api-ensure-repo.json").write_text(
         f'{{"repo": "dev-example-com", "url": "file://{mock_dir}", "email": "dev@example.com", "created": false}}'
     )
@@ -694,7 +637,7 @@ def generate_authz_content(
     This allows anyone to encrypt content for this user without needing to friend first.
 
     Args:
-        email: User's email (SVN username)
+        email: User's email
         private_files: List of file paths (relative to repo root) to make private
         public_key_hex: User's X25519 public key as hex string (64 chars)
 
@@ -803,8 +746,8 @@ def verify_init_structure(context_dir: Path, email: str) -> list[str]:
     """
     Verify that init created all expected directories and files.
 
-    Shadow directory architecture (HTTP sync v2):
-        ~/.claude-connect/svn-staging/<email>/
+    Shadow directory architecture (HTTP sync):
+        ~/.claude-connect/shadow/<sanitized-email>/
         ├── authz                           # Access control file (encrypted copy)
         └── claudeconnect/
             └── with-claudeconnect-io/      # System messages folder
@@ -850,106 +793,6 @@ def verify_init_structure(context_dir: Path, email: str) -> list[str]:
         errors.append("SKILL.md not installed at ~/.claude/skills/claudeconnect/")
 
     return errors
-
-
-def ensure_authz_exists(
-    context_dir: Path,
-    shadow_dir: Path,
-    svn: "SvnClient",
-    email: str,
-    private_files: list[str] | None = None,
-    public_key_hex: str | None = None,
-) -> None:
-    """
-    Ensure authz file and claudeconnect directories exist per system2.md.
-
-    Creates in BOTH shadow_dir (for SVN) and context_dir (for user):
-    - authz file with proper permissions (includes public key if provided)
-    - claudeconnect/with-claudeconnect-io/ directory (system messages folder)
-
-    Note: Conversation directories (claudeconnect/with-{email}/) are created
-    on-demand when sessions are started, not during init.
-
-    Args:
-        context_dir: The user's plaintext context directory
-        shadow_dir: The SVN working copy directory (encrypted)
-        svn: SVN client instance (operates on shadow_dir)
-        email: User's email
-        private_files: Optional list of file paths to make private
-        public_key_hex: User's public key as hex string (stamped in authz)
-    """
-    files_to_add = []
-    needs_commit = False
-
-    # Create structure in BOTH directories
-    for target_dir in [shadow_dir, context_dir]:
-        cc_dir = target_dir / "claudeconnect"
-        system_messages_dir = cc_dir / "with-claudeconnect-io"
-
-        # Create with-claudeconnect-io/ for system messages (friend requests, notifications)
-        if not system_messages_dir.exists():
-            system_messages_dir.mkdir(parents=True, exist_ok=True)
-
-    # Handle authz file
-    shadow_authz = shadow_dir / "authz"
-    context_authz = context_dir / "authz"
-
-    if shadow_authz.exists():
-        # If authz exists in shadow but we have new private files, update it
-        if private_files:
-            update_authz_with_private_files(shadow_authz, email, private_files)
-        # Copy to context dir
-        shutil.copy2(shadow_authz, context_authz)
-    else:
-        print("  Creating authz file...")
-        authz_content = generate_authz_content(email, private_files, public_key_hex)
-        # Write to both locations
-        shadow_authz.write_text(authz_content)
-        context_authz.write_text(authz_content)
-        files_to_add.append(shadow_authz)
-        needs_commit = True
-
-    if needs_commit and files_to_add:
-        try:
-            for file_path in files_to_add:
-                rel_path = file_path.relative_to(shadow_dir)
-                svn.add(rel_path, parents=True)
-            svn.commit("Initialize authz and claudeconnect directories")
-            print("  Created authz and claudeconnect directories")
-        except Exception as e:
-            print(f"  Warning: Could not commit: {e}")
-
-
-def update_authz_with_private_files(authz_path: Path, email: str, private_files: list[str]) -> None:
-    """
-    Update existing authz file to add private file sections.
-
-    Args:
-        authz_path: Path to authz file
-        email: User's email
-        private_files: List of file paths to make private
-    """
-    content = authz_path.read_text()
-
-    # Check which files are already marked private
-    new_private = []
-    for file_path in private_files:
-        if not file_path.startswith("/"):
-            file_path = "/" + file_path
-        if f"[{file_path}]" not in content:
-            new_private.append(file_path)
-
-    if not new_private:
-        return  # All files already private
-
-    # Append new private sections
-    lines = ["\n# Private files (contain sensitive information)"]
-    for file_path in sorted(set(new_private)):
-        lines.append(f"[{file_path}]")
-        lines.append(f"{email} = rw")
-
-    authz_path.write_text(content.rstrip() + "\n" + "\n".join(lines) + "\n")
-    print(f"  Updated authz with {len(new_private)} private file(s)")
 
 
 def init_context_dir(
@@ -1170,88 +1013,17 @@ def start():
             print(f"Or use `claudeconnect init` here to switch.")
             sys.exit(1)
     else:
-        # First time - use current directory
-        context_dir = cwd
+        # First time - need to init
+        print("No context directory configured. Run `claudeconnect init` first.")
+        sys.exit(1)
 
-    # Ensure repo exists on server
     print(f"Connecting as {tokens.email}...")
-    try:
-        repo_info = ensure_repo(tokens.id_token)
-        # Always compute repo_url locally for consistency
-        repo_url = repo_url_for_email(tokens.email)
 
-        if repo_info.get("created"):
-            print(f"  Created new repo: {repo_info['repo']}")
-        else:
-            print(f"  Using repo: {repo_info['repo']}")
-    except Exception as e:
-        print(f"  Error: {e}")
-        sys.exit(1)
-
-    # Get SVN token (Fernet)
-    print("Getting SVN credentials...")
-    svn_token = get_svn_token(tokens.id_token)
-    if not svn_token:
-        print("Failed to get SVN token")
-        sys.exit(1)
-
-    # Initialize context directory if needed
-    # Check shadow directory for working copy (shadow dir architecture)
-    shadow_dir = get_shadow_dir(tokens.email)
-    shadow_dir.mkdir(parents=True, exist_ok=True)
-    svn = SvnClient(shadow_dir, repo_url, svn_token, tokens.email)
-    if not svn.is_working_copy():
-        print(f"\nInitializing context directory: {context_dir}")
-
-        # Set up encryption by default
-        encrypt = HAS_ENCRYPTION
-        public_key_hex = None
-        if encrypt:
-            print("  Setting up encryption...")
-            try:
-                # Generate or load X25519 keypair (account-scoped)
-                try:
-                    _, public_bytes = generate_keypair(tokens.email)
-                    fingerprint = get_key_fingerprint(public_bytes)
-                    print(f"  Generated keypair (fingerprint: {fingerprint})")
-                except FileExistsError:
-                    # Keys already exist, load them
-                    public_bytes = load_public_key(tokens.email)
-                    fingerprint = get_key_fingerprint(public_bytes)
-                    print(f"  Using existing keypair (fingerprint: {fingerprint})")
-
-                # Generate or load master key (account-scoped)
-                try:
-                    generate_master_key(tokens.email)
-                    print("  Generated master encryption key")
-                except FileExistsError:
-                    # Master key already exists
-                    load_master_key(tokens.email)  # Verify it's loadable
-                    print("  Using existing master key")
-
-                # Convert public key to hex for authz
-                public_key_hex = public_bytes.hex()
-
-            except Exception as e:
-                print(f"  Warning: Could not set up encryption: {e}")
-                encrypt = False
-                public_key_hex = None
-
-        if not init_context_dir(context_dir, repo_url, svn_token, tokens.email, public_key_hex):
-            sys.exit(1)
-
-        # Save context dir and encryption setting to config
-        config.context_dir = str(context_dir)
-        config.encryption_enabled = encrypt
-        config.save()
-
-        # Install skill for Claude Code
-        if install_skill():
-            print("  Installed claudeconnect skill")
-
-    # Initial sync
+    # Initial sync using HTTP
     print("\nSyncing...")
-    sync_once(context_dir, repo_url, svn_token, tokens.email)
+    if not sync_http(context_dir, tokens.email, tokens.id_token):
+        print("  Sync failed")
+        sys.exit(1)
 
     # Display startup banner with friend requests and conversations
     display_startup_banner(context_dir, tokens.email)
@@ -1260,24 +1032,43 @@ def start():
     print("Starting Claude Code with sync enabled...")
     print(f"{DIM}(Sync runs every 30 seconds in background){RESET}\n")
 
-    # Run async main
-    asyncio.run(run_with_sync(context_dir, repo_url, svn_token, tokens.email))
+    # Run async main with HTTP sync
+    asyncio.run(run_with_http_sync(context_dir, tokens.email, tokens.id_token))
 
 
-async def run_with_sync(
+async def run_with_http_sync(
     context_dir: Path,
-    repo_url: str,
-    token: str,
     email: str,
+    id_token: str,
+    interval: int = 30,
 ):
-    """Run Claude Code with background sync loop."""
-    # Start sync loop
-    sync_loop = SyncLoop(context_dir, repo_url, token, email, interval=30)
-    await sync_loop.start()
+    """Run Claude Code with background HTTP sync loop."""
+    stop_event = asyncio.Event()
+
+    async def sync_loop():
+        """Background sync loop using HTTP."""
+        while not stop_event.is_set():
+            try:
+                # Wait for interval or stop event
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=interval)
+                    break  # Stop event was set
+                except asyncio.TimeoutError:
+                    pass  # Interval elapsed, do sync
+
+                # Refresh token if needed
+                tokens = get_valid_token()
+                if tokens:
+                    sync_http(context_dir, tokens.email, tokens.id_token)
+            except Exception as e:
+                # Log but don't crash the sync loop
+                pass
+
+    # Start sync loop task
+    sync_task = asyncio.create_task(sync_loop())
 
     try:
         # Run Claude Code
-        # Use subprocess to run claude, streaming output
         process = await asyncio.create_subprocess_exec(
             "claude",
             stdin=None,  # Inherit stdin
@@ -1295,7 +1086,8 @@ async def run_with_sync(
         pass
     finally:
         # Stop sync loop
-        await sync_loop.stop()
+        stop_event.set()
+        await sync_task
         print("\nSync stopped. Goodbye!")
 
 
@@ -1677,170 +1469,6 @@ def sync():
         print("✓ Sync complete")
     else:
         sys.exit(1)
-
-
-@cli.command()
-@click.argument("source_dir", type=click.Path(exists=True, file_okay=False, dir_okay=True))
-@click.option("--dry-run", is_flag=True, help="Show what would be uploaded without uploading")
-@click.option("--pattern", default="**/*.md", help="Glob pattern for files to upload (default: **/*.md)")
-def upload(source_dir: str, dry_run: bool, pattern: str):
-    """Upload a directory of files to your context.
-
-    Efficiently uploads large collections of files with progress tracking.
-    By default, uploads all markdown files (*.md) from the source directory.
-
-    Examples:
-        claudeconnect upload ~/my-notes
-        claudeconnect upload ~/docs --dry-run
-    """
-    from datetime import datetime
-
-    tokens = get_valid_token()
-    config = get_config()
-
-    if not tokens:
-        print("Not logged in or token expired. Run `claudeconnect login` first.")
-        sys.exit(1)
-
-    if not config.context_dir:
-        print("No context directory configured. Run `claudeconnect init` first.")
-        sys.exit(1)
-
-    # Get SVN token
-    svn_token = get_svn_token(tokens.id_token)
-    if not svn_token:
-        print("Failed to get SVN token")
-        sys.exit(1)
-
-    source_path = Path(source_dir).resolve()
-    context_dir = Path(config.context_dir)
-    shadow_dir = get_shadow_dir(tokens.email)
-    repo_url = repo_url_for_email(tokens.email)
-
-    # Check encryption settings
-    encryption_enabled = config.encryption_enabled and HAS_ENCRYPTION
-
-    # Find all matching files
-    print(f"Scanning {source_path} for files matching '{pattern}'...")
-    files_to_upload = list(source_path.glob(pattern))
-    files_to_upload = [f for f in files_to_upload if f.is_file() and ".svn" not in f.parts]
-
-    if not files_to_upload:
-        print(f"No files found matching '{pattern}'")
-        return
-
-    print(f"Found {len(files_to_upload)} files to upload")
-
-    if dry_run:
-        print("\nDry run - files that would be uploaded:")
-        for f in files_to_upload[:20]:
-            rel = f.relative_to(source_path)
-            print(f"  {rel}")
-        if len(files_to_upload) > 20:
-            print(f"  ... and {len(files_to_upload) - 20} more")
-        return
-
-    # Initialize SVN client
-    svn = SvnClient(shadow_dir, repo_url, svn_token, tokens.email)
-
-    # Ensure shadow dir is up to date
-    print("Updating from server...")
-    try:
-        svn.update()
-    except SvnError as e:
-        print(f"  Warning: Update failed: {e}")
-
-    # Process files with progress tracking
-    print(f"\nUploading {len(files_to_upload)} files...")
-    copied = []
-    failed = []
-    skipped = []
-
-    for i, src_file in enumerate(files_to_upload, 1):
-        rel_path = src_file.relative_to(source_path)
-        context_path = context_dir / rel_path
-        shadow_path = shadow_dir / rel_path
-
-        # Progress indicator
-        progress = f"[{i}/{len(files_to_upload)}]"
-
-        try:
-            # Check if file already exists
-            if context_path.exists():
-                # Compare content
-                if context_path.read_bytes() == src_file.read_bytes():
-                    skipped.append(rel_path)
-                    continue
-
-            # Create parent directories
-            context_path.parent.mkdir(parents=True, exist_ok=True)
-            shadow_path.parent.mkdir(parents=True, exist_ok=True)
-
-            # Read source content
-            content = src_file.read_bytes()
-
-            # Write to context dir (plaintext)
-            context_path.write_bytes(content)
-
-            # Write to shadow dir (encrypted if enabled)
-            if encryption_enabled and HAS_ENCRYPTION:
-                if should_encrypt_file(rel_path):
-                    try:
-                        content = encrypt_file_with_master_key(content, tokens.email)
-                    except Exception as e:
-                        print(f"{progress} Warning: Could not encrypt {rel_path}: {e}")
-
-            shadow_path.write_bytes(content)
-            copied.append(rel_path)
-
-            # Print progress every 10 files or for small batches
-            if len(files_to_upload) <= 20 or i % 10 == 0 or i == len(files_to_upload):
-                print(f"{progress} Processed {rel_path}")
-
-        except Exception as e:
-            print(f"{progress} Failed: {rel_path} - {e}")
-            failed.append((rel_path, str(e)))
-
-    if not copied:
-        if skipped:
-            print(f"\n✓ All {len(skipped)} files already up to date")
-        else:
-            print("\nNo files were uploaded")
-        return
-
-    # Add new files to SVN in batch
-    print(f"\nAdding {len(copied)} files to version control...")
-    added, add_failed = svn.add_batch(copied)
-
-    if add_failed:
-        print(f"  Warning: {len(add_failed)} files failed to add")
-        failed.extend((p, "SVN add failed") for p in add_failed)
-
-    # Commit
-    if added:
-        print("Committing...")
-        try:
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            message = f"Batch upload: {len(added)} files ({timestamp})"
-            rev = svn.commit(message)
-            if rev:
-                print(f"  Committed revision {rev}")
-        except SvnError as e:
-            print(f"  Commit failed: {e}")
-            sys.exit(1)
-
-    # Summary
-    print(f"\n{'─' * 40}")
-    print("Upload complete!")
-    print(f"  ✓ Uploaded: {len(added)} files")
-    if skipped:
-        print(f"  ○ Skipped (unchanged): {len(skipped)} files")
-    if failed:
-        print(f"  ✗ Failed: {len(failed)} files")
-        for path, error in failed[:5]:
-            print(f"    - {path}: {error}")
-        if len(failed) > 5:
-            print(f"    ... and {len(failed) - 5} more")
 
 
 @cli.command()
@@ -2512,227 +2140,6 @@ def reject_friend(peer_email: str):
         print(f"  Warning: Could not delete server request file: {e}")
 
     print(f"\n✓ Friend request rejected.")
-
-
-# =============================================================================
-# Test User Commands
-# =============================================================================
-
-def parse_ttl(ttl: str) -> int:
-    """
-    Parse TTL string to hours.
-
-    Examples: "1h" -> 1, "24h" -> 24, "7d" -> 168, "2d" -> 48
-    """
-    ttl = ttl.lower().strip()
-    if ttl.endswith("h"):
-        return int(ttl[:-1])
-    elif ttl.endswith("d"):
-        return int(ttl[:-1]) * 24
-    else:
-        # Assume hours if no suffix
-        return int(ttl)
-
-
-@cli.group("test-user")
-def test_user():
-    """Manage ephemeral test users for development and testing."""
-    pass
-
-
-@test_user.command("create")
-@click.option("--ttl", default="24h", help="Time to live (e.g., 1h, 24h, 7d)")
-def test_user_create(ttl: str):
-    """Create an ephemeral test user.
-
-    Requires admin access (must be logged in as an admin email).
-    """
-    from datetime import datetime
-
-    # Need to be logged in as admin
-    tokens = get_valid_token()
-    if not tokens:
-        print("Not logged in. Run `claudeconnect login` first.")
-        sys.exit(1)
-
-    ttl_hours = parse_ttl(ttl)
-
-    print(f"Creating test user (TTL: {ttl_hours}h)...")
-
-    try:
-        response = httpx.post(
-            f"{SERVER_URL}/api/test-user/create",
-            headers={"Authorization": f"Bearer {tokens.id_token}"},
-            json={"ttl_hours": ttl_hours},
-            timeout=30,
-        )
-
-        if response.status_code == 403:
-            print("✗ Admin access required to create test users.")
-            sys.exit(1)
-
-        if response.status_code != 200:
-            data = response.json()
-            print(f"✗ Failed to create test user: {data.get('error', 'Unknown error')}")
-            sys.exit(1)
-
-        data = response.json()
-
-        # Always compute repo_url locally for consistency
-        computed_repo_url = repo_url_for_email(data["email"])
-
-        # Save locally
-        creds = TestUserCredentials(
-            email=data["email"],
-            svn_token=data["svn_token"],
-            repo_url=computed_repo_url,
-            expires_at=data["expires_at"],
-        )
-        creds.save()
-
-        expires_str = datetime.fromtimestamp(data["expires_at"]).strftime("%Y-%m-%d %H:%M:%S")
-
-        print(f"\n✓ Created test user: {data['email']}")
-        print(f"  Repo: {computed_repo_url}")
-        print(f"  Expires: {expires_str}")
-        print(f"\n  To use this test user:")
-        print(f"    CC_TEST_USER={data['email']} claudeconnect init")
-
-    except Exception as e:
-        print(f"✗ Error creating test user: {e}")
-        sys.exit(1)
-
-
-@test_user.command("list")
-def test_user_list():
-    """List local test users."""
-    from datetime import datetime
-
-    users = list_test_users()
-
-    if not users:
-        print("No test users found locally.")
-        print("Create one with: claudeconnect test-user create")
-        return
-
-    print(f"Found {len(users)} test user(s):\n")
-
-    now = int(time.time())
-    for email in sorted(users):
-        creds = get_test_user_credentials(email)
-        if creds:
-            expired = creds.expires_at < now
-            expires_str = datetime.fromtimestamp(creds.expires_at).strftime("%Y-%m-%d %H:%M:%S")
-            status = " (EXPIRED)" if expired else ""
-
-            print(f"  {email}{status}")
-            print(f"    Repo: {creds.repo_url}")
-            print(f"    Expires: {expires_str}")
-            if creds.context_dir:
-                print(f"    Context: {creds.context_dir}")
-            print()
-
-
-@test_user.command("delete")
-@click.argument("email")
-@click.option("--keep-local", is_flag=True, help="Keep local working copy")
-@click.option("--local-only", is_flag=True, help="Only delete local credentials (don't call server)")
-def test_user_delete(email: str, keep_local: bool, local_only: bool):
-    """Delete a test user (remote repo + local credentials)."""
-    import shutil
-
-    # Check if we have local credentials
-    creds = get_test_user_credentials(email)
-    if not creds:
-        print(f"No local credentials for {email}")
-        return
-
-    # Delete server-side unless local-only
-    if not local_only:
-        tokens = get_valid_token()
-        if not tokens:
-            print("Not logged in. Use --local-only to just delete local credentials.")
-            sys.exit(1)
-
-        print(f"Deleting test user {email}...")
-
-        try:
-            response = httpx.post(
-                f"{SERVER_URL}/api/test-user/delete",
-                headers={"Authorization": f"Bearer {tokens.id_token}"},
-                json={"email": email},
-                timeout=30,
-            )
-
-            if response.status_code == 403:
-                print("✗ Admin access required to delete test users.")
-                print("  Use --local-only to just delete local credentials.")
-                sys.exit(1)
-
-            if response.status_code == 404:
-                print("  Server: Test user not found (may already be deleted)")
-            elif response.status_code != 200:
-                data = response.json()
-                print(f"  Server error: {data.get('error', 'Unknown error')}")
-            else:
-                print("  Deleted server repo")
-
-        except Exception as e:
-            print(f"  Server error: {e}")
-            print("  Continuing with local deletion...")
-
-    # Delete local context if we have one and not keeping it
-    if creds.context_dir and not keep_local:
-        ctx_dir = Path(creds.context_dir)
-        if ctx_dir.exists():
-            if click.confirm(f"  Delete local working copy at {ctx_dir}?"):
-                shutil.rmtree(ctx_dir)
-                print(f"  Deleted: {ctx_dir}")
-
-    # Delete local credentials
-    creds.delete()
-    print(f"  Deleted local credentials")
-    print(f"\n✓ Deleted test user: {email}")
-
-
-@test_user.command("delete-all")
-@click.confirmation_option(prompt="Delete ALL local test users?")
-def test_user_delete_all():
-    """Delete all local test users."""
-    users = list_test_users()
-
-    if not users:
-        print("No test users found locally.")
-        return
-
-    tokens = get_valid_token()
-
-    for email in users:
-        creds = get_test_user_credentials(email)
-        if not creds:
-            continue
-
-        print(f"Deleting {email}...")
-
-        # Try server deletion if logged in
-        if tokens:
-            try:
-                response = httpx.post(
-                    f"{SERVER_URL}/api/test-user/delete",
-                    headers={"Authorization": f"Bearer {tokens.id_token}"},
-                    json={"email": email},
-                    timeout=30,
-                )
-                if response.status_code == 200:
-                    print("  Deleted server repo")
-            except Exception:
-                pass
-
-        # Delete local
-        creds.delete()
-        print("  Deleted local credentials")
-
-    print(f"\n✓ Deleted {len(users)} test user(s)")
 
 
 def main():

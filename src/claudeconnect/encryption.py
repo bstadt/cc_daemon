@@ -1,7 +1,7 @@
 """Client-side hybrid encryption using X25519 + AES-256-GCM.
 
 Zero-trust encryption where private keys NEVER leave the user's machine.
-The SVN server only ever sees encrypted blobs.
+The server only ever sees encrypted blobs.
 
 Architecture:
 - Each user has an X25519 keypair stored locally
@@ -9,9 +9,9 @@ Architecture:
 - The AES key is encrypted separately for each recipient using X25519 ECDH
 - Adding a friend = adding another encrypted AES key blob (no re-encryption of content)
 
-Per system2.md specification:
-- All .md files are encrypted before being committed to SVN
-- authz and .keep files remain plaintext (required for SVN operations)
+Encryption rules:
+- All .md files are encrypted before upload
+- authz files remain plaintext (required for access control)
 - Friends gain access when you encrypt your AES key with their public key
 """
 
@@ -45,7 +45,7 @@ AES_KEY_SIZE = 32  # AES-256
 X25519_KEY_SIZE = 32
 ENCRYPTED_KEY_SIZE = 48  # 32-byte key + 16-byte GCM tag
 
-# Files that should NOT be encrypted (required plaintext for SVN/system)
+# Files that should NOT be encrypted (required plaintext for system)
 PLAINTEXT_FILES = {
     "authz",
     ".keep",

@@ -2,7 +2,7 @@
 """
 HTTP-based file sync server for ClaudeConnect.
 
-Replaces SVN with a simple REST API:
+REST API endpoints:
 - GET /api/manifest/{user} - list files user can access
 - GET /api/files/{user}/{path} - download file
 - PUT /api/files/{path} - upload file
