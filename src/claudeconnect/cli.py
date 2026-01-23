@@ -56,6 +56,9 @@ YELLOW = '\033[38;5;228m'     # Soft yellow for sparkles
 RESET = '\033[0m'
 CLEAR = '\033[2J\033[H'       # Clear screen and move cursor to top
 
+# Peers directory for cached friend contexts
+PEERS_DIR = Path.home() / ".claude-connect" / "peers"
+
 
 def get_cell_aspect_ratio() -> float | None:
     """Get the height/width ratio of a terminal cell.
@@ -1871,18 +1874,17 @@ def session(peer_email: str, topic: str | None, single: bool, turns: int):
 
 
 def pull_peer_context_http(peer_email: str, id_token: str, my_email: str, max_workers: int = 10) -> Path | None:
-    """Pull a peer's context using HTTP API (parallel downloads)."""
+    """Pull a peer's context using HTTP API (parallel downloads).
+
+    Saves to ~/.claude-connect/peers/<peer>/ for consistency with session.py.
+    """
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import threading
 
-    config = get_config()
-    if not config.context_dir:
-        print("No context directory configured.")
-        return None
-
-    context_dir = Path(config.context_dir)
-    peer_dir_name = f"with-{email_to_repo_name(peer_email)}"
-    peer_dir = context_dir / "claudeconnect" / peer_dir_name
+    # Save to PEERS_DIR (same location as session.py)
+    peer_name = email_to_repo_name(peer_email)
+    peer_dir = PEERS_DIR / peer_name
+    PEERS_DIR.mkdir(parents=True, exist_ok=True)
     peer_dir.mkdir(parents=True, exist_ok=True)
 
     headers = {"Authorization": f"Bearer {id_token}"}
@@ -1959,6 +1961,16 @@ def pull_peer_context_http(peer_email: str, id_token: str, my_email: str, max_wo
                 pass
 
     print(f"\r  Downloaded {downloaded} file(s), skipped {skipped}" + " " * 30)
+
+    # Decrypt any encrypted files
+    try:
+        from .session import decrypt_peer_context
+        decrypted = decrypt_peer_context(peer_dir, peer_email)
+        if decrypted:
+            print(f"  Decrypted {decrypted} file(s)")
+    except Exception as e:
+        print(f"  Warning: Could not decrypt files: {e}")
+
     return peer_dir
 
 
