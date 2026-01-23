@@ -251,9 +251,11 @@ def upload_file_http(email: str, path: str, content: bytes, id_token: str, encry
         return False
 
 
-def sync_http(context_dir: Path, email: str, id_token: str) -> bool:
-    """Sync local files with server using HTTP API."""
+def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 10) -> bool:
+    """Sync local files with server using HTTP API (parallel uploads)."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     import hashlib
+    import threading
 
     def compute_sha256(file_path: Path) -> str:
         sha256_hash = hashlib.sha256()
@@ -289,13 +291,42 @@ def sync_http(context_dir: Path, email: str, id_token: str) -> bool:
                 "sha256": compute_sha256(file_path),
             }
 
-    # Upload local files that are missing or different on server
+    # Find files that need uploading
+    to_upload = []
     for path, local_info in local_files.items():
         server_info = server_files.get(path)
         if not server_info or server_info["sha256"] != local_info["sha256"]:
             local_path = context_dir / path
-            upload_file_http(email, path, local_path.read_bytes(), id_token)
+            to_upload.append((path, local_path))
 
+    if not to_upload:
+        return True
+
+    # Progress tracking
+    completed = 0
+    lock = threading.Lock()
+    total = len(to_upload)
+
+    def upload_one(path: str, local_path: Path) -> bool:
+        nonlocal completed
+        result = upload_file_http(email, path, local_path.read_bytes(), id_token)
+        with lock:
+            completed += 1
+            pct = int(completed / total * 100)
+            print(f"\r  [{pct:3d}%] Uploading: {path[:50]:<50}", end="", flush=True)
+        return result
+
+    # Upload in parallel
+    print(f"  Uploading {total} file(s)...")
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(upload_one, path, local_path) for path, local_path in to_upload]
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except Exception:
+                pass
+
+    print(f"\r  Uploaded {completed} file(s)" + " " * 40)
     return True
 
 

@@ -1429,14 +1429,18 @@ def compute_bytes_sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
-def sync_http(context_dir: Path, email: str, id_token: str) -> bool:
+def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 10) -> bool:
     """Sync local files with server using HTTP API.
 
     Uses shadow directory for encrypted file storage and comparison.
     - Shadow dir contains encrypted versions (matches server)
     - Context dir contains plaintext versions (user's working copy)
     - Conflicts resolved by most recent mtime
+    - Uploads and downloads run in parallel for speed
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import threading
+
     config = get_config()
     encryption_enabled = config.encryption_enabled and HAS_ENCRYPTION
 
@@ -1484,11 +1488,10 @@ def sync_http(context_dir: Path, email: str, id_token: str) -> bool:
                 "mtime": file_path.stat().st_mtime,
             }
 
-    # Step 4: Sync - compare shadow to server, use mtime for conflicts
-    downloaded = 0
-    uploaded = 0
+    # Step 4: Categorize files into upload/download lists
+    to_upload = []  # (path, context_path, shadow_path)
+    to_download = []  # (path, shadow_path, context_path, server_info)
 
-    # All paths we need to consider
     all_paths = set(server_files.keys()) | set(shadow_files.keys()) | set(context_files.keys())
 
     for path in all_paths:
@@ -1499,120 +1502,154 @@ def sync_http(context_dir: Path, email: str, id_token: str) -> bool:
         shadow_path = shadow_dir / path
         context_path = context_dir / path
 
-        # Case 1: File exists on server but not in shadow (or hash differs) - download
+        # Case 1: File exists on server but not in shadow (or hash differs)
         if server_info and (not shadow_info or shadow_info["sha256"] != server_info["sha256"]):
-            # Check if local is newer (mtime comparison)
             local_mtime = context_info["mtime"] if context_info else 0
             server_mtime = server_info.get("mtime", 0)
 
             if local_mtime > server_mtime and context_info:
-                # Local is newer - upload instead
-                try:
-                    content = context_path.read_bytes()
-                    encrypted_content = content
-                    if encryption_enabled and should_encrypt_file(path):
-                        try:
-                            encrypted_content = encrypt_file_with_master_key(content, email)
-                        except Exception as e:
-                            print(f"  Warning: Could not encrypt {path}: {e}")
-
-                    response = httpx.put(
-                        f"{API_BASE_URL}/files/{email}/{path}",
-                        headers=headers,
-                        content=encrypted_content,
-                        timeout=60,
-                    )
-                    if response.status_code == 200:
-                        # Update shadow with encrypted version
-                        shadow_path.parent.mkdir(parents=True, exist_ok=True)
-                        shadow_path.write_bytes(encrypted_content)
-                        uploaded += 1
-                except Exception as e:
-                    print(f"  Warning: Error uploading {path}: {e}")
+                # Local is newer - upload
+                to_upload.append((path, context_path, shadow_path))
             else:
-                # Server is newer (or no local) - download
-                try:
-                    response = httpx.get(
-                        f"{API_BASE_URL}/files/{email}/{path}",
-                        headers=headers,
-                        timeout=60,
-                    )
-                    if response.status_code == 200:
-                        encrypted_content = response.content
-
-                        # Save encrypted to shadow
-                        shadow_path.parent.mkdir(parents=True, exist_ok=True)
-                        shadow_path.write_bytes(encrypted_content)
-
-                        # Decrypt and save to context
-                        decrypted_content = encrypted_content
-                        if encryption_enabled:
-                            try:
-                                from .encryption import is_encrypted_file, decrypt_file_with_master_key
-                                if is_encrypted_file(encrypted_content):
-                                    decrypted_content = decrypt_file_with_master_key(encrypted_content, email)
-                            except Exception:
-                                pass  # Keep as-is if decryption fails
-
-                        context_path.parent.mkdir(parents=True, exist_ok=True)
-                        context_path.write_bytes(decrypted_content)
-                        downloaded += 1
-                except Exception as e:
-                    print(f"  Warning: Error downloading {path}: {e}")
+                # Server is newer - download
+                to_download.append((path, shadow_path, context_path, server_info))
 
         # Case 2: File exists locally but not on server - upload
         elif context_info and not server_info:
-            try:
-                content = context_path.read_bytes()
-                encrypted_content = content
-                if encryption_enabled and should_encrypt_file(path):
-                    try:
-                        encrypted_content = encrypt_file_with_master_key(content, email)
-                    except Exception as e:
-                        print(f"  Warning: Could not encrypt {path}: {e}")
-
-                response = httpx.put(
-                    f"{API_BASE_URL}/files/{email}/{path}",
-                    headers=headers,
-                    content=encrypted_content,
-                    timeout=60,
-                )
-                if response.status_code == 200:
-                    # Update shadow with encrypted version
-                    shadow_path.parent.mkdir(parents=True, exist_ok=True)
-                    shadow_path.write_bytes(encrypted_content)
-                    uploaded += 1
-            except Exception as e:
-                print(f"  Warning: Error uploading {path}: {e}")
+            to_upload.append((path, context_path, shadow_path))
 
         # Case 3: File in shadow matches server - check if context changed
         elif shadow_info and server_info and shadow_info["sha256"] == server_info["sha256"]:
-            if context_info:
-                # Check if context is newer than shadow
-                if context_info["mtime"] > shadow_info["mtime"]:
-                    # Context changed - upload
+            if context_info and context_info["mtime"] > shadow_info["mtime"]:
+                to_upload.append((path, context_path, shadow_path))
+
+    total_ops = len(to_upload) + len(to_download)
+    if total_ops == 0:
+        print("  Already in sync")
+        return True
+
+    # Progress tracking
+    completed = 0
+    uploaded = 0
+    downloaded = 0
+    errors = []
+    lock = threading.Lock()
+
+    def print_progress(action: str, path: str):
+        nonlocal completed
+        with lock:
+            completed += 1
+            pct = int(completed / total_ops * 100)
+            # Clear line and print progress
+            print(f"\r  [{pct:3d}%] {action}: {path[:60]:<60}", end="", flush=True)
+
+    def upload_file(path: str, context_path: Path, shadow_path: Path) -> bool:
+        """Upload a single file to server."""
+        nonlocal uploaded
+        try:
+            content = context_path.read_bytes()
+            encrypted_content = content
+            if encryption_enabled and should_encrypt_file(path):
+                try:
+                    encrypted_content = encrypt_file_with_master_key(content, email)
+                except Exception:
+                    pass  # Upload unencrypted if encryption fails
+
+            response = httpx.put(
+                f"{API_BASE_URL}/files/{email}/{path}",
+                headers=headers,
+                content=encrypted_content,
+                timeout=60,
+            )
+            if response.status_code == 200:
+                shadow_path.parent.mkdir(parents=True, exist_ok=True)
+                shadow_path.write_bytes(encrypted_content)
+                with lock:
+                    uploaded += 1
+                print_progress("UP", path)
+                return True
+            else:
+                with lock:
+                    errors.append(f"Upload {path}: HTTP {response.status_code}")
+                return False
+        except Exception as e:
+            with lock:
+                errors.append(f"Upload {path}: {e}")
+            return False
+
+    def download_file(path: str, shadow_path: Path, context_path: Path) -> bool:
+        """Download a single file from server."""
+        nonlocal downloaded
+        try:
+            response = httpx.get(
+                f"{API_BASE_URL}/files/{email}/{path}",
+                headers=headers,
+                timeout=60,
+            )
+            if response.status_code == 200:
+                encrypted_content = response.content
+
+                # Save encrypted to shadow
+                shadow_path.parent.mkdir(parents=True, exist_ok=True)
+                shadow_path.write_bytes(encrypted_content)
+
+                # Decrypt and save to context
+                decrypted_content = encrypted_content
+                if encryption_enabled:
                     try:
-                        content = context_path.read_bytes()
-                        encrypted_content = content
-                        if encryption_enabled and should_encrypt_file(path):
-                            try:
-                                encrypted_content = encrypt_file_with_master_key(content, email)
-                            except Exception as e:
-                                print(f"  Warning: Could not encrypt {path}: {e}")
+                        from .encryption import is_encrypted_file, decrypt_file_with_master_key
+                        if is_encrypted_file(encrypted_content):
+                            decrypted_content = decrypt_file_with_master_key(encrypted_content, email)
+                    except Exception:
+                        pass  # Keep as-is if decryption fails
 
-                        response = httpx.put(
-                            f"{API_BASE_URL}/files/{email}/{path}",
-                            headers=headers,
-                            content=encrypted_content,
-                            timeout=60,
-                        )
-                        if response.status_code == 200:
-                            shadow_path.write_bytes(encrypted_content)
-                            uploaded += 1
-                    except Exception as e:
-                        print(f"  Warning: Error uploading {path}: {e}")
+                context_path.parent.mkdir(parents=True, exist_ok=True)
+                context_path.write_bytes(decrypted_content)
+                with lock:
+                    downloaded += 1
+                print_progress("DOWN", path)
+                return True
+            else:
+                with lock:
+                    errors.append(f"Download {path}: HTTP {response.status_code}")
+                return False
+        except Exception as e:
+            with lock:
+                errors.append(f"Download {path}: {e}")
+            return False
 
-    print(f"  Downloaded {downloaded} file(s), uploaded {uploaded} file(s)")
+    # Step 5: Execute uploads and downloads in parallel
+    print(f"  Syncing {len(to_upload)} upload(s), {len(to_download)} download(s)...")
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = []
+
+        # Submit all uploads
+        for path, context_path, shadow_path in to_upload:
+            futures.append(executor.submit(upload_file, path, context_path, shadow_path))
+
+        # Submit all downloads
+        for path, shadow_path, context_path, _ in to_download:
+            futures.append(executor.submit(download_file, path, shadow_path, context_path))
+
+        # Wait for all to complete
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except Exception as e:
+                with lock:
+                    errors.append(str(e))
+
+    # Clear progress line and print summary
+    print(f"\r  Downloaded {downloaded} file(s), uploaded {uploaded} file(s)" + " " * 40)
+
+    if errors:
+        print(f"  Warnings ({len(errors)}):")
+        for err in errors[:5]:
+            print(f"    - {err}")
+        if len(errors) > 5:
+            print(f"    ... and {len(errors) - 5} more")
+
     return True
 
 
