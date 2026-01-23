@@ -1114,6 +1114,41 @@ def dashboard():
     display_startup_banner(context_dir, tokens.email, clear_screen=False)
 
 
+@cli.command(hidden=True)
+@click.argument("peer_email")
+def interactive_header(peer_email: str):
+    """Display interactive session header (internal command)."""
+    # Extract username from peer email
+    peer_username = peer_email.split("@")[0]
+
+    style = get_banner_style()
+    print()
+
+    if style == "compact":
+        # Compact style - Two creatures side by side
+        double_creature = f"""
+{CORAL}▗{CORAL_BG} {RESET}{CORAL_BG}{BLACK}▗{RESET}{CORAL_BG}   {RESET}{CORAL_BG}{BLACK}▖{RESET}{CORAL_BG} {RESET}{CORAL}▖{RESET} {YELLOW}✱{RESET} {LIME}▗{LIME_BG} {RESET}{LIME_BG}{BLACK}▗{RESET}{LIME_BG}   {RESET}{LIME_BG}{BLACK}▖{RESET}{LIME_BG} {RESET}{LIME}▖{RESET}
+ {CORAL_BG}       {RESET}     {LIME_BG}       {RESET}
+{CORAL}  ▘▘ ▝▝    {RESET} {LIME}  ▘▘ ▝▝    {RESET}
+"""
+        print(double_creature)
+    else:
+        # Standard style - original design
+        print(f" {CORAL}▐{BLACK_BG}▛███▜▌{RESET} {YELLOW}✱{RESET} {LIME}▐{BLACK_BG}▛███▜{RESET}{LIME}▌{RESET}")
+        print(f"{CORAL}▝▜█████▛▘{RESET} {LIME}▝▜█████▛▘{RESET}")
+        print(f"  {CORAL}▘▘ ▝▝{RESET}     {LIME}▘▘ ▝▝{RESET}")
+
+    print()
+    print(f"  {WHITE}{BOLD}Talking to {peer_username}'s Claude{RESET}")
+    print()
+    print(f"  {DIM}This conversation will be saved and shared with both parties.{RESET}")
+    print(f"  {DIM}Press Ctrl+D twice to exit.{RESET}")
+    print()
+    print(f"  {YELLOW}Note:{RESET} {DIM}Transcripts are saved locally but not yet committed to peer repos{RESET}")
+    print(f"  {DIM}(Peer commit feature is temporarily disabled during development){RESET}")
+    print()
+
+
 @cli.command()
 def start():
     """Start Claude with sync enabled (default command)."""
@@ -2014,6 +2049,27 @@ def interactive(peer_email: str):
 
     if not success:
         print(f"\n✗ Failed to start interactive session: {result}")
+        sys.exit(1)
+
+
+@cli.command("commit-transcript")
+@click.argument("session_id")
+def commit_transcript(session_id: str):
+    """Commit an interactive session transcript to both repos.
+
+    Takes the raw transcript captured during an interactive session,
+    converts it to markdown format, and commits it to both your repo
+    and the peer's repo.
+
+    Example:
+        claudeconnect commit-transcript connectclaude5_2026-01-22_160300
+    """
+    from .session import commit_interactive_transcript
+
+    success, result = commit_interactive_transcript(session_id)
+
+    if not success:
+        print(f"\n✗ Failed to commit transcript: {result}")
         sys.exit(1)
 
 

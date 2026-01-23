@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import platform
 import shutil
 import subprocess
@@ -42,6 +43,38 @@ TRANSCRIPTS_DIR = Path.home() / ".claude-connect" / "transcripts"
 
 # Cache directory for peer contexts
 PEERS_DIR = Path.home() / ".claude-connect" / "peers"
+
+# ANSI colors for terminal output
+YELLOW = '\033[38;5;228m'
+RESET = '\033[0m'
+
+
+def is_dev_mode() -> tuple[bool, Path | None]:
+    """Check if claudeconnect is running in dev mode (editable install).
+
+    Returns:
+        (is_dev, venv_path): True and venv path if in dev mode, False and None otherwise
+    """
+    try:
+        # Check if we're in a venv
+        venv = os.environ.get("VIRTUAL_ENV")
+        if not venv:
+            return False, None
+
+        venv_path = Path(venv)
+
+        # Check if claudeconnect is installed in editable mode
+        # In editable mode, the package points to source directory
+        import claudeconnect
+        package_path = Path(claudeconnect.__file__).parent
+
+        # If package is in a 'src' directory, it's likely editable install
+        if "src" in package_path.parts:
+            return True, venv_path
+
+        return False, None
+    except Exception:
+        return False, None
 
 
 def context_dir_to_claude_projects_dir(context_dir: Path) -> str:
@@ -955,7 +988,17 @@ def run_interactive_session(
     # cd to peer context first so Claude sees it as its working directory
     # Claude Code will save the conversation naturally to ~/.claude/projects/
     # Background sync will discover and import it automatically
-    terminal_cmd = f'cd {peer_context_dir} && claude --system-prompt "$(cat {prompt_file})" "hi"'
+
+    # Check if in dev mode (editable install)
+    dev_mode, venv_path = is_dev_mode()
+
+    if dev_mode and venv_path:
+        # In dev mode: activate venv, show header, then run claude
+        activate_script = venv_path / "bin" / "activate"
+        terminal_cmd = f'''cd {peer_context_dir} && source {activate_script} && claudeconnect interactive-header {peer_email} && claude --system-prompt "$(cat {prompt_file})" "hi"'''
+    else:
+        # Production mode: just run claude (claudeconnect in PATH)
+        terminal_cmd = f'''cd {peer_context_dir} && claudeconnect interactive-header {peer_email} && claude --system-prompt "$(cat {prompt_file})" "hi"'''
 
     # Escape for AppleScript: backslash-escape double quotes and backslashes
     escaped_cmd = terminal_cmd.replace("\\", "\\\\").replace('"', '\\"')
@@ -993,7 +1036,9 @@ def run_interactive_session(
     print(f"\n  You're now chatting with {peer_email}'s Claude in the new window.")
     print(f"  When you're done, press Ctrl+D or type 'exit'.")
     print(f"\n  The conversation will be automatically imported from Claude Code's")
-    print(f"  transcript storage and synced to both repos (within 60-90 seconds).")
+    print(f"  transcript storage and committed to YOUR repo (within 60-90 seconds).")
+    print(f"\n  {YELLOW}Note:{RESET} Peer commits temporarily disabled during development.")
+    print(f"  (Transcripts saved locally but not yet pushed to peer's repo)")
     print(f"\n  Transcript will appear in:")
     print(f"  {our_context_dir}/claudeconnect/with-{email_to_repo_name(peer_email)}/")
 
