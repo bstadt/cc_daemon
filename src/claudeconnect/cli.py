@@ -997,8 +997,19 @@ def start():
     # Check login and token validity
     tokens = get_valid_token()
     if not tokens:
-        print("Not logged in or token expired. Run `claudeconnect login` first.")
-        sys.exit(1)
+        print("You're not logged in yet.\n")
+        response = input("Would you like to login now? [Y/n] ").strip().lower()
+        if response in ("", "y", "yes"):
+            result = do_login()
+            if result.success:
+                print(f"\n✓ Logged in as {result.tokens.email}\n")
+                tokens = result.tokens
+            else:
+                print(f"\n✗ Login failed: {result.error}")
+                sys.exit(1)
+        else:
+            print("\nRun `claudeconnect login` when you're ready.")
+            sys.exit(0)
 
     config = get_config()
     cwd = Path.cwd()
@@ -1014,8 +1025,22 @@ def start():
             sys.exit(1)
     else:
         # First time - need to init
-        print("No context directory configured. Run `claudeconnect init` first.")
-        sys.exit(1)
+        print("No context directory configured yet.\n")
+        print(f"Current directory: {cwd}")
+        response = input("\nWould you like to initialize this directory? [Y/n] ").strip().lower()
+        if response in ("", "y", "yes"):
+            # Run init with encryption enabled by default
+            print()
+            ctx = click.get_current_context()
+            ctx.invoke(init, no_encrypt=False)
+            # Reload config after init
+            config = get_config()
+            if not config.context_dir:
+                sys.exit(1)
+            context_dir = Path(config.context_dir)
+        else:
+            print("\nRun `claudeconnect init` in your context directory when ready.")
+            sys.exit(0)
 
     print(f"Connecting as {tokens.email}...")
 
@@ -1612,7 +1637,7 @@ def pull(peer_email: str):
         sys.exit(1)
 
     print(f"Pulling {peer_email}'s context...")
-    peer_dir = pull_peer_context_http(peer_email, tokens.id_token, tokens.email)
+    peer_dir = pull_peer_context_http(peer_email, tokens.id_token)
 
     if peer_dir:
         print(f"\n✓ Context pulled to: {peer_dir}")

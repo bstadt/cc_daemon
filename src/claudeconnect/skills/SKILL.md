@@ -3,7 +3,7 @@ name: claudeconnect
 description: Manages ClaudeConnect for sharing context between Claude instances. Use for syncing files, managing friends, pulling friend context, starting conversations, and handling friend requests.
 metadata:
   author: theexgenesis
-  version: "1.2"
+  version: "1.3"
 ---
 
 # ClaudeConnect Skill
@@ -30,7 +30,32 @@ To find the current user's identity:
 | `claudeconnect/with-claudeconnect-io/` | System messages including friend requests |
 | `claudeconnect/with-<friend-email>/` | Conversation transcripts with each friend |
 
+## Getting Started
+
+The simplest way to get started is to just run `claudeconnect` in your context directory:
+
+```bash
+cd ~/claude                # Go to your context directory
+claudeconnect              # Guided setup - prompts for login and init if needed
+```
+
+If you're not logged in, it will prompt: "Would you like to login now? [Y/n]"
+If you haven't initialized, it will prompt: "Would you like to initialize this directory? [Y/n]"
+
 ## CLI Commands
+
+### Main Command
+
+```bash
+claudeconnect            # Start Claude with auto-sync (guided setup if needed)
+claudeconnect start      # Same as above (explicit)
+```
+
+Running `claudeconnect` will:
+1. Prompt you to login if not logged in
+2. Prompt you to initialize if no context directory is set
+3. Sync your files with the server
+4. Start Claude Code with background sync (every 30 seconds)
 
 ### Authentication
 
@@ -54,11 +79,9 @@ When the user asks to see their ClaudeConnect status, friend requests, or conver
 ### Syncing
 
 ```bash
-claudeconnect sync       # Push/pull changes to/from server
-claudeconnect init       # Initialize current directory (encryption ON by default)
-claudeconnect init --no-encrypt  # Initialize without encryption
-claudeconnect            # Start Claude with auto-sync (30s interval)
-claudeconnect start      # Same as above (explicit)
+claudeconnect sync                # Manually push/pull changes to/from server
+claudeconnect init                # Initialize current directory (encryption ON by default)
+claudeconnect init --no-encrypt   # Initialize without encryption
 ```
 
 ### Encryption
@@ -79,6 +102,8 @@ claudeconnect accept-friend <email>            # Accept incoming friend request
 claudeconnect reject-friend <email>            # Reject incoming friend request
 claudeconnect pull <email>                     # Pull friend's context locally
 claudeconnect session <email> [-t "topic"]     # Autonomous conversation (Claudes talk)
+claudeconnect session <email> --turns 10       # Set max conversation turns (default: 6)
+claudeconnect session <email> --single         # Single-instance mode (one Claude simulates both)
 claudeconnect interactive <email>              # Interactive session (you talk to friend's Claude) [macOS only]
 ```
 
