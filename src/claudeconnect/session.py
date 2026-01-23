@@ -18,9 +18,8 @@ from uuid import uuid4
 
 import httpx
 
-from .config import get_config, get_tokens, Tokens, get_shadow_dir, SERVER_URL
-from .svn_ops import SvnClient, SvnError, email_to_repo_name, repo_url_for_email
-from .sync import sync_once
+from .config import get_config, get_tokens, Tokens, get_shadow_dir, SERVER_URL, API_BASE_URL
+from .svn_ops import email_to_repo_name, repo_url_for_email
 
 # Encryption imports (optional)
 try:
@@ -120,67 +119,184 @@ def decrypt_peer_context(peer_dir: Path, peer_email: str) -> int:
     return decrypted_count
 
 
-def pull_peer_context(peer_email: str, svn_token: str, our_email: str) -> Path | None:
+def pull_peer_context_http(peer_email: str, id_token: str) -> Path | None:
     """
-    Pull or update a peer's context to local cache.
+    Pull or update a peer's context to local cache using HTTP API.
 
     Args:
         peer_email: The peer's email address
-        svn_token: Fernet SVN token for authentication
-        our_email: Our email (used as SVN username)
+        id_token: JWT token for authentication
 
     Returns:
         Path to the peer's cached context, or None on failure.
     """
     peer_name = email_to_repo_name(peer_email)
     peer_dir = PEERS_DIR / peer_name
-    peer_repo_url = repo_url_for_email(peer_email)
 
     # Ensure peers directory exists
     PEERS_DIR.mkdir(parents=True, exist_ok=True)
+    peer_dir.mkdir(parents=True, exist_ok=True)
 
-    svn = SvnClient(peer_dir, peer_repo_url, svn_token, our_email)
+    headers = {"Authorization": f"Bearer {id_token}"}
 
-    if peer_dir.exists() and svn.is_working_copy():
-        # Update existing checkout
-        print(f"  Updating {peer_email}'s context...")
-        try:
-            updated = svn.update()
-            if updated:
-                print(f"  Pulled {len(updated)} updates")
-
-            # Resolve any conflicts by accepting theirs (we always want the remote version)
-            status = svn.status()
-            if status.has_conflicts:
-                print(f"  Resolving {len(status.conflicted)} conflicts (accepting remote)...")
-                for conflicted_path in status.conflicted:
-                    svn.resolve_conflict(conflicted_path, accept="theirs-full")
-
-            # Decrypt any encrypted files
-            decrypted = decrypt_peer_context(peer_dir, peer_email)
-            if decrypted:
-                print(f"  Decrypted {decrypted} files")
-            return peer_dir
-        except SvnError as e:
-            print(f"  Update failed: {e}")
+    # Get manifest from peer
+    print(f"  Fetching {peer_email}'s manifest...")
+    try:
+        response = httpx.get(
+            f"{API_BASE_URL}/manifest/{peer_email}",
+            headers=headers,
+            timeout=60,
+        )
+        if response.status_code == 404:
+            print(f"  User {peer_email} not found")
             return None
-    else:
-        # Fresh checkout - use incremental for large repos
-        print(f"  Checking out {peer_email}'s context...")
-        peer_dir.mkdir(parents=True, exist_ok=True)
-
-        try:
-            # Use incremental checkout with progress for reliability
-            total_files = svn.checkout_incremental()
-            print(f"  Checked out {total_files} files to {peer_dir}")
-            # Decrypt any encrypted files
-            decrypted = decrypt_peer_context(peer_dir, peer_email)
-            if decrypted:
-                print(f"  Decrypted {decrypted} files")
-            return peer_dir
-        except SvnError as e:
-            print(f"  Checkout failed: {e}")
+        if response.status_code != 200:
+            print(f"  Failed to get manifest: {response.text}")
             return None
+        manifest = response.json()
+    except Exception as e:
+        print(f"  Error getting manifest: {e}")
+        return None
+
+    # Download files we have permission to read
+    files = manifest.get("files", [])
+    print(f"  Downloading {len(files)} file(s)...")
+    downloaded = 0
+    for file_info in files:
+        path = file_info["path"]
+        try:
+            response = httpx.get(
+                f"{API_BASE_URL}/files/{peer_email}/{path}",
+                headers=headers,
+                timeout=60,
+            )
+            if response.status_code == 200:
+                local_path = peer_dir / path
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                local_path.write_bytes(response.content)
+                downloaded += 1
+            elif response.status_code == 403:
+                pass  # No permission, skip silently
+            else:
+                print(f"  Warning: Failed to download {path}: {response.status_code}")
+        except Exception as e:
+            print(f"  Warning: Error downloading {path}: {e}")
+
+    print(f"  Downloaded {downloaded} file(s)")
+
+    # Decrypt any encrypted files
+    decrypted = decrypt_peer_context(peer_dir, peer_email)
+    if decrypted:
+        print(f"  Decrypted {decrypted} files")
+
+    return peer_dir
+
+
+def pull_peer_context(peer_email: str, svn_token: str, our_email: str) -> Path | None:
+    """Legacy wrapper - redirects to HTTP implementation."""
+    # Get fresh tokens for HTTP API
+    tokens = get_tokens()
+    if not tokens:
+        print("  No valid tokens")
+        return None
+    return pull_peer_context_http(peer_email, tokens.id_token)
+
+
+def upload_file_http(email: str, path: str, content: bytes, id_token: str, encrypt_for: str | None = None, use_friend_key: bool = False) -> bool:
+    """Upload a file to a user's storage via HTTP API.
+
+    Args:
+        email: Target user's email (whose storage to write to)
+        path: File path relative to user's files directory
+        content: File content (plaintext)
+        id_token: JWT for authentication
+        encrypt_for: If set, encrypt content using this user's master key
+        use_friend_key: If True, encrypt using friend's master key (for transcript delivery to peer's repo)
+    """
+    encrypted_content = content
+
+    # Encrypt content before upload if requested
+    if encrypt_for and HAS_ENCRYPTION:
+        try:
+            from .encryption import should_encrypt_file, encrypt_file_with_master_key, encrypt_file_for_friend
+            if should_encrypt_file(path):
+                if use_friend_key:
+                    # Delivering to friend's repo - use their master key
+                    encrypted_content = encrypt_file_for_friend(content, encrypt_for)
+                else:
+                    # Our own repo - use our master key
+                    encrypted_content = encrypt_file_with_master_key(content, encrypt_for)
+        except Exception as e:
+            print(f"  Warning: Could not encrypt {path}: {e}")
+
+    headers = {"Authorization": f"Bearer {id_token}"}
+    try:
+        response = httpx.put(
+            f"{API_BASE_URL}/files/{email}/{path}",
+            headers=headers,
+            content=encrypted_content,
+            timeout=60,
+        )
+        if response.status_code == 200:
+            # Update shadow directory with encrypted version
+            if encrypt_for:
+                shadow_dir = get_shadow_dir(encrypt_for)
+                shadow_path = shadow_dir / path
+                shadow_path.parent.mkdir(parents=True, exist_ok=True)
+                shadow_path.write_bytes(encrypted_content)
+            return True
+        return False
+    except Exception as e:
+        print(f"  Warning: Error uploading {path}: {e}")
+        return False
+
+
+def sync_http(context_dir: Path, email: str, id_token: str) -> bool:
+    """Sync local files with server using HTTP API."""
+    import hashlib
+
+    def compute_sha256(file_path: Path) -> str:
+        sha256_hash = hashlib.sha256()
+        with open(file_path, "rb") as f:
+            for chunk in iter(lambda: f.read(8192), b""):
+                sha256_hash.update(chunk)
+        return sha256_hash.hexdigest()
+
+    headers = {"Authorization": f"Bearer {id_token}"}
+
+    # Get manifest from server
+    try:
+        response = httpx.get(
+            f"{API_BASE_URL}/manifest/{email}",
+            headers=headers,
+            timeout=60,
+        )
+        if response.status_code != 200:
+            return False
+        manifest = response.json()
+    except Exception:
+        return False
+
+    server_files = {f["path"]: f for f in manifest.get("files", [])}
+
+    # Build local file manifest
+    local_files = {}
+    for file_path in context_dir.rglob("*"):
+        if file_path.is_file():
+            rel_path = str(file_path.relative_to(context_dir))
+            local_files[rel_path] = {
+                "path": rel_path,
+                "sha256": compute_sha256(file_path),
+            }
+
+    # Upload local files that are missing or different on server
+    for path, local_info in local_files.items():
+        server_info = server_files.get(path)
+        if not server_info or server_info["sha256"] != local_info["sha256"]:
+            local_path = context_dir / path
+            upload_file_http(email, path, local_path.read_bytes(), id_token)
+
+    return True
 
 
 def generate_session_prompt(
@@ -283,7 +399,7 @@ async def run_session(
     Returns:
         Tuple of (success, transcript_path or error message)
     """
-    from .cli import get_valid_token, get_svn_token as cli_get_svn_token
+    from .cli import get_valid_token
 
     # Get our credentials
     tokens = get_valid_token()
@@ -297,14 +413,9 @@ async def run_session(
     our_context_dir = Path(config.context_dir)
     our_email = tokens.email
 
-    # Get SVN token
-    svn_token = cli_get_svn_token(tokens.id_token)
-    if not svn_token:
-        return False, "Failed to get SVN token"
-
     # Pull peer's context
     print(f"\nPreparing session with {peer_email}...")
-    peer_context_dir = pull_peer_context(peer_email, svn_token, our_email)
+    peer_context_dir = pull_peer_context_http(peer_email, tokens.id_token)
     if not peer_context_dir:
         return False, f"Failed to pull {peer_email}'s context"
 
@@ -366,34 +477,27 @@ async def run_session(
     our_transcript_path.write_text(transcript)
     print(f"\nSaved transcript: {our_transcript_path}")
 
-    # Commit to our repo using sync (handles shadow dir architecture)
-    print("\nCommitting to your repo...")
-    try:
-        repo_url = repo_url_for_email(our_email)
-        sync_once(our_context_dir, repo_url, svn_token, our_email)
-        print("  Committed to your repo")
-    except Exception as e:
-        print(f"  Warning: Failed to commit to your repo: {e}")
+    # Upload transcript to our repo via HTTP
+    print("\nUploading to your repo...")
+    tokens = get_tokens()
+    if tokens:
+        transcript_rel_path = f"claudeconnect/with-{email_to_repo_name(peer_email)}/{transcript_filename}"
+        if upload_file_http(our_email, transcript_rel_path, transcript.encode(), tokens.id_token, encrypt_for=our_email):
+            print("  Uploaded to your repo")
+        else:
+            print("  Warning: Failed to upload to your repo")
+    else:
+        print("  Warning: No valid tokens for upload")
 
-    # Commit to peer's repo
-    print(f"\nCommitting to {peer_email}'s repo...")
-    peer_svn = SvnClient(peer_context_dir, repo_url_for_email(peer_email), svn_token, our_email)
-    try:
-        # Revert any decrypted files before committing
-        peer_svn.revert(recursive=True)
-
-        # Now create the conversation directory and write transcript
-        peer_conv_dir = peer_context_dir / "claudeconnect" / f"with-{email_to_repo_name(our_email)}"
-        peer_conv_dir.mkdir(parents=True, exist_ok=True)
-        peer_transcript_path = peer_conv_dir / transcript_filename
-        peer_transcript_path.write_text(transcript)
-
-        # Add and commit just the transcript
-        peer_svn.add(peer_transcript_path.relative_to(peer_context_dir), parents=True)
-        peer_svn.commit(f"Session with {our_email}: {session_id}")
-        print(f"  Committed to {peer_email}'s repo")
-    except SvnError as e:
-        print(f"  Warning: Failed to commit to peer's repo: {e}")
+    # Upload transcript to peer's repo via HTTP
+    print(f"\nUploading to {peer_email}'s repo...")
+    if tokens:
+        peer_transcript_rel_path = f"claudeconnect/with-{email_to_repo_name(our_email)}/{transcript_filename}"
+        if upload_file_http(peer_email, peer_transcript_rel_path, transcript.encode(), tokens.id_token, encrypt_for=peer_email, use_friend_key=True):
+            print(f"  Uploaded to {peer_email}'s repo")
+        else:
+            print(f"  Warning: Failed to upload to peer's repo")
+            print(f"  (This is expected if you don't have write access to their with-{email_to_repo_name(our_email)} folder)")
         print(f"  (This is expected if you don't have write access to their with-{email_to_repo_name(our_email)} folder)")
 
     return True, str(our_transcript_path)
@@ -514,7 +618,7 @@ async def run_dual_session(
     Returns:
         Tuple of (success, transcript_path or error message)
     """
-    from .cli import get_valid_token, get_svn_token as cli_get_svn_token
+    from .cli import get_valid_token
 
     # Get our credentials
     tokens = get_valid_token()
@@ -528,14 +632,9 @@ async def run_dual_session(
     our_context_dir = Path(config.context_dir)
     our_email = tokens.email
 
-    # Get SVN token
-    svn_token = cli_get_svn_token(tokens.id_token)
-    if not svn_token:
-        return False, "Failed to get SVN token"
-
     # Pull peer's context
     print(f"\nPreparing dual-instance session with {peer_email}...")
-    peer_context_dir = pull_peer_context(peer_email, svn_token, our_email)
+    peer_context_dir = pull_peer_context_http(peer_email, tokens.id_token)
     if not peer_context_dir:
         return False, f"Failed to pull {peer_email}'s context"
 
@@ -626,36 +725,27 @@ async def run_dual_session(
     our_transcript_path.write_text(transcript)
     print(f"\nSaved transcript: {our_transcript_path}")
 
-    # Commit to our repo using sync (handles shadow dir architecture)
-    print("\nCommitting to your repo...")
-    try:
-        repo_url = repo_url_for_email(our_email)
-        sync_once(our_context_dir, repo_url, svn_token, our_email)
-        print("  Committed to your repo")
-    except Exception as e:
-        print(f"  Warning: Failed to commit to your repo: {e}")
+    # Upload transcript to our repo via HTTP
+    print("\nUploading to your repo...")
+    tokens = get_tokens()
+    if tokens:
+        transcript_rel_path = f"claudeconnect/with-{email_to_repo_name(peer_email)}/{transcript_filename}"
+        if upload_file_http(our_email, transcript_rel_path, transcript.encode(), tokens.id_token, encrypt_for=our_email):
+            print("  Uploaded to your repo")
+        else:
+            print("  Warning: Failed to upload to your repo")
+    else:
+        print("  Warning: No valid tokens for upload")
 
-    # Commit to peer's repo
-    print(f"\nCommitting to {peer_email}'s repo...")
-    peer_svn = SvnClient(peer_context_dir, repo_url_for_email(peer_email), svn_token, our_email)
-    try:
-        # Revert any decrypted files before committing (they're marked as modified)
-        # We only want to commit the new transcript, not the decrypted content
-        peer_svn.revert(recursive=True)
-
-        # Now create the conversation directory and write transcript
-        peer_conv_dir = peer_context_dir / "claudeconnect" / f"with-{email_to_repo_name(our_email)}"
-        peer_conv_dir.mkdir(parents=True, exist_ok=True)
-        peer_transcript_path = peer_conv_dir / transcript_filename
-        peer_transcript_path.write_text(transcript)
-
-        # Add and commit just the transcript
-        peer_svn.add(peer_transcript_path.relative_to(peer_context_dir), parents=True)
-        peer_svn.commit(f"Dual session with {our_email}: {session_id}")
-        print(f"  Committed to {peer_email}'s repo")
-    except SvnError as e:
-        print(f"  Warning: Failed to commit to peer's repo: {e}")
-        print(f"  (This is expected if you don't have write access to their with-{email_to_repo_name(our_email)} folder)")
+    # Upload transcript to peer's repo via HTTP
+    print(f"\nUploading to {peer_email}'s repo...")
+    if tokens:
+        peer_transcript_rel_path = f"claudeconnect/with-{email_to_repo_name(our_email)}/{transcript_filename}"
+        if upload_file_http(peer_email, peer_transcript_rel_path, transcript.encode(), tokens.id_token, encrypt_for=peer_email, use_friend_key=True):
+            print(f"  Uploaded to {peer_email}'s repo")
+        else:
+            print(f"  Warning: Failed to upload to peer's repo")
+            print(f"  (This is expected if you don't have write access to their with-{email_to_repo_name(our_email)} folder)")
 
     return True, str(our_transcript_path)
 
@@ -732,7 +822,7 @@ def run_interactive_session(
     Returns:
         Tuple of (success, session_id or error message)
     """
-    from .cli import get_valid_token, get_svn_token as cli_get_svn_token
+    from .cli import get_valid_token
 
     # Check platform
     if platform.system() != "Darwin":
@@ -754,14 +844,9 @@ def run_interactive_session(
     our_context_dir = Path(config.context_dir)
     our_email = tokens.email
 
-    # Get SVN token
-    svn_token = cli_get_svn_token(tokens.id_token)
-    if not svn_token:
-        return False, "Failed to get SVN token"
-
     # Pull peer's context
     print(f"\nPreparing interactive session with {peer_email}...")
-    peer_context_dir = pull_peer_context(peer_email, svn_token, our_email)
+    peer_context_dir = pull_peer_context_http(peer_email, tokens.id_token)
     if not peer_context_dir:
         return False, f"Failed to pull {peer_email}'s context. Are you connected as friends?"
 
@@ -843,7 +928,7 @@ def commit_interactive_transcript(
     Returns:
         Tuple of (success, transcript_path or error message)
     """
-    from .cli import get_valid_token, get_svn_token as cli_get_svn_token
+    from .cli import get_valid_token
 
     # Get our credentials
     tokens = get_valid_token()

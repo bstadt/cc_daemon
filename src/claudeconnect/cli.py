@@ -125,7 +125,7 @@ from .config import (
     get_config, get_tokens, Config, Tokens, is_logged_in, get_email,
     get_test_user_email, get_test_user_credentials, list_test_users,
     TestUserCredentials, TEST_USERS_DIR, get_shadow_dir, sanitize_email,
-    SERVER_URL,
+    SERVER_URL, API_BASE_URL,
 )
 from .scanner import scan_directory
 from .svn_ops import SvnClient, SvnError, email_to_repo_name, repo_url_for_email
@@ -733,6 +733,35 @@ def generate_authz_content(
     return "\n".join(lines) + "\n"
 
 
+def upload_authz_http(token: str, email: str, content: str) -> bool:
+    """
+    Upload authz file to v2s server via HTTP API.
+
+    Args:
+        token: OAuth id_token for authentication
+        email: User's email address
+        content: authz file content
+
+    Returns:
+        True if upload succeeded, False otherwise.
+    """
+    try:
+        response = httpx.put(
+            f"{API_BASE_URL}/files/{email}/authz",
+            content=content.encode(),
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=30,
+        )
+        if response.status_code == 200:
+            return True
+        else:
+            print(f"  Error uploading authz: {response.text}")
+            return False
+    except httpx.HTTPError as e:
+        print(f"  Error uploading authz: {e}")
+        return False
+
+
 def install_skill() -> bool:
     """
     Install the claudeconnect skill to ~/.claude/skills/.
@@ -864,13 +893,6 @@ def ensure_authz_exists(
         # Create with-claudeconnect-io/ for system messages (friend requests, notifications)
         if not system_messages_dir.exists():
             system_messages_dir.mkdir(parents=True, exist_ok=True)
-            # Add .keep file so SVN tracks the empty directory
-            keep_file = system_messages_dir / ".keep"
-            keep_file.write_text("")
-            # Only add to SVN from shadow_dir
-            if target_dir == shadow_dir:
-                files_to_add.append(keep_file)
-                needs_commit = True
 
     # Handle authz file
     shadow_authz = shadow_dir / "authz"
@@ -936,186 +958,62 @@ def update_authz_with_private_files(authz_path: Path, email: str, private_files:
 
 def init_context_dir(
     context_dir: Path,
-    repo_url: str,
-    svn_token: str,
     email: str,
+    token: str,
     public_key_hex: str | None = None,
 ) -> bool:
     """
-    Initialize a context directory using shadow directory architecture.
+    Initialize a context directory using HTTP-based sync (v2s).
 
-    Shadow directory architecture keeps SVN metadata separate from user files:
-    - Shadow dir (~/.claude-connect/svn-staging/<email>/): SVN working copy with encrypted files
-    - Context dir (user's directory): Plaintext files, NO .svn folder
+    Creates:
+    - Shadow directory for encryption staging
+    - authz file with proper permissions
+    - claudeconnect/ directory structure
 
     Args:
         context_dir: The user's plaintext directory to initialize
-        repo_url: SVN repository URL
-        svn_token: Fernet token for SVN auth
-        email: User email (SVN username)
+        email: User email
+        token: OAuth id_token for server communication
         public_key_hex: User's public key as hex string (stamped in authz)
 
     Returns:
         True if successful.
     """
-    # Get shadow directory path
+    # Get shadow directory path (used for encryption staging)
     shadow_dir = get_shadow_dir(email)
     shadow_dir.mkdir(parents=True, exist_ok=True)
 
-    # SVN client operates on shadow directory, NOT context directory
-    svn = SvnClient(shadow_dir, repo_url, svn_token, email)
+    # Create claudeconnect/ structure in both directories
+    for target_dir in [shadow_dir, context_dir]:
+        cc_dir = target_dir / "claudeconnect"
+        system_messages_dir = cc_dir / "with-claudeconnect-io"
 
-    # Check if shadow dir already has SVN working copy
-    if svn.is_working_copy():
-        info = svn.info()
-        if info and info.get("url") == repo_url:
-            print(f"  Shadow directory already initialized (revision {info['revision']})")
-            # Still run migration/ensure for existing repos
-            ensure_authz_exists(context_dir, shadow_dir, svn, email, public_key_hex=public_key_hex)
-            return True
-        else:
-            print(f"  Error: Shadow directory is SVN working copy for different repo")
-            print(f"  Expected: {repo_url}")
-            print(f"  Got: {info.get('url')}")
-            print(f"  Shadow dir: {shadow_dir}")
-            return False
+        # Create with-claudeconnect-io/ for system messages
+        if not system_messages_dir.exists():
+            system_messages_dir.mkdir(parents=True, exist_ok=True)
 
-    # Check if context directory has .svn (old architecture - needs migration)
-    old_svn = context_dir / ".svn"
-    if old_svn.exists():
-        print("  Warning: Found .svn in context directory (old architecture)")
-        print("  Migrating to shadow directory architecture...")
-        # Move .svn to shadow directory
-        shutil.move(str(old_svn), str(shadow_dir / ".svn"))
-        print("  Moved .svn to shadow directory")
+    # Handle authz file
+    shadow_authz = shadow_dir / "authz"
+    context_authz = context_dir / "authz"
 
-    # Check if directory has markdown files to import
-    md_files = [f for f in context_dir.glob("**/*.md") if ".svn" not in f.parts]
-    private_files: list[str] = []  # Files to mark private in authz
+    if shadow_authz.exists():
+        # Authz exists in shadow, copy to context
+        print("  Using existing authz file")
+        shutil.copy2(shadow_authz, context_authz)
+    else:
+        # Create new authz
+        print("  Creating authz file...")
+        authz_content = generate_authz_content(email, None, public_key_hex)
+        # Write to both locations
+        shadow_authz.write_text(authz_content)
+        context_authz.write_text(authz_content)
 
-    if md_files:
-        print(f"  Found {len(md_files)} markdown files to sync")
-
-        # Scan for sensitive information before syncing
-        print("  Scanning for sensitive information...")
-        report = scan_directory(context_dir, markdown_only=True)
-
-        if report.has_issues:
-            # Collect unique files with sensitive content
-            sensitive_files = set()
-            for match in report.matches:
-                try:
-                    rel_path = match.file_path.relative_to(context_dir)
-                    sensitive_files.add(str(rel_path))
-                except ValueError:
-                    sensitive_files.add(str(match.file_path))
-
-            private_files = list(sensitive_files)
-
-            # Inform user - files will be auto-privatized, not blocked
-            print(f"\n  Found sensitive content in {len(private_files)} file(s)")
-            print(f"  These files will be marked PRIVATE (only you can see them):\n")
-            for f in sorted(private_files):
-                print(f"    - {f}")
-            print()
-            print(report.format_report(context_dir))
-            print("  Files with sensitive content are automatically private.")
-            print("  Friends will not be able to see these files.")
-            print("  You can change this later by editing your authz file.\n")
-        else:
-            print("  No sensitive information detected")
-
-    # Checkout SVN into shadow directory (if not already a working copy)
-    if not svn.is_working_copy():
-        try:
-            svn.checkout()
-            print(f"  Created shadow directory: {shadow_dir}")
-        except SvnError as e:
-            print(f"  Checkout failed: {e}")
-            return False
-
-    # Copy existing markdown files from context dir to shadow dir
-    if md_files:
-        # Set ignore patterns for non-markdown first
-        svn.set_ignore([
-            "*.py",
-            "*.json",
-            "*.yaml",
-            "*.yml",
-            "*.txt",
-            "*.log",
-            "*.sqlite",
-            "*.db",
-            "__pycache__",
-            ".git",
-            ".DS_Store",
-            "node_modules",
-            "venv",
-            ".venv",
-        ])
-
-        # For large file sets, use batched commits for reliability and progress
-        BATCH_SIZE = 100
-        total_files = len(md_files)
-
-        if total_files >= BATCH_SIZE:
-            print(f"  Using batched commits ({BATCH_SIZE} files per commit)...")
-            total_committed = 0
-
-            for batch_start in range(0, total_files, BATCH_SIZE):
-                batch_end = min(batch_start + BATCH_SIZE, total_files)
-                batch = md_files[batch_start:batch_end]
-                batch_num = (batch_start // BATCH_SIZE) + 1
-                total_batches = (total_files + BATCH_SIZE - 1) // BATCH_SIZE
-
-                # Copy batch to shadow
-                rel_paths = []
-                for md_file in batch:
-                    rel_path = md_file.relative_to(context_dir)
-                    shadow_file = shadow_dir / rel_path
-                    shadow_file.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(md_file, shadow_file)
-                    rel_paths.append(rel_path)
-
-                # Add batch to SVN
-                added, failed = svn.add_batch(rel_paths)
-
-                # Commit batch
-                try:
-                    rev = svn.commit(f"Initial sync batch {batch_num}/{total_batches}: {len(batch)} files")
-                    if rev:
-                        total_committed += len(batch)
-                        print(f"  [{total_committed}/{total_files}] Committed batch {batch_num}/{total_batches} (rev {rev})")
-                except SvnError as e:
-                    print(f"  Batch {batch_num} commit failed: {e}")
-                    return False
-
-            print(f"  Completed: {total_committed} files in {total_batches} batches")
-
-        else:
-            # Small file set - single commit
-            print("  Copying files to shadow directory...")
-            for md_file in md_files:
-                rel_path = md_file.relative_to(context_dir)
-                shadow_file = shadow_dir / rel_path
-                shadow_file.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(md_file, shadow_file)
-
-            # Add files to SVN in shadow directory
-            added = svn.add_all_markdown()
-            print(f"  Added {len(added)} markdown files to SVN")
-
-            # Initial commit from shadow directory
-            try:
-                rev = svn.commit("Initial sync from claudeconnect")
-                if rev:
-                    print(f"  Committed initial sync (revision {rev})")
-            except SvnError as e:
-                print(f"  Initial commit failed: {e}")
-                return False
-
-    # Ensure authz and directory structure exist in both locations
-    ensure_authz_exists(context_dir, shadow_dir, svn, email, private_files, public_key_hex)
+    # Upload authz to v2s server
+    print("  Uploading authz to server...")
+    authz_content = context_authz.read_text()
+    if not upload_authz_http(token, email, authz_content):
+        print("  Failed to upload authz to server")
+        return False
 
     print(f"  Shadow directory: {shadow_dir}")
     return True
@@ -1452,21 +1350,7 @@ def init(no_encrypt: bool):
         if not click.confirm("Continue?"):
             return
 
-    # Ensure repo exists
     print(f"Connecting as {tokens.email}...")
-    try:
-        repo_info = ensure_repo(tokens.id_token)
-        # Always compute repo_url locally for consistency
-        repo_url = repo_url_for_email(tokens.email)
-    except Exception as e:
-        print(f"  Error: {e}")
-        sys.exit(1)
-
-    # Get SVN token
-    svn_token = get_svn_token(tokens.id_token)
-    if not svn_token:
-        print("Failed to get SVN token")
-        sys.exit(1)
 
     # Set up encryption if requested
     public_key_hex = None
@@ -1503,9 +1387,9 @@ def init(no_encrypt: bool):
             encrypt = False
             public_key_hex = None
 
-    # Initialize
+    # Initialize using HTTP-based sync (v2s)
     print(f"\nInitializing: {cwd}")
-    if init_context_dir(cwd, repo_url, svn_token, tokens.email, public_key_hex):
+    if init_context_dir(cwd, tokens.email, tokens.id_token, public_key_hex):
         config.context_dir = str(cwd)
         config.encryption_enabled = encrypt
         config.save()
@@ -1536,9 +1420,212 @@ def init(no_encrypt: bool):
         sys.exit(1)
 
 
+def compute_file_sha256(file_path: Path) -> str:
+    """Compute SHA256 hash of a file."""
+    import hashlib
+    sha256_hash = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            sha256_hash.update(chunk)
+    return sha256_hash.hexdigest()
+
+
+def compute_bytes_sha256(content: bytes) -> str:
+    """Compute SHA256 hash of bytes."""
+    import hashlib
+    return hashlib.sha256(content).hexdigest()
+
+
+def sync_http(context_dir: Path, email: str, id_token: str) -> bool:
+    """Sync local files with server using HTTP API.
+
+    Uses shadow directory for encrypted file storage and comparison.
+    - Shadow dir contains encrypted versions (matches server)
+    - Context dir contains plaintext versions (user's working copy)
+    - Conflicts resolved by most recent mtime
+    """
+    config = get_config()
+    encryption_enabled = config.encryption_enabled and HAS_ENCRYPTION
+
+    # Shadow directory stores encrypted files (mirrors server)
+    shadow_dir = get_shadow_dir(email)
+    shadow_dir.mkdir(parents=True, exist_ok=True)
+
+    headers = {"Authorization": f"Bearer {id_token}"}
+
+    # Step 1: Get manifest from server (encrypted hashes)
+    try:
+        response = httpx.get(
+            f"{API_BASE_URL}/manifest/{email}",
+            headers=headers,
+            timeout=60,
+        )
+        if response.status_code != 200:
+            print(f"  Failed to get manifest: {response.text}")
+            return False
+        manifest = response.json()
+    except Exception as e:
+        print(f"  Error getting manifest: {e}")
+        return False
+
+    server_files = {f["path"]: f for f in manifest.get("files", [])}
+
+    # Step 2: Build shadow directory manifest (encrypted files)
+    shadow_files = {}
+    for file_path in shadow_dir.rglob("*"):
+        if file_path.is_file():
+            rel_path = str(file_path.relative_to(shadow_dir))
+            shadow_files[rel_path] = {
+                "path": rel_path,
+                "sha256": compute_file_sha256(file_path),
+                "mtime": file_path.stat().st_mtime,
+            }
+
+    # Step 3: Build context directory manifest (plaintext files)
+    context_files = {}
+    for file_path in context_dir.rglob("*"):
+        if file_path.is_file():
+            rel_path = str(file_path.relative_to(context_dir))
+            context_files[rel_path] = {
+                "path": rel_path,
+                "mtime": file_path.stat().st_mtime,
+            }
+
+    # Step 4: Sync - compare shadow to server, use mtime for conflicts
+    downloaded = 0
+    uploaded = 0
+
+    # All paths we need to consider
+    all_paths = set(server_files.keys()) | set(shadow_files.keys()) | set(context_files.keys())
+
+    for path in all_paths:
+        server_info = server_files.get(path)
+        shadow_info = shadow_files.get(path)
+        context_info = context_files.get(path)
+
+        shadow_path = shadow_dir / path
+        context_path = context_dir / path
+
+        # Case 1: File exists on server but not in shadow (or hash differs) - download
+        if server_info and (not shadow_info or shadow_info["sha256"] != server_info["sha256"]):
+            # Check if local is newer (mtime comparison)
+            local_mtime = context_info["mtime"] if context_info else 0
+            server_mtime = server_info.get("mtime", 0)
+
+            if local_mtime > server_mtime and context_info:
+                # Local is newer - upload instead
+                try:
+                    content = context_path.read_bytes()
+                    encrypted_content = content
+                    if encryption_enabled and should_encrypt_file(path):
+                        try:
+                            encrypted_content = encrypt_file_with_master_key(content, email)
+                        except Exception as e:
+                            print(f"  Warning: Could not encrypt {path}: {e}")
+
+                    response = httpx.put(
+                        f"{API_BASE_URL}/files/{email}/{path}",
+                        headers=headers,
+                        content=encrypted_content,
+                        timeout=60,
+                    )
+                    if response.status_code == 200:
+                        # Update shadow with encrypted version
+                        shadow_path.parent.mkdir(parents=True, exist_ok=True)
+                        shadow_path.write_bytes(encrypted_content)
+                        uploaded += 1
+                except Exception as e:
+                    print(f"  Warning: Error uploading {path}: {e}")
+            else:
+                # Server is newer (or no local) - download
+                try:
+                    response = httpx.get(
+                        f"{API_BASE_URL}/files/{email}/{path}",
+                        headers=headers,
+                        timeout=60,
+                    )
+                    if response.status_code == 200:
+                        encrypted_content = response.content
+
+                        # Save encrypted to shadow
+                        shadow_path.parent.mkdir(parents=True, exist_ok=True)
+                        shadow_path.write_bytes(encrypted_content)
+
+                        # Decrypt and save to context
+                        decrypted_content = encrypted_content
+                        if encryption_enabled:
+                            try:
+                                from .encryption import is_encrypted_file, decrypt_file_with_master_key
+                                if is_encrypted_file(encrypted_content):
+                                    decrypted_content = decrypt_file_with_master_key(encrypted_content, email)
+                            except Exception:
+                                pass  # Keep as-is if decryption fails
+
+                        context_path.parent.mkdir(parents=True, exist_ok=True)
+                        context_path.write_bytes(decrypted_content)
+                        downloaded += 1
+                except Exception as e:
+                    print(f"  Warning: Error downloading {path}: {e}")
+
+        # Case 2: File exists locally but not on server - upload
+        elif context_info and not server_info:
+            try:
+                content = context_path.read_bytes()
+                encrypted_content = content
+                if encryption_enabled and should_encrypt_file(path):
+                    try:
+                        encrypted_content = encrypt_file_with_master_key(content, email)
+                    except Exception as e:
+                        print(f"  Warning: Could not encrypt {path}: {e}")
+
+                response = httpx.put(
+                    f"{API_BASE_URL}/files/{email}/{path}",
+                    headers=headers,
+                    content=encrypted_content,
+                    timeout=60,
+                )
+                if response.status_code == 200:
+                    # Update shadow with encrypted version
+                    shadow_path.parent.mkdir(parents=True, exist_ok=True)
+                    shadow_path.write_bytes(encrypted_content)
+                    uploaded += 1
+            except Exception as e:
+                print(f"  Warning: Error uploading {path}: {e}")
+
+        # Case 3: File in shadow matches server - check if context changed
+        elif shadow_info and server_info and shadow_info["sha256"] == server_info["sha256"]:
+            if context_info:
+                # Check if context is newer than shadow
+                if context_info["mtime"] > shadow_info["mtime"]:
+                    # Context changed - upload
+                    try:
+                        content = context_path.read_bytes()
+                        encrypted_content = content
+                        if encryption_enabled and should_encrypt_file(path):
+                            try:
+                                encrypted_content = encrypt_file_with_master_key(content, email)
+                            except Exception as e:
+                                print(f"  Warning: Could not encrypt {path}: {e}")
+
+                        response = httpx.put(
+                            f"{API_BASE_URL}/files/{email}/{path}",
+                            headers=headers,
+                            content=encrypted_content,
+                            timeout=60,
+                        )
+                        if response.status_code == 200:
+                            shadow_path.write_bytes(encrypted_content)
+                            uploaded += 1
+                    except Exception as e:
+                        print(f"  Warning: Error uploading {path}: {e}")
+
+    print(f"  Downloaded {downloaded} file(s), uploaded {uploaded} file(s)")
+    return True
+
+
 @cli.command()
 def sync():
-    """Manually trigger a sync."""
+    """Manually trigger a sync with the server."""
     tokens = get_valid_token()
     config = get_config()
 
@@ -1550,17 +1637,10 @@ def sync():
         print("No context directory configured.")
         sys.exit(1)
 
-    # Get SVN token
-    svn_token = get_svn_token(tokens.id_token)
-    if not svn_token:
-        print("Failed to get SVN token")
-        sys.exit(1)
-
     context_dir = Path(config.context_dir)
-    repo_url = repo_url_for_email(tokens.email)
 
     print("Syncing...")
-    if sync_once(context_dir, repo_url, svn_token, tokens.email):
+    if sync_http(context_dir, tokens.email, tokens.id_token):
         print("✓ Sync complete")
     else:
         sys.exit(1)
@@ -1760,24 +1840,75 @@ def session(peer_email: str, topic: str | None, single: bool, turns: int):
         sys.exit(1)
 
 
+def pull_peer_context_http(peer_email: str, id_token: str, my_email: str) -> Path | None:
+    """Pull a peer's context using HTTP API."""
+    config = get_config()
+    if not config.context_dir:
+        print("No context directory configured.")
+        return None
+
+    context_dir = Path(config.context_dir)
+    peer_dir_name = f"with-{email_to_repo_name(peer_email)}"
+    peer_dir = context_dir / "claudeconnect" / peer_dir_name
+    peer_dir.mkdir(parents=True, exist_ok=True)
+
+    headers = {"Authorization": f"Bearer {id_token}"}
+
+    # Get manifest from peer
+    try:
+        response = httpx.get(
+            f"{API_BASE_URL}/manifest/{peer_email}",
+            headers=headers,
+            timeout=60,
+        )
+        if response.status_code == 404:
+            print(f"  User {peer_email} not found")
+            return None
+        if response.status_code != 200:
+            print(f"  Failed to get manifest: {response.text}")
+            return None
+        manifest = response.json()
+    except Exception as e:
+        print(f"  Error getting manifest: {e}")
+        return None
+
+    # Download files we have permission to read
+    downloaded = 0
+    for file_info in manifest.get("files", []):
+        path = file_info["path"]
+        try:
+            response = httpx.get(
+                f"{API_BASE_URL}/files/{peer_email}/{path}",
+                headers=headers,
+                timeout=60,
+            )
+            if response.status_code == 200:
+                local_path = peer_dir / path
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                local_path.write_bytes(response.content)
+                downloaded += 1
+            elif response.status_code == 403:
+                pass  # No permission, skip silently
+            else:
+                print(f"  Warning: Failed to download {path}: {response.status_code}")
+        except Exception as e:
+            print(f"  Warning: Error downloading {path}: {e}")
+
+    print(f"  Downloaded {downloaded} file(s) from {peer_email}")
+    return peer_dir
+
+
 @cli.command()
 @click.argument("peer_email")
 def pull(peer_email: str):
     """Pull a friend's context without starting a session."""
-    from .session import pull_peer_context
-
     tokens = get_valid_token()
     if not tokens:
         print("Not logged in or token expired. Run `claudeconnect login` first.")
         sys.exit(1)
 
-    svn_token = get_svn_token(tokens.id_token)
-    if not svn_token:
-        print("Failed to get SVN token")
-        sys.exit(1)
-
     print(f"Pulling {peer_email}'s context...")
-    peer_dir = pull_peer_context(peer_email, svn_token, tokens.email)
+    peer_dir = pull_peer_context_http(peer_email, tokens.id_token, tokens.email)
 
     if peer_dir:
         print(f"\n✓ Context pulled to: {peer_dir}")
@@ -1931,7 +2062,7 @@ def fetch_peer_public_key(peer_email: str) -> bytes | None:
     Fetch a peer's public key from the server API.
 
     The public key is stored in their authz file and exposed via
-    /api/public-key/<email> endpoint.
+    /api/keys/<email> endpoint.
 
     Args:
         peer_email: Peer's email address
@@ -1939,7 +2070,7 @@ def fetch_peer_public_key(peer_email: str) -> bytes | None:
     Returns:
         Public key bytes (32 bytes) or None if not found
     """
-    api_url = f"{SERVER_URL}/api/public-key/{peer_email}"
+    api_url = f"{API_BASE_URL}/keys/{peer_email}"
 
     try:
         response = httpx.get(api_url, timeout=10)
@@ -1965,8 +2096,10 @@ def friend(peer_email: str):
     This command:
     1. Fetches peer's public key from their authz
     2. Encrypts your master key for them (so they can read your files immediately)
-    3. Updates your authz to grant them read access
-    4. Sends a friend request with the encrypted master key
+    3. Updates your authz to grant them read access + write to with-{peer}/
+    4. Creates claudeconnect/with-{peer}/ directory for them to write conversations to
+    5. Uploads authz to server
+    6. Sends a friend request with the encrypted master key
     """
     tokens = get_valid_token()
     if not tokens:
@@ -2024,17 +2157,24 @@ def friend(peer_email: str):
 
     add_friend_to_authz(authz_path, my_email, peer_email)
 
-    # Step 4: Sync to commit authz changes
-    svn_token = get_svn_token(tokens.id_token)
-    if not svn_token:
-        print("Failed to get SVN token")
+    # Step 4: Create with-{peer} directory for them to write conversations to
+    peer_email_sanitized = email_to_repo_name(peer_email)
+    with_peer_dir = context_dir / "claudeconnect" / f"with-{peer_email_sanitized}"
+    with_peer_dir.mkdir(parents=True, exist_ok=True)
+    # Create a README so the directory syncs (empty dirs don't sync)
+    readme_path = with_peer_dir / "README.md"
+    if not readme_path.exists():
+        readme_path.write_text(f"This directory contains conversations between {peer_email} and {my_email}.\n")
+    print(f"  Created {with_peer_dir.relative_to(context_dir)}/")
+
+    # Step 5: Upload authz to server via HTTP
+    print("  Uploading authz changes...")
+    authz_content = authz_path.read_text()
+    if not upload_authz_http(tokens.id_token, my_email, authz_content):
+        print("Failed to upload authz")
         sys.exit(1)
 
-    repo_url = repo_url_for_email(my_email)
-    print("  Syncing authz changes...")
-    sync_once(context_dir, repo_url, svn_token, my_email)
-
-    # Step 5: Send friend request via API
+    # Step 6: Send friend request via API
     print("  Sending friend request...")
     try:
         request_data = {"to": peer_email}
@@ -2051,6 +2191,10 @@ def friend(peer_email: str):
         )
 
         if response.status_code == 200:
+            # Sync to upload the with-{peer} directory to server
+            print("  Syncing files to server...")
+            sync_http(context_dir, my_email, tokens.id_token)
+
             print(f"\n✓ Friend request sent to {peer_email}")
             print(f"  They will see your request in their claudeconnect/with-claudeconnect-io/ folder.")
             if encrypted_master_key_hex:
@@ -2078,8 +2222,9 @@ def accept_friend(peer_email: str):
     This command:
     1. Extracts and decrypts friend's master key (so you can read their files)
     2. Updates your authz to grant them read access
-    3. Deletes the friend request file
-    4. Syncs changes to the server
+    3. Sends a reciprocal friend request with YOUR encrypted master key (so they can read your files)
+    4. Uploads authz changes to the server
+    5. Deletes the friend request file
     """
     tokens = get_valid_token()
     if not tokens:
@@ -2102,13 +2247,13 @@ def accept_friend(peer_email: str):
 
     # Check if friend request exists in with-claudeconnect-io/ (per system2.md)
     system_messages_dir = context_dir / "claudeconnect" / "with-claudeconnect-io"
-    # Server writes friend requests with sanitized email in filename
     peer_email_sanitized = email_to_repo_name(peer_email)
     request_file = system_messages_dir / f"friend-request-{peer_email_sanitized}.md"
 
     if not request_file.exists():
         print(f"No friend request found from {peer_email}")
         print(f"  Checked: {request_file}")
+        print(f"  Run `claudeconnect sync` to pull latest files from server.")
         sys.exit(1)
 
     print(f"Accepting friend request from {peer_email}...")
@@ -2123,10 +2268,10 @@ def accept_friend(peer_email: str):
     add_friend_to_authz(authz_path, my_email, peer_email)
 
     # Step 2: Extract keys from friend request
+    request_content = request_file.read_text()
     if HAS_ENCRYPTION:
         try:
             import re
-            request_content = request_file.read_text()
 
             # Extract and save friend's public key
             key_match = re.search(r'\*\*Public-Key\*\*:\s*([a-fA-F0-9]{64})', request_content)
@@ -2155,23 +2300,73 @@ def accept_friend(peer_email: str):
         except Exception as e:
             print(f"  Warning: Could not process encryption keys: {e}")
 
-    # Step 3: Delete the friend request file
-    try:
-        request_file.unlink()
-        print(f"  Removed friend request file")
-    except Exception as e:
-        print(f"  Warning: Could not delete request file: {e}")
+    # Step 3: Send reciprocal friend request back to sender (so they get our master key)
+    if HAS_ENCRYPTION:
+        try:
+            # We have peer's public key from step 2, now encrypt our master key for them
+            peer_public_key = load_friend_public_key(peer_email)
+            if peer_public_key:
+                my_master_key = load_master_key(my_email)
+                encrypted_blob = encrypt_master_key_for_recipient(my_master_key, peer_public_key)
+                encrypted_master_key_hex = encrypted_blob.hex()
 
-    # Step 4: Sync to commit authz changes and request deletion
-    svn_token = get_svn_token(tokens.id_token)
-    if not svn_token:
-        print("Failed to get SVN token")
+                my_public_key = load_public_key(my_email)
+                my_public_key_hex = my_public_key.hex()
+
+                # Send friend request back to peer via API
+                print("  Sending reciprocal friend request (so they can read your files)...")
+                request_data = {
+                    "to": peer_email,
+                    "public_key": my_public_key_hex,
+                    "encrypted_master_key": encrypted_master_key_hex,
+                }
+                response = httpx.post(
+                    f"{SERVER_URL}/api/friend-request",
+                    headers={"Authorization": f"Bearer {tokens.id_token}"},
+                    json=request_data,
+                    timeout=30,
+                )
+                if response.status_code == 200:
+                    print(f"  Sent your encrypted master key to {peer_email}")
+                elif response.status_code == 409:
+                    print(f"  Reciprocal request already pending for {peer_email}")
+                else:
+                    print(f"  Warning: Could not send reciprocal request: {response.text}")
+            else:
+                print("  Note: Could not send reciprocal request - no public key for peer")
+        except Exception as e:
+            print(f"  Warning: Could not send reciprocal friend request: {e}")
+
+    # Step 4: Upload authz to server via HTTP
+    print("  Uploading authz changes...")
+    authz_content = authz_path.read_text()
+    if not upload_authz_http(tokens.id_token, my_email, authz_content):
+        print("Failed to upload authz")
         sys.exit(1)
 
-    repo_url = repo_url_for_email(my_email)
-    print("  Syncing changes to server...")
-    if not sync_once(context_dir, repo_url, svn_token, my_email):
-        print("  Warning: Sync may have failed. Run `claudeconnect sync` to retry.")
+    # Step 5: Delete the friend request file locally and from server
+    try:
+        request_file.unlink()
+        print(f"  Removed local friend request file")
+    except Exception as e:
+        print(f"  Warning: Could not delete local request file: {e}")
+
+    # Delete from server via accept-friend API
+    try:
+        response = httpx.post(
+            f"{API_BASE_URL}/accept-friend",
+            headers={"Authorization": f"Bearer {tokens.id_token}"},
+            json={"from_email": peer_email},
+            timeout=30,
+        )
+        if response.status_code == 200:
+            print(f"  Removed friend request from server")
+        elif response.status_code == 404:
+            pass  # Already deleted or never existed on server
+        else:
+            print(f"  Warning: Could not delete server request file: {response.text}")
+    except Exception as e:
+        print(f"  Warning: Could not delete server request file: {e}")
 
     print(f"\n✓ Friend request accepted!")
     print(f"  {peer_email} can now read your context and send you conversations.")
@@ -2215,24 +2410,30 @@ def reject_friend(peer_email: str):
 
     print(f"Rejecting friend request from {peer_email}...")
 
-    # Delete the friend request file
+    # Delete the friend request file locally
     try:
         request_file.unlink()
-        print(f"  Removed friend request file")
+        print(f"  Removed local friend request file")
     except Exception as e:
         print(f"  Error: Could not delete request file: {e}")
         sys.exit(1)
 
-    # Sync to commit the deletion
-    svn_token = get_svn_token(tokens.id_token)
-    if not svn_token:
-        print("Failed to get SVN token")
-        sys.exit(1)
-
-    repo_url = repo_url_for_email(my_email)
-    print("  Syncing changes to server...")
-    if not sync_once(context_dir, repo_url, svn_token, my_email):
-        print("  Warning: Sync may have failed. Run `claudeconnect sync` to retry.")
+    # Delete from server via files API (user has write access to their own folder)
+    try:
+        rel_path = f"claudeconnect/with-claudeconnect-io/friend-request-{peer_email_sanitized}.md"
+        response = httpx.delete(
+            f"{API_BASE_URL}/files/{my_email}/{rel_path}",
+            headers={"Authorization": f"Bearer {tokens.id_token}"},
+            timeout=30,
+        )
+        if response.status_code == 200:
+            print(f"  Removed friend request from server")
+        elif response.status_code == 404:
+            pass  # Already deleted, that's fine
+        else:
+            print(f"  Warning: Could not delete server request file: {response.text}")
+    except Exception as e:
+        print(f"  Warning: Could not delete server request file: {e}")
 
     print(f"\n✓ Friend request rejected.")
 

@@ -29,10 +29,11 @@ from pathlib import Path
 from typing import Optional
 
 import pytest
+import httpx
 
-# Server config
-SERVER = "v2.claudeconnect.io"
-SSH_KEY = Path.home() / ".ssh" / "calco_key.pem"
+from conf import ALICE_EMAIL, BOB_EMAIL, SERVER, SERVER_URL, API_BASE_URL, SSH_KEY_PATH
+
+SSH_KEY = Path(SSH_KEY_PATH)
 CC_CONFIG_DIR = Path.home() / ".claude-connect"
 PEERS_DIR = CC_CONFIG_DIR / "peers"
 
@@ -103,16 +104,15 @@ def wait_for_user(msg: str):
 
 
 def clean_server():
-    """Remove test account repos on server."""
-    log("Cleaning test account repos...")
-    # Only remove repos for test accounts, not all repos
-    test_repos = [
-        "brandonduderstadt-gmail-com",
-        "thisismysignupacct-gmail-com",
-    ]
-    for repo in test_repos:
-        ssh_server(f"sudo rm -rf /var/svn/repos/{repo}")
-    log("Test account repos cleaned.")
+    """Remove test account data on v2s server."""
+    log("Cleaning test account data on v2s server...")
+    # Sanitize emails for filesystem paths
+    test_accounts = [ALICE_EMAIL, BOB_EMAIL]
+    for email in test_accounts:
+        safe_email = email.replace("/", "_").replace("\\", "_")
+        ssh_server(f"sudo rm -rf /data/users/{safe_email}")
+        log(f"  Removed /data/users/{safe_email}")
+    log("Test account data cleaned.")
 
 
 def clean_client():
@@ -192,12 +192,147 @@ def verify_init_structure(account_name: str, temp_dir: Path) -> bool:
     return True
 
 
-def create_poetry_file(temp_dir: Path):
-    """Create poetry.md in context."""
+def create_poetry_files(temp_dir: Path):
+    """Create poetry.md and secret_poetry.md in context."""
     log("Creating poetry.md...")
     poetry_file = temp_dir / "poetry.md"
     poetry_file.write_text("# Poetry Collection\n\nturning and turning in the widening gyre\n")
     log("Created poetry.md")
+
+    log("Creating secret_poetry.md...")
+    secret_file = temp_dir / "secret_poetry.md"
+    secret_file.write_text("# Secret Poetry\n\ntheres a bluebird in my heart that wants to get out but im too tough for him, i say stay in there, im not going to let anybody see you.\n")
+    log("Created secret_poetry.md")
+
+
+def get_id_token() -> str:
+    """Get the current id_token for API calls."""
+    tokens_file = CC_CONFIG_DIR / "tokens.json"
+    with open(tokens_file) as f:
+        return json.load(f)["id_token"]
+
+
+def update_authz_restrict_secret(temp_dir: Path, owner_email: str, friend_email: str):
+    """
+    Update authz to allow friend access to poetry.md but NOT secret_poetry.md.
+
+    Adds:
+    - [/poetry.md] friend = r
+    - [/secret_poetry.md] (owner only, no friend access)
+    """
+    log(f"Updating authz to restrict secret_poetry.md from {friend_email}...")
+
+    authz_file = temp_dir / "authz"
+    content = authz_file.read_text()
+
+    # Add permission rules
+    new_rules = f"""
+# Allow {friend_email} to read poetry.md
+[/poetry.md]
+{owner_email} = rw
+{friend_email} = r
+
+# Restrict secret_poetry.md to owner only
+[/secret_poetry.md]
+{owner_email} = rw
+"""
+
+    updated_content = content.rstrip() + "\n" + new_rules
+    authz_file.write_text(updated_content)
+    log("  Updated local authz")
+
+    # Upload updated authz to server
+    token = get_id_token()
+    response = httpx.put(
+        f"{API_BASE_URL}/files/{owner_email}/authz",
+        content=updated_content.encode(),
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=30,
+    )
+    if response.status_code == 200:
+        log("  Uploaded authz to server")
+    else:
+        raise RuntimeError(f"Failed to upload authz: {response.text}")
+
+
+def upload_file_to_server(owner_email: str, path: str, content: bytes):
+    """Upload a file to the server."""
+    token = get_id_token()
+    response = httpx.put(
+        f"{API_BASE_URL}/files/{owner_email}/{path}",
+        content=content,
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=30,
+    )
+    if response.status_code == 200:
+        log(f"  Uploaded {path} to server")
+    else:
+        raise RuntimeError(f"Failed to upload {path}: {response.text}")
+
+
+def verify_file_access(owner_email: str, accessible_path: str, restricted_path: str):
+    """
+    Verify that current user can access accessible_path but NOT restricted_path.
+    """
+    token = get_id_token()
+    current_email = get_current_email()
+
+    log(f"Verifying file access permissions for {current_email}...")
+
+    # Should be able to read accessible_path
+    log(f"  Testing access to {accessible_path}...")
+    response = httpx.get(
+        f"{API_BASE_URL}/files/{owner_email}/{accessible_path}",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=30,
+    )
+    assert response.status_code == 200, f"Should have access to {accessible_path}, got {response.status_code}: {response.text}"
+    log(f"    ✓ Can read {accessible_path}")
+
+    # Should NOT be able to read restricted_path
+    log(f"  Testing access to {restricted_path}...")
+    response = httpx.get(
+        f"{API_BASE_URL}/files/{owner_email}/{restricted_path}",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=30,
+    )
+    assert response.status_code == 403, f"Should NOT have access to {restricted_path}, got {response.status_code}"
+    log(f"    ✓ Correctly denied access to {restricted_path}")
+
+    log("File access permissions verified!")
+
+
+# Encryption magic bytes
+CCENC_MAGIC = b"CCENC"
+
+
+def verify_file_encrypted_on_server(owner_email: str, path: str):
+    """
+    Verify that a file stored on the server is encrypted.
+
+    Fetches the raw file bytes and checks for CCENC magic header.
+    """
+    token = get_id_token()
+
+    log(f"Verifying {path} is encrypted on server...")
+    response = httpx.get(
+        f"{API_BASE_URL}/files/{owner_email}/{path}",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=30,
+    )
+    assert response.status_code == 200, f"Failed to fetch {path}: {response.status_code}"
+
+    content = response.content
+    assert content[:5] == CCENC_MAGIC, f"File {path} is NOT encrypted! First 5 bytes: {content[:5]}"
+    log(f"  ✓ {path} is encrypted (CCENC header found)")
+
+
+def verify_files_encrypted_on_server(owner_email: str, paths: list[str]):
+    """Verify multiple files are encrypted on the server."""
+    log(f"Verifying encryption for {len(paths)} file(s) on server...")
+    for path in paths:
+        verify_file_encrypted_on_server(owner_email, path)
+    log("All files verified as encrypted!")
 
 
 def sync(account_name: str, temp_dir: Path):
@@ -236,6 +371,13 @@ def check_friend_request(temp_dir: Path, from_email: str):
                 print(f"  {f}")
         else:
             warn("with-claudeconnect-io directory doesn't exist")
+
+
+def sync_files(temp_dir: Path):
+    """Sync files with server."""
+    log("Syncing files with server...")
+    claudeconnect("sync", cwd=temp_dir)
+    log("Sync complete.")
 
 
 def accept_friend_request(temp_dir: Path, from_email: str):
@@ -277,6 +419,43 @@ def verify_transcript(account_name: str, temp_dir: Path, peer_email: str) -> boo
     else:
         error("No transcripts found!")
         return False
+
+
+def verify_transcript_encrypted_on_server(owner_email: str, peer_email: str):
+    """
+    Verify that transcripts for a peer are encrypted on the server.
+
+    Fetches files from claudeconnect/with-{peer}/ and checks they're encrypted.
+    """
+    token = get_id_token()
+    peer_dir_name = f"with-{email_to_repo_name(peer_email)}"
+
+    log(f"Verifying transcript encryption for {owner_email}'s conversations with {peer_email}...")
+
+    # Get manifest to find transcript files
+    response = httpx.get(
+        f"{API_BASE_URL}/manifest/{owner_email}",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=30,
+    )
+    assert response.status_code == 200, f"Failed to get manifest: {response.status_code}"
+
+    manifest = response.json()
+    transcript_paths = [
+        f["path"] for f in manifest.get("files", [])
+        if f["path"].startswith(f"claudeconnect/{peer_dir_name}/")
+        and f["path"].endswith(".md")
+        and "friend-request" not in f["path"]
+    ]
+
+    if not transcript_paths:
+        error(f"No transcripts found on server for {owner_email} with {peer_email}")
+        return
+
+    for path in transcript_paths:
+        verify_file_encrypted_on_server(owner_email, path)
+
+    log(f"All {len(transcript_paths)} transcript(s) verified as encrypted!")
 
 
 def pull_and_verify_poetry(temp_dir: Path, peer_email: str) -> bool:
@@ -338,49 +517,56 @@ def test_full_flow(temp_dirs):
     clean_server()
     clean_client()
 
-    # Account 1 first login
-    login("Account 1", temp1)
-    account1_email = init_account("Account 1", temp1)
-    verify_init_structure("Account 1", temp1)
+    # Alice setup
+    login("Alice", temp1)
+    alice_email = init_account("Alice", temp1)
+    verify_init_structure("Alice", temp1)
 
-    # Account 2 setup
+    # Bob setup
     os.chdir(temp2)
-    login("Account 2", temp2)
-    account2_email = init_account("Account 2", temp2)
-    verify_init_structure("Account 2", temp2)
-    create_poetry_file(temp2)
-    sync("Account 2", temp2)
-    send_friend_request(temp2, account1_email)
+    login("Bob", temp2)
+    bob_email = init_account("Bob", temp2)
+    verify_init_structure("Bob", temp2)
 
-    # Account 1 receives and accepts
+    # Bob creates poetry files and restricts access
+    create_poetry_files(temp2)
+    upload_file_to_server(bob_email, "poetry.md", (temp2 / "poetry.md").read_bytes())
+    upload_file_to_server(bob_email, "secret_poetry.md", (temp2 / "secret_poetry.md").read_bytes())
+    update_authz_restrict_secret(temp2, bob_email, alice_email)
+
+    send_friend_request(temp2, alice_email)
+
+    # Alice receives and accepts
     os.chdir(temp1)
-    login("Account 1", temp1)
-    init_account("Account 1", temp1)
-    sync("Account 1", temp1)
-    check_friend_request(temp1, account2_email)
-    accept_friend_request(temp1, account2_email)
+    login("Alice", temp1)
+    init_account("Alice", temp1)
+    sync_files(temp1)  # Pull friend request from server
+    check_friend_request(temp1, bob_email)
+    accept_friend_request(temp1, bob_email)
+
+    # Alice verifies file access permissions before session
+    verify_file_access(bob_email, "poetry.md", "secret_poetry.md")
 
     # Session
-    start_session(temp1, account2_email, "talk about poetry!")
-    verify_transcript("Account 1", temp1, account2_email)
-    pull_and_verify_poetry(temp1, account2_email)
+    start_session(temp1, bob_email, "talk about poetry!")
+    verify_transcript("Alice", temp1, bob_email)
+    pull_and_verify_poetry(temp1, bob_email)
 
-    # Account 2 verifies
+    # Bob verifies transcript
     os.chdir(temp2)
-    login("Account 2", temp2)
-    init_account("Account 2", temp2)
-    sync("Account 2", temp2)
-    success = verify_transcript("Account 2", temp2, account1_email)
+    login("Bob", temp2)
+    init_account("Bob", temp2)
+    success = verify_transcript("Bob", temp2, alice_email)
 
     # Summary
     print()
     log("==========================================")
     log("Integration test complete!")
     log("==========================================")
-    log(f"Account 1: {account1_email}")
-    log(f"Account 2: {account2_email}")
+    log(f"Alice: {alice_email}")
+    log(f"Bob: {bob_email}")
 
-    assert success, "Transcript did not sync to Account 2"
+    assert success, "Transcript did not sync to Bob"
 
 
 def main():
@@ -393,40 +579,64 @@ def main():
         clean_client()
         temp1, temp2 = create_temp_dirs()
 
-        login("Account 1", temp1)
-        account1_email = init_account("Account 1", temp1)
-        verify_init_structure("Account 1", temp1)
+        # Alice setup
+        login("Alice", temp1)
+        alice_email = init_account("Alice", temp1)
+        verify_init_structure("Alice", temp1)
 
+        # Bob setup
         os.chdir(temp2)
-        login("Account 2", temp2)
-        account2_email = init_account("Account 2", temp2)
-        verify_init_structure("Account 2", temp2)
-        create_poetry_file(temp2)
-        sync("Account 2", temp2)
-        send_friend_request(temp2, account1_email)
+        login("Bob", temp2)
+        bob_email = init_account("Bob", temp2)
+        verify_init_structure("Bob", temp2)
 
+        # Bob creates poetry files and restricts access
+        create_poetry_files(temp2)
+        update_authz_restrict_secret(temp2, bob_email, alice_email)
+
+        # Sync to upload files (with encryption)
+        sync_files(temp2)
+
+        # Verify files are encrypted on server
+        verify_files_encrypted_on_server(bob_email, ["poetry.md", "secret_poetry.md"])
+
+        send_friend_request(temp2, alice_email)
+
+        # Alice receives and accepts
         os.chdir(temp1)
-        login("Account 1", temp1)
-        init_account("Account 1", temp1)
-        sync("Account 1", temp1)
-        check_friend_request(temp1, account2_email)
-        accept_friend_request(temp1, account2_email)
+        login("Alice", temp1)
+        init_account("Alice", temp1)
+        sync_files(temp1)  # Pull friend request from server
+        check_friend_request(temp1, bob_email)
+        accept_friend_request(temp1, bob_email)
 
-        start_session(temp1, account2_email, "poetry")
-        verify_transcript("Account 1", temp1, account2_email)
-        pull_and_verify_poetry(temp1, account2_email)
+        # Alice verifies file access permissions
+        verify_file_access(bob_email, "poetry.md", "secret_poetry.md")
 
+        # Session
+        start_session(temp1, bob_email, "poetry")
+        verify_transcript("Alice", temp1, bob_email)
+
+        # Verify Alice's transcript is encrypted on server
+        verify_transcript_encrypted_on_server(alice_email, bob_email)
+
+        pull_and_verify_poetry(temp1, bob_email)
+
+        # Bob verifies transcript
         os.chdir(temp2)
-        login("Account 2", temp2)
-        init_account("Account 2", temp2)
-        sync("Account 2", temp2)
-        verify_transcript("Account 2", temp2, account1_email)
+        login("Bob", temp2)
+        init_account("Bob", temp2)
+        sync_files(temp2)  # Pull transcript that Alice uploaded to Bob's repo
+        verify_transcript("Bob", temp2, alice_email)
+
+        # Verify Bob's copy of transcript is also encrypted on server
+        verify_transcript_encrypted_on_server(bob_email, alice_email)
 
         log("==========================================")
         log("Integration test complete!")
         log("==========================================")
-        log(f"Account 1: {account1_email}")
-        log(f"Account 2: {account2_email}")
+        log(f"Alice: {alice_email}")
+        log(f"Bob: {bob_email}")
 
     except Exception as e:
         error(f"Test failed: {e}")
