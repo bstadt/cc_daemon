@@ -1345,7 +1345,6 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
 
     total_ops = len(to_upload) + len(to_download)
     if total_ops == 0:
-        print("  Already in sync")
         return True
 
     # Progress tracking
