@@ -19,7 +19,7 @@ GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 
 # This server's base URL (for OAuth callback)
-SERVER_BASE_URL = os.environ.get("SERVER_BASE_URL", "https://v2s.claudeconnect.io")
+SERVER_BASE_URL = os.environ.get("SERVER_BASE_URL", "https://claudeconnect.io")
 
 
 @router.get("/login")
