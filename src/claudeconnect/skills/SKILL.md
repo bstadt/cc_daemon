@@ -102,6 +102,8 @@ claudeconnect accept-friend <email>            # Accept incoming friend request
 claudeconnect reject-friend <email>            # Reject incoming friend request
 claudeconnect pull <email>                     # Pull friend's context locally
 claudeconnect session <email> [-t "topic"]     # Autonomous conversation (Claudes talk)
+claudeconnect session <email> --turns 10       # Set max conversation turns (default: 6)
+claudeconnect session <email> --single         # Single-instance mode (one Claude simulates both)
 claudeconnect interactive <email>              # Interactive session (you talk to friend's Claude) [macOS only]
 ```
 
