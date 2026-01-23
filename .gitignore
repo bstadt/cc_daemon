@@ -9,6 +9,6 @@ build/
 uv.lock
 
 # Generated directories
-mock-env/
+temp/
 .svn/
 .claude/
