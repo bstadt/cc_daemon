@@ -128,6 +128,7 @@ from .config import (
     SERVER_URL, API_BASE_URL,
 )
 from .scanner import scan_directory
+# SVN imports: email_to_repo_name is used for naming; others are deprecated (used by legacy commands)
 from .svn_ops import SvnClient, SvnError, email_to_repo_name, repo_url_for_email
 from .sync import SyncLoop, sync_once
 
@@ -797,20 +798,18 @@ def install_skill() -> bool:
 
 def verify_init_structure(context_dir: Path, email: str) -> list[str]:
     """
-    Verify that init created all expected directories and files per system2.md.
+    Verify that init created all expected directories and files.
 
-    Shadow directory architecture:
+    Shadow directory architecture (HTTP sync v2):
         ~/.claude-connect/svn-staging/<email>/
-        ├── .svn/                           # SVN working copy (encrypted files)
-        ├── authz                           # Access control file
+        ├── authz                           # Access control file (encrypted copy)
         └── claudeconnect/
             └── with-claudeconnect-io/      # System messages folder
 
         context_dir/                        # User's plaintext directory
-        ├── authz                           # Access control file (copied from shadow)
+        ├── authz                           # Access control file
         └── claudeconnect/
             └── with-claudeconnect-io/      # System messages folder
-        (NO .svn/ folder!)
 
     Args:
         context_dir: The context directory to verify
@@ -823,15 +822,9 @@ def verify_init_structure(context_dir: Path, email: str) -> list[str]:
     errors = []
     shadow_dir = get_shadow_dir(email)
 
-    # Check shadow directory has SVN working copy
-    svn_dir = shadow_dir / ".svn"
-    if not svn_dir.is_dir():
-        errors.append(f"Shadow directory missing .svn - not initialized: {shadow_dir}")
-
-    # Check context directory does NOT have .svn (shadow architecture)
-    context_svn = context_dir / ".svn"
-    if context_svn.exists():
-        errors.append("Context directory has .svn/ - should use shadow directory instead")
+    # Verify shadow directory exists
+    if not shadow_dir.is_dir():
+        errors.append(f"Shadow directory missing: {shadow_dir}")
 
     # Check claudeconnect directory structure in context dir
     cc_dir = context_dir / "claudeconnect"
@@ -1079,20 +1072,20 @@ def status():
 
     if config.context_dir:
         print(f"Context directory: {config.context_dir}")
+        context_dir = Path(config.context_dir)
+        shadow_dir = get_shadow_dir(tokens.email)
 
-        # Check if it's a valid working copy
-        svn_token = get_svn_token(tokens.id_token)
-        if svn_token:
-            svn = SvnClient(
-                Path(config.context_dir),
-                repo_url_for_email(tokens.email),
-                svn_token,
-            )
-            info = svn.info()
-            if info:
-                print(f"SVN revision: {info['revision']}")
-            else:
-                print("SVN status: Not initialized")
+        # Check initialization status
+        if shadow_dir.is_dir() and (context_dir / "claudeconnect").is_dir():
+            print("Sync: Initialized (HTTP)")
+        else:
+            print("Sync: Not initialized")
+
+        # Show encryption status
+        if config.encryption_enabled:
+            print("Encryption: Enabled")
+        else:
+            print("Encryption: Disabled")
     else:
         print("Context directory: Not set")
 

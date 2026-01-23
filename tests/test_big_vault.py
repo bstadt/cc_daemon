@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-ClaudeConnect Big Vault Integration Test
+ClaudeConnect Big Vault Integration Test (HTTP Sync)
 
-Tests syncing large document collections:
-1. Account 2 creates 2000 markdown files BEFORE init
-2. Account 2 initializes and syncs (tests batch upload during init)
+Tests syncing large document collections using HTTP-based sync:
+1. Bob creates 500 markdown files BEFORE init
+2. Bob initializes and syncs (tests batch upload)
 3. Friend request flow
-4. Account 1 pulls all 2000 files
+4. Alice pulls all 500 files
 5. Conversation about the vault
 
+Includes detailed timing information for all operations.
+
 Run with: pytest tests/test_big_vault.py -s -m integration
+Or standalone: python tests/test_big_vault.py
 """
 
 from __future__ import annotations
@@ -20,14 +23,16 @@ import subprocess
 import tempfile
 import shutil
 import time
+import httpx
 from pathlib import Path
+from dataclasses import dataclass, field
 from typing import Optional
 
 import pytest
 
-# Server config
-SERVER = "v2.claudeconnect.io"
-SSH_KEY = Path.home() / ".ssh" / "calco_key.pem"
+from conf import ALICE_EMAIL, BOB_EMAIL, API_BASE_URL
+
+# Config directories
 CC_CONFIG_DIR = Path.home() / ".claude-connect"
 PEERS_DIR = CC_CONFIG_DIR / "peers"
 
@@ -36,11 +41,55 @@ NUM_VAULT_FILES = 500
 BORGES_LINE = "The universe (which others call the Library) is composed of an indefinite, perhaps infinite number of hexagonal galleries"
 
 
+@dataclass
+class TimingStats:
+    """Track timing for various operations."""
+    vault_creation: float = 0.0
+    account1_init: float = 0.0
+    account2_init: float = 0.0
+    account2_sync: float = 0.0
+    friend_request: float = 0.0
+    account1_sync: float = 0.0
+    accept_friend: float = 0.0
+    pull_vault: float = 0.0
+    session: float = 0.0
+    total: float = 0.0
+
+    # File stats
+    files_uploaded: int = 0
+    files_downloaded: int = 0
+
+    def print_summary(self):
+        """Print timing summary."""
+        print("\n" + "=" * 50)
+        print("TIMING SUMMARY")
+        print("=" * 50)
+        print(f"  Vault creation ({NUM_VAULT_FILES} files): {self.vault_creation:.1f}s")
+        print(f"  Alice init:                  {self.account1_init:.1f}s")
+        print(f"  Bob init:                  {self.account2_init:.1f}s")
+        print(f"  Bob sync (upload):         {self.account2_sync:.1f}s")
+        if self.account2_sync > 0:
+            rate = NUM_VAULT_FILES / self.account2_sync
+            print(f"    Upload rate:                   {rate:.1f} files/sec")
+        print(f"  Friend request:                  {self.friend_request:.1f}s")
+        print(f"  Alice sync:                  {self.account1_sync:.1f}s")
+        print(f"  Accept friend:                   {self.accept_friend:.1f}s")
+        print(f"  Pull vault (download):           {self.pull_vault:.1f}s")
+        if self.pull_vault > 0:
+            rate = NUM_VAULT_FILES / self.pull_vault
+            print(f"    Download rate:                 {rate:.1f} files/sec")
+        print(f"  Session:                         {self.session:.1f}s")
+        print("-" * 50)
+        print(f"  TOTAL:                           {self.total:.1f}s")
+        print("=" * 50)
+
+
 class Colors:
     GREEN = "\033[0;32m"
     YELLOW = "\033[1;33m"
     RED = "\033[0;31m"
     CYAN = "\033[0;36m"
+    MAGENTA = "\033[0;35m"
     RESET = "\033[0m"
 
 
@@ -60,6 +109,10 @@ def prompt(msg: str):
     print(f"{Colors.YELLOW}[ACTION REQUIRED]{Colors.RESET} {msg}")
 
 
+def timing(msg: str, seconds: float):
+    print(f"{Colors.MAGENTA}[TIMING]{Colors.RESET} {msg}: {seconds:.1f}s")
+
+
 def progress(current: int, total: int, msg: str):
     print(f"{Colors.CYAN}[{current}/{total}]{Colors.RESET} {msg}")
 
@@ -73,12 +126,6 @@ def run(cmd: list[str], cwd: Path | None = None, check: bool = True, input_text:
         error(f"stderr: {result.stderr}")
         raise RuntimeError(f"Command failed: {' '.join(cmd)}")
     return result
-
-
-def ssh_server(cmd: str) -> str:
-    """Run command on server via SSH."""
-    result = run(["ssh", "-i", str(SSH_KEY), f"ubuntu@{SERVER}", cmd])
-    return result.stdout.strip()
 
 
 def claudeconnect(*args, cwd: Path | None = None, input_text: str | None = None, timeout: int = 600) -> subprocess.CompletedProcess:
@@ -106,6 +153,13 @@ def get_current_email() -> str:
         return json.load(f)["email"]
 
 
+def get_id_token() -> str:
+    """Get ID token for API calls."""
+    tokens_file = CC_CONFIG_DIR / "tokens.json"
+    with open(tokens_file) as f:
+        return json.load(f)["id_token"]
+
+
 def email_to_repo_name(email: str) -> str:
     """Convert email to repo name format."""
     return email.replace("@", "-").replace(".", "-").lower()
@@ -118,20 +172,48 @@ def wait_for_user(msg: str):
 
 
 def clean_server():
-    """Remove test account repos on server."""
-    log("Cleaning test account repos...")
-    test_repos = [
-        "brandonduderstadt-gmail-com",
-        "thisismysignupacct-gmail-com",
-    ]
-    for repo in test_repos:
-        ssh_server(f"sudo rm -rf /var/svn/repos/{repo}")
-    log("Test account repos cleaned.")
+    """Remove test account data on server via HTTP API."""
+    log("Cleaning test account data on server...")
+
+    # We'll clean by deleting all files for test accounts
+    test_emails = [ALICE_EMAIL, BOB_EMAIL]
+
+    try:
+        tokens_file = CC_CONFIG_DIR / "tokens.json"
+        if tokens_file.exists():
+            token = get_id_token()
+            headers = {"Authorization": f"Bearer {token}"}
+
+            for email in test_emails:
+                # Get manifest and delete all files
+                try:
+                    response = httpx.get(
+                        f"{API_BASE_URL}/manifest/{email}",
+                        headers=headers,
+                        timeout=30,
+                    )
+                    if response.status_code == 200:
+                        manifest = response.json()
+                        files = manifest.get("files", [])
+                        if files:
+                            log(f"  Deleting {len(files)} files for {email}...")
+                            for f in files:
+                                httpx.delete(
+                                    f"{API_BASE_URL}/files/{email}/{f['path']}",
+                                    headers=headers,
+                                    timeout=30,
+                                )
+                except Exception as e:
+                    warn(f"  Could not clean {email}: {e}")
+    except Exception as e:
+        warn(f"Could not clean server (may not be logged in yet): {e}")
+
+    log("Server cleanup complete.")
 
 
 def clean_client():
-    """Remove local ~/.claude-connect."""
-    log("Removing local ~/.claude-connect...")
+    """Remove local ~/.config/claudeconnect."""
+    log("Removing local claudeconnect config...")
     if CC_CONFIG_DIR.exists():
         shutil.rmtree(CC_CONFIG_DIR)
     log("Local config removed.")
@@ -140,19 +222,18 @@ def clean_client():
 def create_temp_dirs() -> tuple[Path, Path]:
     """Create temp directories for both accounts."""
     log("Creating temp directories...")
-    temp1 = Path(tempfile.mkdtemp(prefix="cc_test_account1_"))
-    temp2 = Path(tempfile.mkdtemp(prefix="cc_test_account2_"))
-    log(f"Created {temp1} (Account 1)")
-    log(f"Created {temp2} (Account 2)")
+    temp1 = Path(tempfile.mkdtemp(prefix="cc_bigvault_alice_"))
+    temp2 = Path(tempfile.mkdtemp(prefix="cc_bigvault_bob_"))
+    log(f"Created {temp1} (Alice)")
+    log(f"Created {temp2} (Bob)")
     return temp1, temp2
 
 
-def create_vault_files(temp_dir: Path, num_files: int = NUM_VAULT_FILES):
+def create_vault_files(temp_dir: Path, num_files: int = NUM_VAULT_FILES) -> float:
     """
     Create a large number of markdown files BEFORE initialization.
 
-    Each file contains the Borges line + the file number.
-    Files are organized in a 'vault' subdirectory.
+    Returns time taken in seconds.
     """
     log(f"Creating {num_files} vault files...")
     vault_dir = temp_dir / "vault"
@@ -165,18 +246,20 @@ def create_vault_files(temp_dir: Path, num_files: int = NUM_VAULT_FILES):
         content = f"# File {i}\n\n{BORGES_LINE}\n\nFile number: {i}\n"
         file_path.write_text(content)
 
-        # Progress every 500 files
-        if i % 500 == 0:
+        # Progress every 100 files
+        if i % 100 == 0:
             elapsed = time.time() - start_time
             progress(i, num_files, f"Created {i} files ({elapsed:.1f}s elapsed)")
 
     elapsed = time.time() - start_time
-    log(f"Created {num_files} vault files in {elapsed:.1f}s")
+    timing(f"Created {num_files} vault files", elapsed)
 
     # Verify
     actual_count = len(list(vault_dir.glob("*.md")))
     assert actual_count == num_files, f"Expected {num_files} files, found {actual_count}"
     log(f"Verified: {actual_count} files in vault/")
+
+    return elapsed
 
 
 def login(account_name: str, temp_dir: Path):
@@ -187,12 +270,12 @@ def login(account_name: str, temp_dir: Path):
     claudeconnect("login", cwd=temp_dir)
 
 
-def init_account(account_name: str, temp_dir: Path) -> str:
-    """Initialize an account and return email."""
-    log(f"Initializing {account_name}...")
+def init_account(account_name: str, temp_dir: Path, expected_email: str) -> float:
+    """Initialize an account. Returns time_taken."""
+    log(f"Initializing {account_name} ({expected_email})...")
     wait_for_user(f"{account_name} logged in. Ready to init.")
-    # Run with live output to show progress during file scanning
-    # Pass "y" via stdin to confirm switching context directory if prompted
+
+    start_time = time.time()
     result = subprocess.run(
         ["claudeconnect", "init"],
         cwd=temp_dir,
@@ -200,77 +283,84 @@ def init_account(account_name: str, temp_dir: Path) -> str:
         text=True,
         timeout=1200,
     )
+    elapsed = time.time() - start_time
+
     if result.returncode != 0:
         raise RuntimeError(f"Init failed for {account_name}")
+
     email = get_current_email()
-    log(f"{account_name} initialized: {email}")
-    return email
+    if email != expected_email:
+        warn(f"Expected {expected_email}, got {email}")
+    timing(f"{account_name} initialized", elapsed)
+    return elapsed
 
 
-def sync(account_name: str, temp_dir: Path, timeout: int = 600):
-    """Sync an account with extended timeout and live progress output."""
+def sync_files(account_name: str, temp_dir: Path, timeout: int = 1200) -> float:
+    """Sync files with server. Returns time taken."""
     log(f"Syncing {account_name}...")
+
     start_time = time.time()
-    # Run with live output (not captured) to show progress
     result = subprocess.run(
         ["claudeconnect", "sync"],
         cwd=temp_dir,
         timeout=timeout,
     )
     elapsed = time.time() - start_time
+
     if result.returncode != 0:
         raise RuntimeError(f"Sync failed for {account_name}")
-    log(f"{account_name} synced in {elapsed:.1f}s")
+
+    timing(f"{account_name} sync completed", elapsed)
+    return elapsed
 
 
-def send_friend_request(temp_dir: Path, to_email: str):
-    """Send friend request."""
+def send_friend_request(temp_dir: Path, to_email: str) -> float:
+    """Send friend request. Returns time taken."""
     log(f"Sending friend request to {to_email}...")
-    claudeconnect("friend", to_email, cwd=temp_dir)
-    log(f"Friend request sent.")
 
-
-def accept_friend_request(temp_dir: Path, from_email: str):
-    """Accept friend request."""
-    log(f"Accepting friend request from {from_email}...")
-    claudeconnect("accept-friend", from_email, cwd=temp_dir)
-    log("Friend request accepted.")
-
-
-def start_session(temp_dir: Path, peer_email: str, topic: str):
-    """Start a session with peer (1 turn, output streamed live)."""
-    log(f"Starting session about {topic}...")
-    # Run session with live output (not captured)
-    subprocess.run(
-        ["claudeconnect", "session", peer_email, "-t", topic, "--turns", "1"],
-        cwd=temp_dir,
-    )
-
-
-def pull_and_verify_vault(temp_dir: Path, peer_email: str, expected_files: int = NUM_VAULT_FILES) -> bool:
-    """
-    Pull peer's context and verify vault files.
-
-    Returns:
-        True if vault files were successfully pulled and verified.
-    """
-    log(f"Pulling {peer_email}'s context (expecting {expected_files} vault files)...")
     start_time = time.time()
+    claudeconnect("friend", to_email, cwd=temp_dir)
+    elapsed = time.time() - start_time
 
-    # Pull with live output to show progress
+    timing("Friend request sent", elapsed)
+    return elapsed
+
+
+def accept_friend_request(temp_dir: Path, from_email: str) -> float:
+    """Accept friend request. Returns time taken."""
+    log(f"Accepting friend request from {from_email}...")
+
+    start_time = time.time()
+    claudeconnect("accept-friend", from_email, cwd=temp_dir)
+    elapsed = time.time() - start_time
+
+    timing("Friend request accepted", elapsed)
+    return elapsed
+
+
+def pull_peer_context(temp_dir: Path, peer_email: str, timeout: int = 1200) -> float:
+    """Pull peer's context. Returns time taken."""
+    log(f"Pulling {peer_email}'s context...")
+
+    start_time = time.time()
     result = subprocess.run(
         ["claudeconnect", "pull", peer_email],
         cwd=temp_dir,
-        timeout=1200,
+        timeout=timeout,
     )
-    if result.returncode != 0:
-        error(f"Pull failed")
-        return False
-
     elapsed = time.time() - start_time
-    log(f"Pull completed in {elapsed:.1f}s")
 
-    # Verify vault files
+    if result.returncode != 0:
+        raise RuntimeError(f"Pull failed for {peer_email}")
+
+    timing(f"Pull {peer_email} completed", elapsed)
+    return elapsed
+
+
+def verify_vault_files(peer_email: str, expected_files: int = NUM_VAULT_FILES) -> bool:
+    """Verify vault files were pulled correctly."""
+    log(f"Verifying {expected_files} vault files...")
+
     repo_name = email_to_repo_name(peer_email)
     peer_vault = PEERS_DIR / repo_name / "vault"
 
@@ -288,8 +378,8 @@ def pull_and_verify_vault(temp_dir: Path, peer_email: str, expected_files: int =
         error(f"Expected {expected_files} files, found {actual_count}")
         return False
 
-    # Verify content of a few random files
-    test_files = [1, 500, 1000, 1500, 2000]
+    # Verify content of sample files
+    test_files = [1, 100, 250, 400, 500]
     for file_num in test_files:
         if file_num > expected_files:
             continue
@@ -314,9 +404,24 @@ def pull_and_verify_vault(temp_dir: Path, peer_email: str, expected_files: int =
     return True
 
 
+def start_session(temp_dir: Path, peer_email: str, topic: str) -> float:
+    """Start a session with peer. Returns time taken."""
+    log(f"Starting session about {topic}...")
+
+    start_time = time.time()
+    subprocess.run(
+        ["claudeconnect", "session", peer_email, "-t", topic, "--turns", "1"],
+        cwd=temp_dir,
+    )
+    elapsed = time.time() - start_time
+
+    timing("Session completed", elapsed)
+    return elapsed
+
+
 def verify_transcript(account_name: str, temp_dir: Path, peer_email: str) -> bool:
     """Verify transcript exists in with-<peer> directory."""
-    log(f"Verifying transcript in {account_name}...")
+    log(f"Verifying transcript for {account_name}...")
     peer_dir_name = f"with-{email_to_repo_name(peer_email)}"
     conv_dir = temp_dir / "claudeconnect" / peer_dir_name
 
@@ -324,10 +429,11 @@ def verify_transcript(account_name: str, temp_dir: Path, peer_email: str) -> boo
         error(f"Peer directory not found: {conv_dir}")
         return False
 
-    # Look for transcript files (exclude friend-request files)
-    transcripts = [f for f in conv_dir.glob("*.md") if "friend-request" not in f.name]
+    # Look for transcript files (exclude README and friend-request files)
+    transcripts = [f for f in conv_dir.glob("*.md")
+                   if "friend-request" not in f.name and f.name != "README.md"]
     if transcripts:
-        log(f"Found {len(transcripts)} transcript(s)")
+        log(f"✓ Found {len(transcripts)} transcript(s)")
         return True
     else:
         error("No transcripts found!")
@@ -337,10 +443,10 @@ def verify_transcript(account_name: str, temp_dir: Path, peer_email: str) -> boo
 @pytest.fixture
 def temp_dirs():
     """Create and cleanup temp directories for both accounts."""
-    temp1 = Path(tempfile.mkdtemp(prefix="cc_test_account1_"))
-    temp2 = Path(tempfile.mkdtemp(prefix="cc_test_account2_"))
-    log(f"Created {temp1} (Account 1)")
-    log(f"Created {temp2} (Account 2)")
+    temp1 = Path(tempfile.mkdtemp(prefix="cc_bigvault_alice_"))
+    temp2 = Path(tempfile.mkdtemp(prefix="cc_bigvault_bob_"))
+    log(f"Created {temp1} (Alice)")
+    log(f"Created {temp2} (Bob)")
 
     yield temp1, temp2
 
@@ -356,93 +462,99 @@ def temp_dirs():
 @pytest.mark.integration
 def test_big_vault(temp_dirs):
     """
-    Big vault integration test for ClaudeConnect.
+    Big vault integration test for ClaudeConnect (HTTP sync).
 
-    Tests syncing a large collection of files (2000 markdown files):
-    1. Account 2 creates 2000 files BEFORE init
-    2. Account 2 initializes (should detect and sync all files)
-    3. Account 2 syncs to upload all files
-    4. Friend request flow
-    5. Account 1 pulls all 2000 files
-    6. Verify content decryption
-    7. Start conversation about the vault
+    Tests syncing a large collection of files:
+    1. Bob creates files BEFORE init
+    2. Bob initializes and syncs (batch upload)
+    3. Friend request flow
+    4. Alice pulls all files
+    5. Verify content decryption
+    6. Start conversation about the vault
 
     Run with: pytest tests/test_big_vault.py -s -m integration
     """
     temp1, temp2 = temp_dirs
+    stats = TimingStats()
+    total_start = time.time()
 
     # Setup
     clean_server()
     clean_client()
 
     # ==========================================
-    # Account 1: Initial setup
+    # Alice: Initial setup
     # ==========================================
     log("")
-    log("==========================================")
-    log("Account 1: Initial setup")
-    log("==========================================")
+    log("=" * 50)
+    log("Alice: Initial setup")
+    log("=" * 50)
 
-    login("Account 1", temp1)
-    account1_email = init_account("Account 1", temp1)
+    login("Alice", temp1)
+    stats.account1_init = init_account("Alice", temp1, ALICE_EMAIL)
 
     # ==========================================
-    # Account 2: Create vault BEFORE init
+    # Bob: Create vault BEFORE init
     # ==========================================
     log("")
-    log("==========================================")
-    log("Account 2: Creating vault files BEFORE init")
-    log("==========================================")
+    log("=" * 50)
+    log("Bob: Creating vault files BEFORE init")
+    log("=" * 50)
 
     os.chdir(temp2)
+    stats.vault_creation = create_vault_files(temp2, NUM_VAULT_FILES)
 
-    # Create 2000 files BEFORE login/init
-    create_vault_files(temp2, NUM_VAULT_FILES)
-
-    # Now login and init (should detect the files)
-    login("Account 2", temp2)
-    account2_email = init_account("Account 2", temp2)
+    # Login and init
+    login("Bob", temp2)
+    stats.account2_init = init_account("Bob", temp2, BOB_EMAIL)
 
     # Sync to upload all files
-    log("Syncing vault files to server...")
-    sync("Account 2", temp2, timeout=1200)
+    log("")
+    log("=" * 50)
+    log("Bob: Uploading vault to server")
+    log("=" * 50)
+    stats.account2_sync = sync_files("Bob", temp2, timeout=1200)
 
     # Send friend request
-    send_friend_request(temp2, account1_email)
+    stats.friend_request = send_friend_request(temp2, ALICE_EMAIL)
 
     # ==========================================
-    # Account 1: Accept and pull vault
+    # Alice: Accept and pull vault
     # ==========================================
     log("")
-    log("==========================================")
-    log("Account 1: Accept friend request and pull vault")
-    log("==========================================")
+    log("=" * 50)
+    log("Alice: Accept friend request and pull vault")
+    log("=" * 50)
 
     os.chdir(temp1)
-    login("Account 1", temp1)
-    init_account("Account 1", temp1)
-    sync("Account 1", temp1)
-    accept_friend_request(temp1, account2_email)
+    login("Alice", temp1)
+    init_account("Alice", temp1, ALICE_EMAIL)
+    stats.account1_sync = sync_files("Alice", temp1)
+    stats.accept_friend = accept_friend_request(temp1, BOB_EMAIL)
 
-    # Pull and verify all 2000 files
-    vault_success = pull_and_verify_vault(temp1, account2_email, NUM_VAULT_FILES)
+    # Pull and verify all files
+    stats.pull_vault = pull_peer_context(temp1, BOB_EMAIL, timeout=1200)
+    vault_success = verify_vault_files(BOB_EMAIL, NUM_VAULT_FILES)
     assert vault_success, f"Failed to pull and verify {NUM_VAULT_FILES} vault files"
 
-    # Start conversation about the vault
-    start_session(temp1, account2_email, "discuss the Library of Babel vault")
-    transcript_success = verify_transcript("Account 1", temp1, account2_email)
+    # Start conversation
+    stats.session = start_session(temp1, BOB_EMAIL, "discuss the Library of Babel vault")
+    transcript_success = verify_transcript("Alice", temp1, BOB_EMAIL)
 
     # ==========================================
     # Summary
     # ==========================================
+    stats.total = time.time() - total_start
+    stats.print_summary()
+
     print()
-    log("==========================================")
+    log("=" * 50)
     log("Big vault test complete!")
-    log("==========================================")
-    log(f"Account 1: {account1_email}")
-    log(f"Account 2: {account2_email}")
-    log(f"Vault files created: {NUM_VAULT_FILES}")
-    log(f"Vault pull verified: {vault_success}")
+    log("=" * 50)
+    log(f"Alice: {ALICE_EMAIL}")
+    log(f"Bob: {BOB_EMAIL}")
+    log(f"Vault files: {NUM_VAULT_FILES}")
+    log(f"Vault verified: {vault_success}")
     log(f"Transcript created: {transcript_success}")
 
     assert transcript_success, "Transcript was not created"
@@ -452,44 +564,58 @@ def main():
     """Run as standalone script."""
     temp1 = None
     temp2 = None
+    stats = TimingStats()
+    total_start = time.time()
 
     try:
         clean_server()
         clean_client()
         temp1, temp2 = create_temp_dirs()
 
-        # Account 1 setup
-        login("Account 1", temp1)
-        account1_email = init_account("Account 1", temp1)
+        # Alice setup
+        login("Alice", temp1)
+        stats.account1_init = init_account("Alice", temp1, ALICE_EMAIL)
 
-        # Account 2: Create vault BEFORE init
+        # Bob: Create vault BEFORE init
         os.chdir(temp2)
-        create_vault_files(temp2, NUM_VAULT_FILES)
+        stats.vault_creation = create_vault_files(temp2, NUM_VAULT_FILES)
 
-        login("Account 2", temp2)
-        account2_email = init_account("Account 2", temp2)
-        sync("Account 2", temp2, timeout=1200)
-        send_friend_request(temp2, account1_email)
+        login("Bob", temp2)
+        stats.account2_init = init_account("Bob", temp2, BOB_EMAIL)
 
-        # Account 1: Accept and pull
+        log("")
+        log("=" * 50)
+        log("Bob: Uploading vault to server")
+        log("=" * 50)
+        stats.account2_sync = sync_files("Bob", temp2, timeout=1200)
+
+        stats.friend_request = send_friend_request(temp2, ALICE_EMAIL)
+
+        # Alice: Accept and pull
         os.chdir(temp1)
-        login("Account 1", temp1)
-        init_account("Account 1", temp1)
-        sync("Account 1", temp1)
-        accept_friend_request(temp1, account2_email)
+        login("Alice", temp1)
+        init_account("Alice", temp1, ALICE_EMAIL)
+        stats.account1_sync = sync_files("Alice", temp1)
+        stats.accept_friend = accept_friend_request(temp1, BOB_EMAIL)
 
-        vault_success = pull_and_verify_vault(temp1, account2_email, NUM_VAULT_FILES)
+        stats.pull_vault = pull_peer_context(temp1, BOB_EMAIL, timeout=1200)
+        vault_success = verify_vault_files(BOB_EMAIL, NUM_VAULT_FILES)
 
-        start_session(temp1, account2_email, "discuss the Library of Babel vault")
-        verify_transcript("Account 1", temp1, account2_email)
+        stats.session = start_session(temp1, BOB_EMAIL, "discuss the Library of Babel vault")
+        transcript_success = verify_transcript("Alice", temp1, BOB_EMAIL)
 
-        log("==========================================")
+        # Summary
+        stats.total = time.time() - total_start
+        stats.print_summary()
+
+        log("=" * 50)
         log("Big vault test complete!")
-        log("==========================================")
-        log(f"Account 1: {account1_email}")
-        log(f"Account 2: {account2_email}")
+        log("=" * 50)
+        log(f"Alice: {ALICE_EMAIL}")
+        log(f"Bob: {BOB_EMAIL}")
         log(f"Vault files: {NUM_VAULT_FILES}")
         log(f"Vault verified: {vault_success}")
+        log(f"Transcript created: {transcript_success}")
 
     except Exception as e:
         error(f"Test failed: {e}")
