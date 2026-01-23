@@ -18,8 +18,7 @@ from uuid import uuid4
 
 import httpx
 
-from .config import get_config, get_tokens, Tokens, get_shadow_dir, SERVER_URL, API_BASE_URL
-from .svn_ops import email_to_repo_name, repo_url_for_email
+from .config import get_config, get_tokens, Tokens, get_shadow_dir, SERVER_URL, API_BASE_URL, email_to_repo_name
 
 # Encryption imports (optional)
 try:
@@ -40,21 +39,6 @@ TRANSCRIPTS_DIR = Path.home() / ".claude-connect" / "transcripts"
 
 # Cache directory for peer contexts
 PEERS_DIR = Path.home() / ".claude-connect" / "peers"
-
-
-def get_svn_token(id_token: str) -> str | None:
-    """Exchange Google JWT for SVN Fernet token."""
-    try:
-        response = httpx.post(
-            f"{SERVER_URL}/api/svn-token",
-            headers={"Authorization": f"Bearer {id_token}"},
-            timeout=30,
-        )
-        if response.status_code != 200:
-            return None
-        return response.json().get("svn_token")
-    except Exception:
-        return None
 
 
 def lookup_repo(email: str) -> str | None:
@@ -91,7 +75,7 @@ def decrypt_peer_context(peer_dir: Path, peer_email: str) -> int:
         return 0
 
     # First, collect all files to decrypt for progress tracking
-    md_files = [f for f in peer_dir.rglob("*.md") if ".svn" not in f.parts]
+    md_files = list(peer_dir.rglob("*.md"))
     total_files = len(md_files)
 
     # Only show progress for large file sets
@@ -221,16 +205,6 @@ def pull_peer_context_http(peer_email: str, id_token: str, max_workers: int = 10
         print(f"  Decrypted {decrypted} files")
 
     return peer_dir
-
-
-def pull_peer_context(peer_email: str, svn_token: str, our_email: str) -> Path | None:
-    """Legacy wrapper - redirects to HTTP implementation."""
-    # Get fresh tokens for HTTP API
-    tokens = get_tokens()
-    if not tokens:
-        print("  No valid tokens")
-        return None
-    return pull_peer_context_http(peer_email, tokens.id_token)
 
 
 def upload_file_http(email: str, path: str, content: bytes, id_token: str, encrypt_for: str | None = None, use_friend_key: bool = False) -> bool:

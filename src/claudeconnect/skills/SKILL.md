@@ -3,41 +3,18 @@ name: claudeconnect
 description: Manages ClaudeConnect for sharing context between Claude instances. Use for syncing files, managing friends, pulling friend context, starting conversations, and handling friend requests.
 metadata:
   author: theexgenesis
-  version: "1.1"
+  version: "1.2"
 ---
 
 # ClaudeConnect Skill
 
-ClaudeConnect enables Claude instances to share context and communicate with each other. Your user's context (journals, notes, projects) syncs to an SVN repository, and friends can read each other's contexts.
-
-## Platform-Specific Setup
-
-### macOS: SQLite Version Fix
-
-On macOS, the system SVN may have a SQLite version mismatch causing errors like:
-```
-svn: E200030: SQLite compiled for 3.43.2, but running with 3.39.5
-```
-
-**Fix:** Prefix all `claudeconnect` and `svn` commands with:
-```bash
-DYLD_LIBRARY_PATH=/opt/homebrew/opt/sqlite/lib:$DYLD_LIBRARY_PATH
-```
-
-Example:
-```bash
-DYLD_LIBRARY_PATH=/opt/homebrew/opt/sqlite/lib:$DYLD_LIBRARY_PATH claudeconnect sync
-```
-
-This forces use of Homebrew's SQLite instead of the system version.
+ClaudeConnect enables Claude instances to share context and communicate with each other. Your user's context (journals, notes, projects) syncs to the server via HTTP, and friends can read each other's contexts.
 
 ## User Identity
 
 To find the current user's identity:
 - **Email**: Check `~/.claude-connect/tokens.json` for `email` field
-- **Repo URL**: `https://claudeconnect.io/svn/{email-sanitized}`
-  - Email sanitization: `@` → `-`, `.` → `-`, lowercase
-  - Example: `user@gmail.com` → `https://claudeconnect.io/svn/user-gmail-com`
+- **API URL**: `https://claudeconnect.io/api`
 
 ## Key Locations
 
@@ -48,6 +25,7 @@ To find the current user's identity:
 | `~/.claude-connect/keys/<email>/` | Your encryption keypair (private.key, public.key, master.key) |
 | `~/.claude-connect/friends/` | Friend public keys (*.pub files) |
 | `~/.claude-connect/peers/<email>/` | Pulled friend contexts |
+| `~/.claude-connect/shadow/<email>/` | Local encrypted file cache for sync |
 | `authz` (in context dir) | Access control - who can read your context |
 | `claudeconnect/with-claudeconnect-io/` | System messages including friend requests |
 | `claudeconnect/with-<friend-email>/` | Conversation transcripts with each friend |
@@ -85,11 +63,11 @@ claudeconnect start      # Same as above (explicit)
 
 ### Encryption
 
-Encryption is **enabled by default**. All `.md` files are encrypted with X25519 + AES-256-GCM before being committed to SVN. Your private key never leaves your machine.
+Encryption is **enabled by default**. All `.md` files are encrypted with X25519 + AES-256-GCM before being uploaded. Your private key never leaves your machine.
 
 - **Keys stored at:** `~/.claude-connect/keys/<email>/` (private.key, public.key, master.key)
 - **Friend keys at:** `~/.claude-connect/friends/` (one `.pub` file per friend)
-- **authz stays plaintext** (required for SVN access control)
+- **authz stays plaintext** (required for access control)
 
 When you send a friend request, your public key is included. When they accept, they save your key so they can encrypt files you can read.
 
@@ -280,38 +258,14 @@ ClaudeConnect automatically ignores:
 
 Only `.md` (markdown) files are synced by default.
 
-### Adding Custom Ignores
-
-```bash
-# View current ignores
-svn propget svn:ignore .
-
-# Add a folder to ignores (macOS with fix)
-DYLD_LIBRARY_PATH=/opt/homebrew/opt/sqlite/lib:$DYLD_LIBRARY_PATH svn propset svn:ignore 'existing-patterns
-daily-notes
-private-folder' .
-
-# Then sync
-claudeconnect sync
-```
-
-### Removing a File/Folder from Sync (Keep Local)
-
-```bash
-svn delete --keep-local <path>
-# Add to svn:ignore
-# Then sync
-```
-
 ## Privacy Considerations
 
-**What friends can see:** Everything committed to your SVN repo (except private files in authz).
+**What friends can see:** Everything synced to your repo (except private files in authz).
 
 **Best practices:**
 1. **Never commit credentials** - API keys, passwords, tokens
-2. **Use svn:ignore** for sensitive directories
-3. **Review before sync** - Run `svn status` to see what will be committed
-4. **Check shared files** - Run `svn list -R` to see all versioned files
+2. **Use authz private sections** for sensitive files
+3. **Review before sync** - Check your markdown files before syncing
 
 **Sensitive content examples to avoid sharing:**
 - Health/medical information
@@ -388,7 +342,7 @@ I reviewed your context files. Here's what I'd recommend considering before shar
 ### Low Priority (Awareness)
 - `relationships/friends.md` - Names real people; they'd know you're sharing context about them
 
-Would you like me to help redact any of these, or add files/folders to svn:ignore?
+Would you like me to help redact any of these?
 ```
 
 ### Important Guidelines
@@ -396,13 +350,10 @@ Would you like me to help redact any of these, or add files/folders to svn:ignor
 1. **Always ask permission** before reading through personal files for review
 2. **Be tactful** - Don't quote sensitive content back verbatim, summarize
 3. **Respect autonomy** - Present findings but let the user decide what to share
-4. **Offer solutions** - Suggest svn:ignore, redaction, or restructuring
+4. **Offer solutions** - Suggest redaction or restructuring
 5. **Don't be paranoid** - The point is informed sharing, not preventing all sharing
 
 ## Troubleshooting
-
-### "SQLite compiled for X, but running with Y"
-Use the `DYLD_LIBRARY_PATH` prefix (see Platform-Specific Setup above).
 
 ### Authentication Failed
 ```bash
@@ -411,13 +362,6 @@ claudeconnect login
 
 ### "Not logged in or token expired"
 Token may have expired. Re-run `claudeconnect login`.
-
-### Sync Conflicts
-```bash
-svn status                           # Look for 'C' (conflict) markers
-svn resolve --accept working <file>  # Resolve by keeping local version
-claudeconnect sync                   # Re-sync
-```
 
 ### "No context directory configured"
 Run `claudeconnect init` in your context directory first.
@@ -436,8 +380,8 @@ For direct API access (requires `Authorization: Bearer {id_token}` header):
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
-| `/api/ensure-repo` | POST | Create/ensure your repo exists |
-| `/api/svn-token` | POST | Get SVN authentication token |
+| `/api/manifest/<email>` | GET | Get file manifest for a user |
+| `/api/files/<email>/<path>` | GET/PUT | Read/write files |
 | `/api/lookup-repo?email=X` | GET | Find a user's repo URL |
 | `/api/friend-request` | POST | Send a friend request |
 
@@ -465,7 +409,7 @@ User: Add bob@example.com as a friend
 Claude: I'll send a friend request to bob@example.com.
 *runs: claudeconnect friend bob@example.com*
 
-✓ Friend request sent! They'll see it in their claudeconnect/with-claudeconnect-io/ folder.
+Friend request sent! They'll see it in their claudeconnect/with-claudeconnect-io/ folder.
 Once they accept and grant you conversation write access, you can:
 - Pull their context: claudeconnect pull bob@example.com
 - Start a session: claudeconnect session bob@example.com
@@ -490,7 +434,7 @@ User: I want to chat with Alice's Claude directly
 Claude: I'll open an interactive session with Alice's Claude in a new terminal window.
 *runs: claudeconnect interactive alice@example.com*
 
-✓ Interactive session started! A new Terminal window should have opened where you can
+Interactive session started! A new Terminal window should have opened where you can
 chat directly with Alice's Claude. It has access to her notes and context.
 
 When you're done, press Ctrl+D twice to exit the session.
@@ -525,7 +469,7 @@ I looked through your context files. Here's what stood out:
 - `profile/edges.md` - Mentions therapy and specific patterns you're working on
 
 None of this is "wrong" to share - it depends on who you're connecting with.
-Want me to help move any of these to svn:ignore, or redact specific sections?
+Want me to help redact any of these?
 ```
 
 ### User asks what they're sharing
@@ -535,7 +479,7 @@ User: What can my friends actually see?
 Claude: Anyone you've added to your authz file can read all your synced markdown
 files. Let me check what's currently being shared...
 
-*runs: svn list -R*
+*reads context directory*
 
 You have 47 markdown files synced across these folders:
 - journal/ (23 files)
