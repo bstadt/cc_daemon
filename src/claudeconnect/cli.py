@@ -1870,8 +1870,11 @@ def session(peer_email: str, topic: str | None, single: bool, turns: int):
         sys.exit(1)
 
 
-def pull_peer_context_http(peer_email: str, id_token: str, my_email: str) -> Path | None:
-    """Pull a peer's context using HTTP API."""
+def pull_peer_context_http(peer_email: str, id_token: str, my_email: str, max_workers: int = 10) -> Path | None:
+    """Pull a peer's context using HTTP API (parallel downloads)."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import threading
+
     config = get_config()
     if not config.context_dir:
         print("No context directory configured.")
@@ -1902,9 +1905,20 @@ def pull_peer_context_http(peer_email: str, id_token: str, my_email: str) -> Pat
         print(f"  Error getting manifest: {e}")
         return None
 
-    # Download files we have permission to read
+    files = manifest.get("files", [])
+    if not files:
+        print("  No files to download")
+        return peer_dir
+
+    # Progress tracking
+    completed = 0
     downloaded = 0
-    for file_info in manifest.get("files", []):
+    skipped = 0
+    lock = threading.Lock()
+    total = len(files)
+
+    def download_file(file_info: dict) -> bool:
+        nonlocal completed, downloaded, skipped
         path = file_info["path"]
         try:
             response = httpx.get(
@@ -1912,19 +1926,39 @@ def pull_peer_context_http(peer_email: str, id_token: str, my_email: str) -> Pat
                 headers=headers,
                 timeout=60,
             )
-            if response.status_code == 200:
-                local_path = peer_dir / path
-                local_path.parent.mkdir(parents=True, exist_ok=True)
-                local_path.write_bytes(response.content)
-                downloaded += 1
-            elif response.status_code == 403:
-                pass  # No permission, skip silently
-            else:
-                print(f"  Warning: Failed to download {path}: {response.status_code}")
+            with lock:
+                completed += 1
+                pct = int(completed / total * 100)
+                if response.status_code == 200:
+                    local_path = peer_dir / path
+                    local_path.parent.mkdir(parents=True, exist_ok=True)
+                    local_path.write_bytes(response.content)
+                    downloaded += 1
+                    print(f"\r  [{pct:3d}%] Downloaded: {path[:50]:<50}", end="", flush=True)
+                    return True
+                elif response.status_code == 403:
+                    skipped += 1
+                    print(f"\r  [{pct:3d}%] Skipped (no access): {path[:40]:<40}", end="", flush=True)
+                    return False
+                else:
+                    print(f"\r  [{pct:3d}%] Failed ({response.status_code}): {path[:40]:<40}", end="", flush=True)
+                    return False
         except Exception as e:
-            print(f"  Warning: Error downloading {path}: {e}")
+            with lock:
+                completed += 1
+            return False
 
-    print(f"  Downloaded {downloaded} file(s) from {peer_email}")
+    # Download in parallel
+    print(f"  Downloading {total} file(s) from {peer_email}...")
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(download_file, f) for f in files]
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except Exception:
+                pass
+
+    print(f"\r  Downloaded {downloaded} file(s), skipped {skipped}" + " " * 30)
     return peer_dir
 
 
