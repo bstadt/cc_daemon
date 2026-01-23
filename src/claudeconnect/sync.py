@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -129,6 +130,9 @@ class SyncLoop:
         # Clean up any stale locks before operations
         await loop.run_in_executor(None, self.svn.cleanup)
 
+        # Check for new interactive transcripts and commit to peer repos
+        await loop.run_in_executor(None, self._commit_interactive_transcripts_to_peers)
+
         # INBOUND: Pull remote changes to shadow dir, then copy to context dir
         try:
             updated = await loop.run_in_executor(None, self.svn.update)
@@ -160,6 +164,9 @@ class SyncLoop:
             for path in status.conflicted:
                 logger.warning(f"Conflict detected: {path}")
                 await self._handle_conflict(path)
+
+        # Import new Claude Code transcripts from interactive sessions
+        await loop.run_in_executor(None, self._import_claude_code_transcripts)
 
         # OUTBOUND: Copy changed files from context to shadow (encrypting), then commit
         # First, detect what changed in context dir
@@ -193,6 +200,145 @@ class SyncLoop:
                     logger.info(f"Committed revision {rev}")
             except SvnError as e:
                 logger.error(f"Commit failed: {e}")
+
+    def _commit_interactive_transcripts_to_peers(self):
+        """
+        Check for interactive session transcripts and commit them to peer repos.
+
+        Interactive transcripts are identified by **Type**: interactive in the header.
+        SVN will automatically skip commits if there are no changes.
+        """
+        # TODO: Temporarily disabled while SVN implementation is being reworked
+        # Transcripts are saved locally and will be committed when new SVN is ready
+        return
+
+        from .session import commit_interactive_transcript
+
+        # Look for interactive transcripts in conversation folders
+        claudeconnect_dir = self.context_dir / "claudeconnect"
+        if not claudeconnect_dir.exists():
+            return
+
+        for conv_dir in claudeconnect_dir.glob("with-*"):
+            for transcript_path in conv_dir.glob("*.md"):
+                # Check if it's an interactive transcript
+                try:
+                    content = transcript_path.read_text()
+                    if "**Type**: interactive" not in content:
+                        continue
+
+                    # Extract session_id from filename
+                    session_id = transcript_path.stem
+
+                    # Commit to peer's repo (SVN will skip if no changes)
+                    logger.info(f"Committing interactive transcript to peer: {session_id}")
+                    commit_interactive_transcript(session_id, verbose=False)
+
+                except Exception as e:
+                    logger.error(f"Error committing transcript {transcript_path.name}: {e}")
+
+    def _discover_claude_code_transcripts(self) -> list[tuple[Path, dict]]:
+        """Find new Claude Code transcripts from ClaudeConnect interactive sessions.
+
+        ONLY imports transcripts where cwd points to a peer directory.
+        Does NOT import user's normal Claude Code usage.
+
+        Returns:
+            List of (jsonl_file_path, metadata_dict) tuples for unprocessed transcripts
+        """
+        from .session import context_dir_to_claude_projects_dir, _extract_jsonl_metadata
+
+        claude_projects = Path.home() / ".claude" / "projects"
+        if not claude_projects.exists():
+            return []
+
+        peers_dir = Path.home() / ".claude-connect" / "peers"
+        if not peers_dir.exists():
+            return []
+
+        discovered = []
+
+        # Check each peer's context directory for corresponding project transcripts
+        for peer_dir in peers_dir.iterdir():
+            if not peer_dir.is_dir():
+                continue
+
+            # Map to expected ~/.claude/projects/ subdirectory
+            # e.g., ~/.claude-connect/peers/brandon-calcifercomputing-com
+            #    → ~/.claude/projects/-Users-frsc--claude-connect-peers-brandon-calcifercomputing-com
+            projects_subdir_name = context_dir_to_claude_projects_dir(peer_dir)
+            projects_subdir = claude_projects / projects_subdir_name
+
+            if not projects_subdir.exists():
+                continue
+
+            # Find .jsonl conversation files
+            for jsonl_file in projects_subdir.glob("*.jsonl"):
+                # Skip subagent transcripts (in subdirectories)
+                if jsonl_file.parent != projects_subdir:
+                    continue
+
+                # CRITICAL: Verify this is an interactive session by checking cwd
+                metadata = _extract_jsonl_metadata(jsonl_file)
+                if not metadata:
+                    continue
+
+                # Only import if cwd points to a peer directory
+                cwd = metadata.get("cwd", "")
+                if "/.claude-connect/peers/" not in cwd:
+                    continue  # Not an interactive session, skip
+
+                # Check file modification time (only import if stable for 60+ seconds)
+                mtime = jsonl_file.stat().st_mtime
+                age = time.time() - mtime
+                if age < 60:
+                    continue  # Still being written
+
+                # Check if already imported by comparing with markdown file mtime
+                peer_email = metadata["peer_email"]
+                session_id = metadata["session_id"]
+                from .svn_ops import email_to_repo_name
+                conv_dir = self.context_dir / "claudeconnect" / f"with-{email_to_repo_name(peer_email)}"
+                md_file = conv_dir / f"{session_id}.md"
+
+                if md_file.exists() and mtime <= md_file.stat().st_mtime:
+                    continue  # Already imported and JSONL hasn't changed
+
+                discovered.append((jsonl_file, metadata))
+
+        return discovered
+
+    def _import_claude_code_transcripts(self):
+        """Import new transcripts from ~/.claude/projects/ to ClaudeConnect."""
+        from .session import convert_jsonl_to_markdown, commit_interactive_transcript
+        from .svn_ops import email_to_repo_name
+
+        discovered = self._discover_claude_code_transcripts()
+
+        for jsonl_path, metadata in discovered:
+            try:
+                # Convert JSONL to markdown
+                markdown_content = convert_jsonl_to_markdown(jsonl_path, metadata, self.email)
+
+                # Determine save path in our context
+                peer_email = metadata["peer_email"]
+                session_id = metadata["session_id"]
+
+                conv_dir = self.context_dir / "claudeconnect" / f"with-{email_to_repo_name(peer_email)}"
+                conv_dir.mkdir(parents=True, exist_ok=True)
+
+                transcript_path = conv_dir / f"{session_id}.md"
+
+                # Save transcript
+                transcript_path.write_text(markdown_content)
+
+                logger.info(f"Imported transcript: {session_id} from {peer_email}")
+
+                # Commit to peer's repo (reuse existing logic, silent)
+                commit_interactive_transcript(session_id, verbose=False)
+
+            except Exception as e:
+                logger.error(f"Failed to import {jsonl_path}: {e}")
 
     async def _handle_conflict(self, path: Path):
         """
