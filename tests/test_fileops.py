@@ -99,9 +99,35 @@ def timing(msg: str, elapsed: float):
     print(f"{Colors.CYAN}[TIMING]{Colors.RESET} {msg}: {elapsed:.2f}s")
 
 
+def prompt(msg: str):
+    print(f"{Colors.YELLOW}[ACTION REQUIRED]{Colors.RESET} {msg}")
+
+
+def wait_for_user(msg: str):
+    """Prompt user and wait for Enter."""
+    prompt(msg)
+    input("Press Enter to continue...")
+
+
 def email_to_repo_name(email: str) -> str:
     """Convert email to repo name format."""
     return email.replace("@", "-").replace(".", "-").lower()
+
+
+def claudeconnect(*args, cwd: Path | None = None, input_text: str | None = None) -> subprocess.CompletedProcess:
+    """Run claudeconnect CLI command."""
+    result = subprocess.run(
+        ["claudeconnect", *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        input=input_text,
+        timeout=300,
+    )
+    if result.returncode != 0:
+        error(f"Command failed: claudeconnect {' '.join(args)}")
+        error(f"stderr: {result.stderr}")
+    return result
 
 
 def clean_server():
@@ -133,52 +159,30 @@ def clean_client():
     log("Local config removed")
 
 
-def setup_test_user(email: str) -> dict:
-    """Set up test user credentials via API."""
-    log(f"Setting up test user: {email}")
-    response = httpx.post(
-        f"{API_BASE_URL}/test/create-user",
-        json={"email": email},
-        timeout=30,
-    )
-    if response.status_code != 200:
-        raise RuntimeError(f"Failed to create test user: {response.text}")
-    return response.json()
-
-
-def save_tokens(email: str, id_token: str, refresh_token: str = "test-refresh"):
-    """Save tokens to config directory."""
-    CC_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    tokens_file = CC_CONFIG_DIR / "tokens.json"
-    tokens_file.write_text(json.dumps({
-        "email": email,
-        "id_token": id_token,
-        "refresh_token": refresh_token,
-        "expires_at": int(time.time()) + 3600,
-    }))
+def login(name: str, temp_dir: Path):
+    """Login to an account (manual OAuth flow)."""
+    log(f"Logging in as {name}...")
+    os.chdir(temp_dir)
+    wait_for_user(f"Please login with {name}")
+    claudeconnect("login", cwd=temp_dir)
 
 
 def init_account(name: str, temp_dir: Path, email: str) -> float:
     """Initialize an account. Returns time taken."""
     log(f"Initializing {name} ({email})...")
-
-    # Set up test user and save tokens
-    creds = setup_test_user(email)
-    save_tokens(email, creds["id_token"])
+    wait_for_user(f"{name} logged in. Ready to init.")
 
     start_time = time.time()
     result = subprocess.run(
         ["claudeconnect", "init"],
         cwd=temp_dir,
         input="y\n",
-        capture_output=True,
         text=True,
         timeout=120,
     )
     elapsed = time.time() - start_time
 
     if result.returncode != 0:
-        error(f"Init failed: {result.stderr}")
         raise RuntimeError(f"Init failed for {name}")
 
     timing(f"{name} init completed", elapsed)
@@ -454,12 +458,16 @@ def test_fileops_flow(temp_dirs):
     log("=" * 50)
 
     # Bob setup (creates poetry.md first)
+    os.chdir(temp2)
+    login("Bob", temp2)
     stats.bob_init = init_account("Bob", temp2, BOB_EMAIL)
     create_poetry_file(temp2)
     stats.bob_sync = sync_files("Bob", temp2)
     stats.friend_request = send_friend_request(temp2, ALICE_EMAIL)
 
     # Alice setup and accepts friend
+    os.chdir(temp1)
+    login("Alice", temp1)
     stats.alice_init = init_account("Alice", temp1, ALICE_EMAIL)
     stats.alice_sync = sync_files("Alice", temp1)
     stats.accept_friend = accept_friend_request(temp1, BOB_EMAIL)
@@ -483,21 +491,21 @@ def test_fileops_flow(temp_dirs):
     log("=" * 50)
 
     # Bob adds philosophy.md and updates poetry.md
+    os.chdir(temp2)
     start_time = time.time()
     create_philosophy_file(temp2)
     update_poetry_file(temp2)
     stats.philosophy_add = time.time() - start_time
 
-    # Bob syncs changes
-    # Re-setup Bob's tokens
-    creds = setup_test_user(BOB_EMAIL)
-    save_tokens(BOB_EMAIL, creds["id_token"])
+    # Bob syncs changes (re-login)
+    login("Bob", temp2)
+    init_account("Bob", temp2, BOB_EMAIL)
     stats.philosophy_sync = sync_files("Bob", temp2)
 
-    # Alice pulls and verifies
-    # Re-setup Alice's tokens
-    creds = setup_test_user(ALICE_EMAIL)
-    save_tokens(ALICE_EMAIL, creds["id_token"])
+    # Alice pulls and verifies (re-login)
+    os.chdir(temp1)
+    login("Alice", temp1)
+    init_account("Alice", temp1, ALICE_EMAIL)
     stats.alice_sync = sync_files("Alice", temp1)
     stats.philosophy_pull = pull_peer_context(temp1, BOB_EMAIL)
 
@@ -553,11 +561,15 @@ def main():
         log("PHASE 1: Base flow")
         log("=" * 50)
 
+        os.chdir(temp2)
+        login("Bob", temp2)
         stats.bob_init = init_account("Bob", temp2, BOB_EMAIL)
         create_poetry_file(temp2)
         stats.bob_sync = sync_files("Bob", temp2)
         stats.friend_request = send_friend_request(temp2, ALICE_EMAIL)
 
+        os.chdir(temp1)
+        login("Alice", temp1)
         stats.alice_init = init_account("Alice", temp1, ALICE_EMAIL)
         stats.alice_sync = sync_files("Alice", temp1)
         stats.accept_friend = accept_friend_request(temp1, BOB_EMAIL)
@@ -574,17 +586,19 @@ def main():
         log("PHASE 2: Adding philosophy.md + updating poetry.md")
         log("=" * 50)
 
+        os.chdir(temp2)
         start_time = time.time()
         create_philosophy_file(temp2)
         update_poetry_file(temp2)
         stats.philosophy_add = time.time() - start_time
 
-        creds = setup_test_user(BOB_EMAIL)
-        save_tokens(BOB_EMAIL, creds["id_token"])
+        login("Bob", temp2)
+        init_account("Bob", temp2, BOB_EMAIL)
         stats.philosophy_sync = sync_files("Bob", temp2)
 
-        creds = setup_test_user(ALICE_EMAIL)
-        save_tokens(ALICE_EMAIL, creds["id_token"])
+        os.chdir(temp1)
+        login("Alice", temp1)
+        init_account("Alice", temp1, ALICE_EMAIL)
         stats.alice_sync = sync_files("Alice", temp1)
         stats.philosophy_pull = pull_peer_context(temp1, BOB_EMAIL)
 
