@@ -1170,88 +1170,17 @@ def start():
             print(f"Or use `claudeconnect init` here to switch.")
             sys.exit(1)
     else:
-        # First time - use current directory
-        context_dir = cwd
+        # First time - need to init
+        print("No context directory configured. Run `claudeconnect init` first.")
+        sys.exit(1)
 
-    # Ensure repo exists on server
     print(f"Connecting as {tokens.email}...")
-    try:
-        repo_info = ensure_repo(tokens.id_token)
-        # Always compute repo_url locally for consistency
-        repo_url = repo_url_for_email(tokens.email)
 
-        if repo_info.get("created"):
-            print(f"  Created new repo: {repo_info['repo']}")
-        else:
-            print(f"  Using repo: {repo_info['repo']}")
-    except Exception as e:
-        print(f"  Error: {e}")
-        sys.exit(1)
-
-    # Get SVN token (Fernet)
-    print("Getting SVN credentials...")
-    svn_token = get_svn_token(tokens.id_token)
-    if not svn_token:
-        print("Failed to get SVN token")
-        sys.exit(1)
-
-    # Initialize context directory if needed
-    # Check shadow directory for working copy (shadow dir architecture)
-    shadow_dir = get_shadow_dir(tokens.email)
-    shadow_dir.mkdir(parents=True, exist_ok=True)
-    svn = SvnClient(shadow_dir, repo_url, svn_token, tokens.email)
-    if not svn.is_working_copy():
-        print(f"\nInitializing context directory: {context_dir}")
-
-        # Set up encryption by default
-        encrypt = HAS_ENCRYPTION
-        public_key_hex = None
-        if encrypt:
-            print("  Setting up encryption...")
-            try:
-                # Generate or load X25519 keypair (account-scoped)
-                try:
-                    _, public_bytes = generate_keypair(tokens.email)
-                    fingerprint = get_key_fingerprint(public_bytes)
-                    print(f"  Generated keypair (fingerprint: {fingerprint})")
-                except FileExistsError:
-                    # Keys already exist, load them
-                    public_bytes = load_public_key(tokens.email)
-                    fingerprint = get_key_fingerprint(public_bytes)
-                    print(f"  Using existing keypair (fingerprint: {fingerprint})")
-
-                # Generate or load master key (account-scoped)
-                try:
-                    generate_master_key(tokens.email)
-                    print("  Generated master encryption key")
-                except FileExistsError:
-                    # Master key already exists
-                    load_master_key(tokens.email)  # Verify it's loadable
-                    print("  Using existing master key")
-
-                # Convert public key to hex for authz
-                public_key_hex = public_bytes.hex()
-
-            except Exception as e:
-                print(f"  Warning: Could not set up encryption: {e}")
-                encrypt = False
-                public_key_hex = None
-
-        if not init_context_dir(context_dir, repo_url, svn_token, tokens.email, public_key_hex):
-            sys.exit(1)
-
-        # Save context dir and encryption setting to config
-        config.context_dir = str(context_dir)
-        config.encryption_enabled = encrypt
-        config.save()
-
-        # Install skill for Claude Code
-        if install_skill():
-            print("  Installed claudeconnect skill")
-
-    # Initial sync
+    # Initial sync using HTTP
     print("\nSyncing...")
-    sync_once(context_dir, repo_url, svn_token, tokens.email)
+    if not sync_http(context_dir, tokens.email, tokens.id_token):
+        print("  Sync failed")
+        sys.exit(1)
 
     # Display startup banner with friend requests and conversations
     display_startup_banner(context_dir, tokens.email)
@@ -1260,8 +1189,8 @@ def start():
     print("Starting Claude Code with sync enabled...")
     print(f"{DIM}(Sync runs every 30 seconds in background){RESET}\n")
 
-    # Run async main
-    asyncio.run(run_with_sync(context_dir, repo_url, svn_token, tokens.email))
+    # Run async main with HTTP sync
+    asyncio.run(run_with_http_sync(context_dir, tokens.email, tokens.id_token))
 
 
 async def run_with_sync(
@@ -1270,7 +1199,7 @@ async def run_with_sync(
     token: str,
     email: str,
 ):
-    """Run Claude Code with background sync loop."""
+    """Run Claude Code with background sync loop (legacy SVN version)."""
     # Start sync loop
     sync_loop = SyncLoop(context_dir, repo_url, token, email, interval=30)
     await sync_loop.start()
@@ -1296,6 +1225,61 @@ async def run_with_sync(
     finally:
         # Stop sync loop
         await sync_loop.stop()
+        print("\nSync stopped. Goodbye!")
+
+
+async def run_with_http_sync(
+    context_dir: Path,
+    email: str,
+    id_token: str,
+    interval: int = 30,
+):
+    """Run Claude Code with background HTTP sync loop."""
+    stop_event = asyncio.Event()
+
+    async def sync_loop():
+        """Background sync loop using HTTP."""
+        while not stop_event.is_set():
+            try:
+                # Wait for interval or stop event
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=interval)
+                    break  # Stop event was set
+                except asyncio.TimeoutError:
+                    pass  # Interval elapsed, do sync
+
+                # Refresh token if needed
+                tokens = get_valid_token()
+                if tokens:
+                    sync_http(context_dir, tokens.email, tokens.id_token)
+            except Exception as e:
+                # Log but don't crash the sync loop
+                pass
+
+    # Start sync loop task
+    sync_task = asyncio.create_task(sync_loop())
+
+    try:
+        # Run Claude Code
+        process = await asyncio.create_subprocess_exec(
+            "claude",
+            stdin=None,  # Inherit stdin
+            stdout=None,  # Inherit stdout
+            stderr=None,  # Inherit stderr
+            cwd=context_dir,
+        )
+
+        await process.wait()
+
+    except FileNotFoundError:
+        print("Error: 'claude' command not found.")
+        print("Make sure Claude Code is installed.")
+    except KeyboardInterrupt:
+        pass
+    finally:
+        # Stop sync loop
+        stop_event.set()
+        await sync_task
         print("\nSync stopped. Goodbye!")
 
 
