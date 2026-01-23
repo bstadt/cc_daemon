@@ -982,6 +982,46 @@ def encrypt_file_with_master_key(
     return bytes(output)
 
 
+def encrypt_file_for_friend(
+    plaintext: bytes,
+    friend_email: str,
+) -> bytes:
+    """
+    Encrypt file content using a friend's master key.
+
+    Used when uploading content to a friend's repo (e.g., transcripts).
+    The friend's master key must have been saved previously (e.g., when
+    they sent us a friend request with their encrypted master key).
+
+    Args:
+        plaintext: Raw file content to encrypt
+        friend_email: Friend's email address
+
+    Returns:
+        Encrypted file bytes (same v2 format as encrypt_file_with_master_key)
+
+    Raises:
+        FileNotFoundError: If friend's master key not found
+    """
+    _ensure_crypto()
+
+    master_key = load_friend_master_key(friend_email)
+
+    # Encrypt content with AES-GCM (same format as own files)
+    nonce = os.urandom(NONCE_SIZE)
+    aesgcm = AESGCM(master_key)
+    ciphertext = aesgcm.encrypt(nonce, plaintext, None)
+
+    # Build output
+    output = bytearray()
+    output.extend(MAGIC_BYTES)
+    output.append(MASTER_KEY_FORMAT_VERSION)
+    output.extend(nonce)
+    output.extend(ciphertext)
+
+    return bytes(output)
+
+
 def decrypt_file_with_master_key(
     ciphertext: bytes,
     email: str,
