@@ -35,6 +35,7 @@ from test_utils import (
     create_temp_dirs,
     CC_CONFIG_DIR,
     PEERS_DIR,
+    CCENC_MAGIC,
     # Account operations
     login,
     init_account,
@@ -69,6 +70,33 @@ from test_utils import (
     error,
     timing,
 )
+
+
+def read_peer_file_content(peer_email: str, filename: str) -> tuple[bool, str]:
+    """
+    Safely read a peer file, handling encrypted files.
+
+    Returns (success, content_or_error_message).
+    If file is still encrypted, returns (False, "encrypted").
+    """
+    repo_name = email_to_repo_name(peer_email)
+    file_path = PEERS_DIR / repo_name / filename
+
+    if not file_path.exists():
+        return False, f"File not found: {file_path}"
+
+    # Read as bytes first to check for encryption
+    raw_bytes = file_path.read_bytes()
+
+    if raw_bytes[:5] == CCENC_MAGIC:
+        return False, "encrypted"
+
+    # Try to decode as UTF-8
+    try:
+        content = raw_bytes.decode('utf-8')
+        return True, content
+    except UnicodeDecodeError as e:
+        return False, f"Decode error: {e}"
 
 
 @dataclass
@@ -388,12 +416,18 @@ def main():
         log("--- Verifying state after pull ---")
         assert verify_state(state, alice_email, bob_email, "alice"), "State verification failed"
 
-        # Bob verifies transcript
+        # Bob verifies transcript and accepts Alice's reciprocal friend request
         os.chdir(temp2)
         login("Bob", temp2)
         init_account("Bob", temp2)
         sync_files(temp2)
         assert verify_transcript("Bob", temp2, alice_email), "Bob transcript not found"
+
+        # Bob needs to accept Alice's reciprocal friend request to get her master key
+        # (Alice sent this when she accepted Bob's original request)
+        log("Bob accepting Alice's reciprocal friend request...")
+        check_friend_request(temp2, alice_email)
+        accept_friend_request(temp2, alice_email)
 
         log("")
         log("PHASE 1 COMPLETE")
@@ -464,10 +498,12 @@ def main():
         assert verify_state(state, alice_email, bob_email, "bob"), "State verification failed"
 
         # Verify Bob can read notes.md content
-        repo_name = email_to_repo_name(alice_email)
-        notes_path = PEERS_DIR / repo_name / "notes.md"
-        assert notes_path.exists(), "notes.md not found in Bob's peer cache"
-        content = notes_path.read_text()
+        success, content = read_peer_file_content(alice_email, "notes.md")
+        if not success:
+            if content == "encrypted":
+                raise RuntimeError("notes.md is still encrypted - Bob doesn't have Alice's master key!")
+            else:
+                raise RuntimeError(f"Failed to read notes.md: {content}")
         assert "shared notes" in content, "notes.md content verification failed"
         log("  ✓ notes.md content verified")
 
@@ -504,10 +540,12 @@ def main():
         assert verify_state(state, alice_email, bob_email, "alice"), "State verification failed"
 
         # Verify Alice can now read secret_poetry.md
-        repo_name = email_to_repo_name(bob_email)
-        secret_path = PEERS_DIR / repo_name / "secret_poetry.md"
-        assert secret_path.exists(), "secret_poetry.md not found after authz change"
-        content = secret_path.read_text()
+        success, content = read_peer_file_content(bob_email, "secret_poetry.md")
+        if not success:
+            if content == "encrypted":
+                raise RuntimeError("secret_poetry.md is still encrypted - Alice doesn't have Bob's master key!")
+            else:
+                raise RuntimeError(f"Failed to read secret_poetry.md: {content}")
         assert "bluebird" in content, "secret_poetry.md content verification failed"
         log("  ✓ secret_poetry.md content verified (bluebird found)")
 
