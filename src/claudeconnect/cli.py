@@ -355,6 +355,9 @@ def display_startup_banner(context_dir: Path, email: str, clear_screen: bool = T
 
         print()
 
+    # Ensure terminal attributes are reset at end of banner
+    print(RESET, end='', flush=True)
+
 
 def get_valid_token() -> Tokens | None:
     """
@@ -1056,6 +1059,11 @@ def start():
     # Start sync loop and Claude
     print("Starting Claude Code with sync enabled...")
     print(f"{DIM}(Sync runs every 30 seconds in background){RESET}\n")
+
+    # Ensure terminal state is clean before launching Claude
+    # This prevents ANSI escape sequences from bleeding into Claude's rendering
+    print(RESET, end='', flush=True)
+    sys.stdout.flush()
 
     # Run async main with HTTP sync
     asyncio.run(run_with_http_sync(context_dir, tokens.email, tokens.id_token))
