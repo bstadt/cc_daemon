@@ -17,24 +17,23 @@ Or standalone: python tests/test_big_vault.py
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import tempfile
 import shutil
 import time
-import httpx
 from pathlib import Path
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 
 import pytest
 
-from conf import ALICE_EMAIL, BOB_EMAIL, API_BASE_URL
-
-# Config directories
-CC_CONFIG_DIR = Path.home() / ".claude-connect"
-PEERS_DIR = CC_CONFIG_DIR / "peers"
+from conf import ALICE_EMAIL, BOB_EMAIL
+from test_utils import (
+    log, warn, error, timing,
+    clean_server, clean_client, claudeconnect,
+    get_current_email, email_to_repo_name, wait_for_user,
+    CC_CONFIG_DIR, PEERS_DIR, Colors,
+)
 
 # Test config
 NUM_VAULT_FILES = 500
@@ -84,139 +83,9 @@ class TimingStats:
         print("=" * 50)
 
 
-class Colors:
-    GREEN = "\033[0;32m"
-    YELLOW = "\033[1;33m"
-    RED = "\033[0;31m"
-    CYAN = "\033[0;36m"
-    MAGENTA = "\033[0;35m"
-    RESET = "\033[0m"
-
-
-def log(msg: str):
-    print(f"{Colors.GREEN}[TEST]{Colors.RESET} {msg}")
-
-
-def warn(msg: str):
-    print(f"{Colors.YELLOW}[WARN]{Colors.RESET} {msg}")
-
-
-def error(msg: str):
-    print(f"{Colors.RED}[ERROR]{Colors.RESET} {msg}")
-
-
-def prompt(msg: str):
-    print(f"{Colors.YELLOW}[ACTION REQUIRED]{Colors.RESET} {msg}")
-
-
-def timing(msg: str, seconds: float):
-    print(f"{Colors.MAGENTA}[TIMING]{Colors.RESET} {msg}: {seconds:.1f}s")
-
-
 def progress(current: int, total: int, msg: str):
+    """Print progress indicator."""
     print(f"{Colors.CYAN}[{current}/{total}]{Colors.RESET} {msg}")
-
-
-def run(cmd: list[str], cwd: Path | None = None, check: bool = True, input_text: str | None = None) -> subprocess.CompletedProcess:
-    """Run a command and return result."""
-    result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, input=input_text)
-    if check and result.returncode != 0:
-        error(f"Command failed: {' '.join(cmd)}")
-        error(f"stdout: {result.stdout}")
-        error(f"stderr: {result.stderr}")
-        raise RuntimeError(f"Command failed: {' '.join(cmd)}")
-    return result
-
-
-def claudeconnect(*args, cwd: Path | None = None, input_text: str | None = None, timeout: int = 600) -> subprocess.CompletedProcess:
-    """Run claudeconnect CLI command with extended timeout for large operations."""
-    result = subprocess.run(
-        ["claudeconnect", *args],
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        input=input_text,
-        timeout=timeout,
-    )
-    if result.returncode != 0:
-        error(f"Command failed: claudeconnect {' '.join(args)}")
-        error(f"stdout: {result.stdout}")
-        error(f"stderr: {result.stderr}")
-        raise RuntimeError(f"Command failed: claudeconnect {' '.join(args)}")
-    return result
-
-
-def get_current_email() -> str:
-    """Get email from current tokens."""
-    tokens_file = CC_CONFIG_DIR / "tokens.json"
-    with open(tokens_file) as f:
-        return json.load(f)["email"]
-
-
-def get_id_token() -> str:
-    """Get ID token for API calls."""
-    tokens_file = CC_CONFIG_DIR / "tokens.json"
-    with open(tokens_file) as f:
-        return json.load(f)["id_token"]
-
-
-def email_to_repo_name(email: str) -> str:
-    """Convert email to repo name format."""
-    return email.replace("@", "-").replace(".", "-").lower()
-
-
-def wait_for_user(msg: str):
-    """Prompt user and wait for Enter."""
-    prompt(msg)
-    input("Press Enter to continue...")
-
-
-def clean_server():
-    """Remove test account data on server via HTTP API."""
-    log("Cleaning test account data on server...")
-
-    # We'll clean by deleting all files for test accounts
-    test_emails = [ALICE_EMAIL, BOB_EMAIL]
-
-    try:
-        tokens_file = CC_CONFIG_DIR / "tokens.json"
-        if tokens_file.exists():
-            token = get_id_token()
-            headers = {"Authorization": f"Bearer {token}"}
-
-            for email in test_emails:
-                # Get manifest and delete all files
-                try:
-                    response = httpx.get(
-                        f"{API_BASE_URL}/manifest/{email}",
-                        headers=headers,
-                        timeout=30,
-                    )
-                    if response.status_code == 200:
-                        manifest = response.json()
-                        files = manifest.get("files", [])
-                        if files:
-                            log(f"  Deleting {len(files)} files for {email}...")
-                            for f in files:
-                                httpx.delete(
-                                    f"{API_BASE_URL}/files/{email}/{f['path']}",
-                                    headers=headers,
-                                    timeout=30,
-                                )
-                except Exception as e:
-                    warn(f"  Could not clean {email}: {e}")
-    except Exception as e:
-        warn(f"Could not clean server (may not be logged in yet): {e}")
-
-    log("Server cleanup complete.")
-
-
-def clean_client():
-    """Remove local ~/.config/claudeconnect."""
-    log("Removing local claudeconnect config...")
-    if CC_CONFIG_DIR.exists():
-        shutil.rmtree(CC_CONFIG_DIR)
-    log("Local config removed.")
 
 
 def create_temp_dirs() -> tuple[Path, Path]:
