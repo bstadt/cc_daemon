@@ -961,7 +961,11 @@ def dashboard():
 
 
 @cli.command()
-def start():
+@click.option("--system-prompt", type=str, default=None, help="System prompt to pass to Claude")
+@click.option("--initial-prompt", type=str, default=None, help="Initial user message to send")
+@click.option("--context-dir", type=click.Path(exists=True, file_okay=False, path_type=Path), default=None,
+              help="Override context directory (for interactive sessions)")
+def start(system_prompt: str | None, initial_prompt: str | None, context_dir: Path | None):
     """Start Claude with sync enabled (default command)."""
     # Check for mock/dev mode
     mock_dir = get_mock_dir()
@@ -1017,8 +1021,11 @@ def start():
     config = get_config()
     cwd = Path.cwd()
 
-    # Determine context directory
-    if config.context_dir:
+    # Determine context directory (use override if provided)
+    if context_dir:
+        # Using explicit context directory (e.g., for interactive sessions)
+        pass  # context_dir already set from parameter
+    elif config.context_dir:
         context_dir = Path(config.context_dir)
         if cwd != context_dir and not cwd.is_relative_to(context_dir):
             print(f"Your context directory is: {context_dir}")
@@ -1066,7 +1073,10 @@ def start():
     sys.stdout.flush()
 
     # Run async main with HTTP sync
-    asyncio.run(run_with_http_sync(context_dir, tokens.email, tokens.id_token))
+    asyncio.run(run_with_http_sync(
+        context_dir, tokens.email, tokens.id_token,
+        system_prompt=system_prompt, initial_prompt=initial_prompt
+    ))
 
 
 async def run_with_http_sync(
@@ -1074,6 +1084,8 @@ async def run_with_http_sync(
     email: str,
     id_token: str,
     interval: int = 30,
+    system_prompt: str | None = None,
+    initial_prompt: str | None = None,
 ):
     """Run Claude Code with background HTTP sync loop."""
     stop_event = asyncio.Event()
@@ -1101,9 +1113,16 @@ async def run_with_http_sync(
     sync_task = asyncio.create_task(sync_loop())
 
     try:
+        # Build Claude command with optional prompts
+        claude_args = ["claude"]
+        if system_prompt:
+            claude_args.extend(["--system-prompt", system_prompt])
+        if initial_prompt:
+            claude_args.append(initial_prompt)
+
         # Run Claude Code
         process = await asyncio.create_subprocess_exec(
-            "claude",
+            *claude_args,
             stdin=None,  # Inherit stdin
             stdout=None,  # Inherit stdout
             stderr=None,  # Inherit stderr

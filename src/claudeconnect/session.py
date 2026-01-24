@@ -900,9 +900,9 @@ def run_interactive_session(
 
     # Build the command to run in the new terminal
     # Clear venv variables to avoid activation/deactivation messages that corrupt display
-    # cd to peer context first so Claude sees it as its working directory
-    # Pass "hi" as initial prompt to trigger Claude's greeting
-    terminal_cmd = f'unset VIRTUAL_ENV CONDA_DEFAULT_ENV; cd {peer_context_dir} && claude --system-prompt "$(cat {prompt_file})" "hi"'
+    # Use claudeconnect instead of claude to get dashboard + sync during session
+    # Pass context-dir to specify peer's context, system-prompt for persona, initial-prompt to greet
+    terminal_cmd = f'unset VIRTUAL_ENV CONDA_DEFAULT_ENV; cd {peer_context_dir} && claudeconnect start --context-dir "{peer_context_dir}" --system-prompt "$(cat {prompt_file})" --initial-prompt "hi"'
 
     # Escape for AppleScript: backslash-escape double quotes and backslashes
     escaped_cmd = terminal_cmd.replace("\\", "\\\\").replace('"', '\\"')
