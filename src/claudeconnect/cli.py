@@ -1601,111 +1601,12 @@ def session(peer_email: str, topic: str | None, single: bool, turns: int):
         sys.exit(1)
 
 
-def pull_peer_context_http(peer_email: str, id_token: str, my_email: str, max_workers: int = 10) -> Path | None:
-    """Pull a peer's context using HTTP API (parallel downloads).
-
-    Saves to ~/.claude-connect/peers/<peer>/ for consistency with session.py.
-    """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    import threading
-
-    # Save to PEERS_DIR (same location as session.py)
-    peer_name = email_to_repo_name(peer_email)
-    peer_dir = PEERS_DIR / peer_name
-    PEERS_DIR.mkdir(parents=True, exist_ok=True)
-    peer_dir.mkdir(parents=True, exist_ok=True)
-
-    headers = {"Authorization": f"Bearer {id_token}"}
-
-    # Get manifest from peer
-    try:
-        response = httpx.get(
-            f"{API_BASE_URL}/manifest/{peer_email}",
-            headers=headers,
-            timeout=60,
-        )
-        if response.status_code == 404:
-            print(f"  User {peer_email} not found")
-            return None
-        if response.status_code != 200:
-            print(f"  Failed to get manifest: {response.text}")
-            return None
-        manifest = response.json()
-    except Exception as e:
-        print(f"  Error getting manifest: {e}")
-        return None
-
-    files = manifest.get("files", [])
-    if not files:
-        print("  No files to download")
-        return peer_dir
-
-    # Progress tracking
-    completed = 0
-    downloaded = 0
-    skipped = 0
-    lock = threading.Lock()
-    total = len(files)
-
-    def download_file(file_info: dict) -> bool:
-        nonlocal completed, downloaded, skipped
-        path = file_info["path"]
-        try:
-            response = httpx.get(
-                f"{API_BASE_URL}/files/{peer_email}/{path}",
-                headers=headers,
-                timeout=60,
-            )
-            with lock:
-                completed += 1
-                pct = int(completed / total * 100)
-                if response.status_code == 200:
-                    local_path = peer_dir / path
-                    local_path.parent.mkdir(parents=True, exist_ok=True)
-                    local_path.write_bytes(response.content)
-                    downloaded += 1
-                    print(f"\r  [{pct:3d}%] Downloaded: {path[:50]:<50}", end="", flush=True)
-                    return True
-                elif response.status_code == 403:
-                    skipped += 1
-                    print(f"\r  [{pct:3d}%] Skipped (no access): {path[:40]:<40}", end="", flush=True)
-                    return False
-                else:
-                    print(f"\r  [{pct:3d}%] Failed ({response.status_code}): {path[:40]:<40}", end="", flush=True)
-                    return False
-        except Exception as e:
-            with lock:
-                completed += 1
-            return False
-
-    # Download in parallel
-    print(f"  Downloading {total} file(s) from {peer_email}...")
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(download_file, f) for f in files]
-        for future in as_completed(futures):
-            try:
-                future.result()
-            except Exception:
-                pass
-
-    print(f"\r  Downloaded {downloaded} file(s), skipped {skipped}" + " " * 30)
-
-    # Decrypt any encrypted files
-    try:
-        from .session import decrypt_peer_context
-        decrypted = decrypt_peer_context(peer_dir, peer_email)
-        if decrypted:
-            print(f"  Decrypted {decrypted} file(s)")
-    except Exception as e:
-        print(f"  Warning: Could not decrypt files: {e}")
-
-    return peer_dir
-
-
 @cli.command()
 @click.argument("peer_email")
 def pull(peer_email: str):
     """Pull a friend's context without starting a session."""
+    from .session import pull_peer_context_http
+
     tokens = get_valid_token()
     if not tokens:
         print("Not logged in or token expired. Run `claudeconnect login` first.")
@@ -2009,8 +1910,13 @@ def friend(peer_email: str):
             print(f"\n✗ User {peer_email} not found on ClaudeConnect")
             sys.exit(1)
         else:
-            data = response.json()
-            print(f"\n✗ Failed to send request: {data.get('error', 'Unknown error')}")
+            try:
+                data = response.json()
+                # FastAPI uses 'detail', others might use 'error'
+                error_msg = data.get('detail') or data.get('error') or 'Unknown error'
+            except Exception:
+                error_msg = response.text
+            print(f"\n✗ Failed to send request (HTTP {response.status_code}): {error_msg}")
             sys.exit(1)
 
     except Exception as e:
