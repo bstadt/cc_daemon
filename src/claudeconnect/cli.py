@@ -155,8 +155,12 @@ except ImportError:
     HAS_ENCRYPTION = False
 
 
-def display_startup_banner(context_dir: Path, email: str, clear_screen: bool = True) -> None:
-    """Display ClaudeConnect startup banner with two Claude creatures and status."""
+def display_startup_banner(context_dir: Path, email: str, clear_screen: bool = True, peer_name: str | None = None) -> None:
+    """Display ClaudeConnect startup banner with two Claude creatures and status.
+
+    If peer_name is provided, shows a simplified "Interactive session with <peer>" banner
+    instead of the full dashboard with notifications/conversations.
+    """
     # Clear screen for clean display (optional)
     if clear_screen:
         print(CLEAR, end='')
@@ -181,6 +185,14 @@ def display_startup_banner(context_dir: Path, email: str, clear_screen: bool = T
         print(f"  {CORAL}▘▘ ▝▝{RESET}     {LIME}▘▘ ▝▝{RESET}")
 
     print()
+
+    # For interactive sessions, show simplified banner and skip notifications
+    if peer_name:
+        print(f"  {WHITE}{BOLD}Interactive session with {LIME}{peer_name}{RESET}")
+        print()
+        # Ensure terminal attributes are reset
+        print(RESET, end='', flush=True)
+        return
 
     # Check for friend requests and conversations
     # New structure per system2.md:
@@ -354,6 +366,9 @@ def display_startup_banner(context_dir: Path, email: str, clear_screen: bool = T
                 print(f" {line}")
 
         print()
+
+    # Ensure terminal attributes are reset at end of banner
+    print(RESET, end='', flush=True)
 
 
 def get_valid_token() -> Tokens | None:
@@ -958,7 +973,12 @@ def dashboard():
 
 
 @cli.command()
-def start():
+@click.option("--system-prompt", type=str, default=None, help="System prompt to pass to Claude")
+@click.option("--initial-prompt", type=str, default=None, help="Initial user message to send")
+@click.option("--context-dir", type=click.Path(exists=True, file_okay=False, path_type=Path), default=None,
+              help="Override context directory (for interactive sessions)")
+@click.option("--peer", type=str, default=None, help="Peer name for interactive session banner")
+def start(system_prompt: str | None, initial_prompt: str | None, context_dir: Path | None, peer: str | None):
     """Start Claude with sync enabled (default command)."""
     # Check for mock/dev mode
     mock_dir = get_mock_dir()
@@ -1014,8 +1034,11 @@ def start():
     config = get_config()
     cwd = Path.cwd()
 
-    # Determine context directory
-    if config.context_dir:
+    # Determine context directory (use override if provided)
+    if context_dir:
+        # Using explicit context directory (e.g., for interactive sessions)
+        pass  # context_dir already set from parameter
+    elif config.context_dir:
         context_dir = Path(config.context_dir)
         if cwd != context_dir and not cwd.is_relative_to(context_dir):
             print(f"Your context directory is: {context_dir}")
@@ -1042,23 +1065,38 @@ def start():
             print("\nRun `claudeconnect init` in your context directory when ready.")
             sys.exit(0)
 
-    print(f"Connecting as {tokens.email}...")
+    # Interactive sessions have quieter output
+    is_interactive = peer is not None
+
+    if not is_interactive:
+        print(f"Connecting as {tokens.email}...")
 
     # Initial sync using HTTP
-    print("\nSyncing...")
+    if not is_interactive:
+        print("\nSyncing...")
     if not sync_http(context_dir, tokens.email, tokens.id_token):
-        print("  Sync failed")
+        if not is_interactive:
+            print("  Sync failed")
         sys.exit(1)
 
     # Display startup banner with friend requests and conversations
-    display_startup_banner(context_dir, tokens.email)
+    display_startup_banner(context_dir, tokens.email, peer_name=peer)
 
     # Start sync loop and Claude
-    print("Starting Claude Code with sync enabled...")
-    print(f"{DIM}(Sync runs every 30 seconds in background){RESET}\n")
+    if not is_interactive:
+        print("Starting Claude Code with sync enabled...")
+        print(f"{DIM}(Sync runs every 30 seconds in background){RESET}\n")
+
+    # Ensure terminal state is clean before launching Claude
+    # This prevents ANSI escape sequences from bleeding into Claude's rendering
+    print(RESET, end='', flush=True)
+    sys.stdout.flush()
 
     # Run async main with HTTP sync
-    asyncio.run(run_with_http_sync(context_dir, tokens.email, tokens.id_token))
+    asyncio.run(run_with_http_sync(
+        context_dir, tokens.email, tokens.id_token,
+        system_prompt=system_prompt, initial_prompt=initial_prompt
+    ))
 
 
 async def run_with_http_sync(
@@ -1066,6 +1104,8 @@ async def run_with_http_sync(
     email: str,
     id_token: str,
     interval: int = 30,
+    system_prompt: str | None = None,
+    initial_prompt: str | None = None,
 ):
     """Run Claude Code with background HTTP sync loop."""
     stop_event = asyncio.Event()
@@ -1093,9 +1133,16 @@ async def run_with_http_sync(
     sync_task = asyncio.create_task(sync_loop())
 
     try:
+        # Build Claude command with optional prompts
+        claude_args = ["claude"]
+        if system_prompt:
+            claude_args.extend(["--system-prompt", system_prompt])
+        if initial_prompt:
+            claude_args.append(initial_prompt)
+
         # Run Claude Code
         process = await asyncio.create_subprocess_exec(
-            "claude",
+            *claude_args,
             stdin=None,  # Inherit stdin
             stdout=None,  # Inherit stdout
             stderr=None,  # Inherit stderr
@@ -1338,10 +1385,14 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
         elif context_info and not server_info:
             to_upload.append((path, context_path, shadow_path))
 
-        # Case 3: File in shadow matches server - check if context changed
+        # Case 3: File in shadow matches server
         elif shadow_info and server_info and shadow_info["sha256"] == server_info["sha256"]:
             if context_info and context_info["mtime"] > shadow_info["mtime"]:
+                # Context changed - upload
                 to_upload.append((path, context_path, shadow_path))
+            elif not context_info:
+                # Context missing - decrypt from shadow to context
+                to_download.append((path, shadow_path, context_path, server_info))
 
     total_ops = len(to_upload) + len(to_download)
     if total_ops == 0:
@@ -1468,6 +1519,31 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
             print(f"    - {err}")
         if len(errors) > 5:
             print(f"    ... and {len(errors) - 5} more")
+
+    # Handle interactive session transcripts
+    try:
+        from .transcripts import (
+            discover_new_interactive_transcripts,
+            import_transcript,
+            commit_transcript_to_peer,
+        )
+
+        # Discover new transcripts from Claude Code's storage
+        new_transcripts = discover_new_interactive_transcripts(email, context_dir)
+
+        for jsonl_path, metadata in new_transcripts:
+            # Import to local context (sync_http will upload to our repo automatically)
+            transcript_path = import_transcript(jsonl_path, metadata, email, context_dir)
+
+            if transcript_path:
+                # Upload to peer's repo explicitly
+                peer_email = metadata.get("peer_email")
+                if peer_email:
+                    commit_transcript_to_peer(transcript_path, peer_email, email, id_token)
+
+    except Exception:
+        # Silent failure - don't crash sync loop
+        pass
 
     return True
 

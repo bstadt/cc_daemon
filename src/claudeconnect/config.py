@@ -39,6 +39,36 @@ def sanitize_email(email: str) -> str:
 email_to_repo_name = sanitize_email
 
 
+def repo_name_to_email(repo_name: str) -> str:
+    """
+    Convert repository name back to email (best effort).
+
+    This is a lossy conversion since both @ and . become -.
+    Uses heuristic: last two parts are domain, rest is username.
+
+    Args:
+        repo_name: Sanitized repo name (e.g., "brandon-gmail-com")
+
+    Returns:
+        Email address (e.g., "brandon@gmail.com")
+
+    Examples:
+        "brandon-gmail-com" → "brandon@gmail.com"
+        "john-doe-example-com" → "john.doe@example.com"
+    """
+    # Convert all - to .
+    with_dots = repo_name.replace("-", ".")
+
+    # If there are 2+ dots, split into user@domain
+    if with_dots.count(".") >= 2:
+        parts = with_dots.rsplit(".", 2)
+        if len(parts) == 3:
+            return f"{parts[0]}@{parts[1]}.{parts[2]}"
+
+    # Fallback: return as-is (shouldn't happen with valid repo names)
+    return with_dots
+
+
 def get_shadow_dir(email: str) -> Path:
     """
     Get the shadow directory path for a user.

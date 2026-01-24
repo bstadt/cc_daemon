@@ -33,10 +33,6 @@ except ImportError:
     HAS_ENCRYPTION = False
 
 
-# Directory for interactive session transcripts
-TRANSCRIPTS_DIR = Path.home() / ".claude-connect" / "transcripts"
-
-
 # Cache directory for peer contexts
 PEERS_DIR = Path.home() / ".claude-connect" / "peers"
 
@@ -852,11 +848,14 @@ def run_interactive_session(
     Opens a new Terminal.app window (macOS only) where the user can chat directly
     with a Claude instance that has access to the peer's context.
 
+    The conversation is automatically saved by Claude Code to ~/.claude/projects/
+    and will be synced to both repos within 60-90 seconds after the session ends.
+
     Args:
         peer_email: The peer's email address
 
     Returns:
-        Tuple of (success, session_id or error message)
+        Tuple of (success: bool, message: str)
     """
     from .cli import get_valid_token
 
@@ -864,9 +863,9 @@ def run_interactive_session(
     if platform.system() != "Darwin":
         return False, "Interactive sessions are only supported on macOS. Use `claudeconnect session` for autonomous conversations."
 
-    # Check for script command
-    if not shutil.which("script"):
-        return False, "The 'script' command is not available. Cannot capture transcript."
+    # Check for Claude Code installation
+    if not shutil.which("claude"):
+        return False, "Claude Code (claude command) not found. Please install from https://claude.ai/download"
 
     # Get our credentials
     tokens = get_valid_token()
@@ -877,7 +876,6 @@ def run_interactive_session(
     if not config.context_dir:
         return False, "No context directory configured"
 
-    our_context_dir = Path(config.context_dir)
     our_email = tokens.email
 
     # Pull peer's context
@@ -886,25 +884,27 @@ def run_interactive_session(
     if not peer_context_dir:
         return False, f"Failed to pull {peer_email}'s context. Are you connected as friends?"
 
-    # Generate session ID
-    session_id = datetime.now().strftime("%Y-%m-%d") + "_" + uuid4().hex[:8]
-
-    # Create transcripts directory
-    TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
-    transcript_path = TRANSCRIPTS_DIR / f"{session_id}.txt"
+    # Verify directory exists
+    if not peer_context_dir.exists() or not peer_context_dir.is_dir():
+        return False, f"Peer context directory not found: {peer_context_dir}"
 
     # Generate system prompt
     system_prompt = generate_interactive_prompt(peer_email, our_email)
 
-    # Write system prompt to a temp file to avoid escaping issues
-    prompt_file = TRANSCRIPTS_DIR / f"{session_id}_prompt.txt"
-    prompt_file.write_text(system_prompt)
+    # Write system prompt to a temp file to avoid complex escaping issues
+    # Using tempfile to avoid accumulation in /tmp
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, prefix='cc-prompt-') as f:
+        f.write(system_prompt)
+        prompt_file = f.name
 
     # Build the command to run in the new terminal
-    # We use script to capture the session, then claude with the system prompt from file
-    # cd to peer context first so Claude sees it as its working directory
-    # Pass "hi" as initial prompt to trigger Claude's greeting
-    terminal_cmd = f"script -Fq {transcript_path} bash -c 'cd {peer_context_dir} && claude --system-prompt \"$(cat {prompt_file})\" \"hi\"'"
+    # Clear venv variables to avoid activation/deactivation messages that corrupt display
+    # Use claudeconnect instead of claude to get dashboard + sync during session
+    # Pass context-dir to specify peer's context, system-prompt for persona, initial-prompt to greet
+    # Pass --peer for simplified interactive session banner
+    peer_display_name = peer_email.split("@")[0] if "@" in peer_email else peer_email
+    terminal_cmd = f'unset VIRTUAL_ENV CONDA_DEFAULT_ENV; cd {peer_context_dir} && claudeconnect start --context-dir "{peer_context_dir}" --peer "{peer_display_name}" --system-prompt "$(cat {prompt_file})" --initial-prompt "hi"'
 
     # Escape for AppleScript: backslash-escape double quotes and backslashes
     escaped_cmd = terminal_cmd.replace("\\", "\\\\").replace('"', '\\"')
@@ -918,9 +918,7 @@ def run_interactive_session(
     '''
 
     print(f"\nOpening interactive session in new Terminal window...")
-    print(f"  Session ID: {session_id}")
     print(f"  Peer context: {peer_context_dir}")
-    print(f"  Transcript will be saved to: {transcript_path}")
 
     try:
         result = subprocess.run(
@@ -941,62 +939,10 @@ def run_interactive_session(
 
     print(f"\n✓ Interactive session started!")
     print(f"\n  You're now chatting with {peer_email}'s Claude in the new window.")
-    print(f"  When you're done, press Ctrl+D twice to exit.")
-    print(f"\n  After the session ends, run:")
-    print(f"    claudeconnect commit-transcript {session_id}")
-    print(f"  to save and share the transcript.")
+    print(f"  When you're done, press Ctrl+D to exit.")
+    print(f"\n  The conversation will be automatically saved and synced to both repos")
+    print(f"  within 60-90 seconds after you exit.")
 
-    return True, session_id
+    return True, f"Interactive session with {peer_email} started"
 
 
-def commit_interactive_transcript(
-    session_id: str,
-) -> tuple[bool, str]:
-    """
-    Commit an interactive session transcript to both repos.
-
-    Reads the raw transcript, adds a header, and commits to both the user's
-    and peer's repos.
-
-    Args:
-        session_id: The session ID from run_interactive_session
-
-    Returns:
-        Tuple of (success, transcript_path or error message)
-    """
-    from .cli import get_valid_token
-
-    # Get our credentials
-    tokens = get_valid_token()
-    if not tokens:
-        return False, "Not logged in"
-
-    config = get_config()
-    if not config.context_dir:
-        return False, "No context directory configured"
-
-    our_context_dir = Path(config.context_dir)
-    our_email = tokens.email
-
-    # Find the transcript file
-    transcript_path = TRANSCRIPTS_DIR / f"{session_id}.txt"
-    if not transcript_path.exists():
-        return False, f"Transcript not found: {transcript_path}"
-
-    # Read the raw transcript
-    raw_transcript = transcript_path.read_text()
-
-    if len(raw_transcript.strip()) < 100:
-        return False, "Transcript appears to be empty or too short"
-
-    # We need to determine the peer email from the session
-    # For now, we'll ask the user to provide it or parse from the transcript
-    # This is a limitation - we should store session metadata
-
-    # For now, return success with instructions
-    print(f"\nTranscript found: {transcript_path}")
-    print(f"  Size: {len(raw_transcript)} bytes")
-    print(f"\n  To commit this transcript, the peer email is needed.")
-    print(f"  This will be automated in a future version.")
-
-    return True, str(transcript_path)
