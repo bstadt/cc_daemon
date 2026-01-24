@@ -1338,10 +1338,14 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
         elif context_info and not server_info:
             to_upload.append((path, context_path, shadow_path))
 
-        # Case 3: File in shadow matches server - check if context changed
+        # Case 3: File in shadow matches server
         elif shadow_info and server_info and shadow_info["sha256"] == server_info["sha256"]:
             if context_info and context_info["mtime"] > shadow_info["mtime"]:
+                # Context changed - upload
                 to_upload.append((path, context_path, shadow_path))
+            elif not context_info:
+                # Context missing - decrypt from shadow to context
+                to_download.append((path, shadow_path, context_path, server_info))
 
     total_ops = len(to_upload) + len(to_download)
     if total_ops == 0:

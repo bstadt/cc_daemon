@@ -43,6 +43,7 @@ User → Google OAuth → Server → HTTP File Storage
 - `cli.py` - Entry point, all CLI commands, context initialization
 - `auth.py` - OAuth flow, JWT tokens, token refresh
 - `session.py` - Conversation sessions (dual-instance mode default), HTTP sync functions
+- `transcripts.py` - Interactive session transcript discovery, import, and sync
 - `scanner.py` - Sensitive content detection, auto-privatization
 - `config.py` - Local config/token storage at `~/.claude-connect/`
 - `encryption.py` - X25519 + AES-256-GCM client-side encryption

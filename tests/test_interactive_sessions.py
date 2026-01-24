@@ -29,6 +29,16 @@ import sys
 # Add src directory to path so imports work after os.chdir in tests
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# Import claudeconnect modules at top level (before os.chdir in tests)
+from claudeconnect.config import email_to_repo_name, API_BASE_URL
+from claudeconnect.cli import get_valid_token
+from claudeconnect.transcripts import (
+    discover_new_interactive_transcripts,
+    import_transcript,
+    commit_transcript_to_peer,
+)
+import httpx
+
 from conf import ALICE_EMAIL, BOB_EMAIL
 from test_utils import (
     # Setup/cleanup
@@ -88,13 +98,6 @@ def manually_import_transcripts(context_dir: Path, our_email: str):
         context_dir: Path to user's context directory
         our_email: Our email address
     """
-    from claudeconnect.transcripts import (
-        discover_new_interactive_transcripts,
-        import_transcript,
-        commit_transcript_to_peer,
-    )
-    from claudeconnect.cli import get_valid_token
-
     log("Manually triggering transcript discovery and import...")
 
     # Discover new transcripts
@@ -150,8 +153,6 @@ def wait_for_transcript_discovery(
     Returns:
         Path to the imported transcript, or None if timeout
     """
-    from claudeconnect.config import email_to_repo_name
-
     peer_repo_name = email_to_repo_name(peer_email)
     conv_dir = context_dir / "claudeconnect" / f"with-{peer_repo_name}"
 
@@ -231,10 +232,6 @@ def verify_transcript_on_server(email: str, peer_email: str) -> bool:
     Returns:
         True if transcript found on server
     """
-    from claudeconnect.config import email_to_repo_name
-    import httpx
-    from claudeconnect.cli import get_valid_token
-
     log(f"Checking server for transcript in {email}'s repo...")
 
     tokens = get_valid_token()
@@ -245,7 +242,6 @@ def verify_transcript_on_server(email: str, peer_email: str) -> bool:
     peer_repo_name = email_to_repo_name(peer_email)
 
     # Get manifest
-    from conf import API_BASE_URL
     headers = {"Authorization": f"Bearer {tokens.id_token}"}
 
     try:
@@ -374,8 +370,8 @@ def test_interactive_session_flow(temp_dirs):
     log("\n[7/11] Waiting for transcript auto-discovery and import...")
     log("(Background sync not running in test - manually polling)")
 
-    alice_context_dir = temp1 / alice_email.replace("@", "-").replace(".", "-")
-    transcript_path = wait_for_transcript_discovery(alice_context_dir, bob_email, alice_email, timeout_seconds=120)
+    # Use temp1 directly as Alice's context directory (no email subdirectory)
+    transcript_path = wait_for_transcript_discovery(temp1, bob_email, alice_email, timeout_seconds=120)
 
     assert transcript_path is not None, "Transcript was not discovered/imported within timeout"
     log(f"✓ Transcript imported: {transcript_path}")
@@ -417,10 +413,9 @@ def test_interactive_session_flow(temp_dirs):
     sync_files(temp2)
 
     # Verify transcript appears in Bob's local context
-    bob_context_dir = temp2 / bob_email.replace("@", "-").replace(".", "-")
-    from claudeconnect.config import email_to_repo_name
+    # Bob's context directory is temp2 (set during init_account)
     alice_repo_name = email_to_repo_name(alice_email)
-    bob_conv_dir = bob_context_dir / "claudeconnect" / f"with-{alice_repo_name}"
+    bob_conv_dir = temp2 / "claudeconnect" / f"with-{alice_repo_name}"
 
     log(f"  Checking for transcript in {bob_conv_dir}...")
 
@@ -524,8 +519,8 @@ def main():
         log("\n[7/11] Waiting for transcript auto-discovery and import...")
         log("(Background sync not running in test - manually polling)")
 
-        alice_context_dir = temp1 / alice_email.replace("@", "-").replace(".", "-")
-        transcript_path = wait_for_transcript_discovery(alice_context_dir, bob_email, alice_email, timeout_seconds=120)
+        # Use temp1 directly as Alice's context directory (no email subdirectory)
+        transcript_path = wait_for_transcript_discovery(temp1, bob_email, alice_email, timeout_seconds=120)
 
         if not transcript_path:
             raise RuntimeError("Transcript was not discovered/imported within timeout")
@@ -570,17 +565,16 @@ def main():
         log("  Bob syncing to pull transcript...")
         sync_files(temp2)
 
-        bob_context_dir = temp2 / bob_email.replace("@", "-").replace(".", "-")
-        from claudeconnect.config import email_to_repo_name
+        # Bob's context directory is temp2 (set during init_account)
         alice_repo_name = email_to_repo_name(alice_email)
-        bob_conv_dir = bob_context_dir / "claudeconnect" / f"with-{alice_repo_name}"
+        bob_conv_dir = temp2 / "claudeconnect" / f"with-{alice_repo_name}"
 
         log(f"  Checking for transcript in {bob_conv_dir}...")
 
         if not bob_conv_dir.exists():
             raise RuntimeError(f"Bob's conversation directory doesn't exist: {bob_conv_dir}")
 
-        bob_transcripts = list(bob_conv_dir.glob("*.md"))
+        bob_transcripts = [p for p in bob_conv_dir.glob("*.md") if p.name != "README.md"]
         if len(bob_transcripts) == 0:
             raise RuntimeError("No transcripts found in Bob's local context")
 
