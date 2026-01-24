@@ -1,0 +1,481 @@
+#!/usr/bin/env python3
+"""
+Interactive Session Integration Test
+
+Tests the full interactive session flow:
+1. Setup two accounts (Alice and Bob)
+2. Friend request flow
+3. Alice starts interactive session with Bob
+4. User manually interacts with terminal
+5. Verify transcript auto-import from ~/.claude/projects/
+6. Verify transcript sync to both repos
+
+Run with: pytest tests/test_interactive_sessions.py -s -m integration
+(the -s flag is required for interactive prompts)
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import tempfile
+import time
+from pathlib import Path
+
+import pytest
+
+from conf import ALICE_EMAIL, BOB_EMAIL
+from test_utils import (
+    # Setup/cleanup
+    clean_server,
+    clean_client,
+    create_temp_dirs,
+    # Account operations
+    login,
+    init_account,
+    verify_init_structure,
+    # Sync
+    sync_files,
+    # Friend operations
+    send_friend_request,
+    check_friend_request,
+    accept_friend_request,
+    # Logging
+    log,
+    wait_for_user,
+    run,
+)
+
+
+def start_interactive_session(temp_dir: Path, peer_email: str) -> tuple[bool, str]:
+    """Start an interactive session with a peer.
+
+    Returns:
+        (success, message)
+    """
+    log(f"Starting interactive session with {peer_email}...")
+
+    # Run claudeconnect interactive command
+    cmd = ["claudeconnect", "interactive", peer_email]
+
+    try:
+        result = run(cmd, cwd=temp_dir, check=False)
+
+        if result.returncode != 0:
+            log(f"Interactive session failed: {result.stderr}")
+            return False, result.stderr
+
+        log("Interactive session started successfully")
+        return True, "Interactive session started"
+
+    except Exception as e:
+        log(f"Error starting interactive session: {e}")
+        return False, str(e)
+
+
+def wait_for_transcript_discovery(
+    context_dir: Path,
+    peer_email: str,
+    timeout_seconds: int = 120,
+) -> Path | None:
+    """Wait for transcript to be discovered and imported from Claude Code storage.
+
+    Polls the claudeconnect/with-{peer}/ directory for new transcript files.
+
+    Args:
+        context_dir: Path to user's context directory
+        peer_email: Email of the peer
+        timeout_seconds: Maximum time to wait
+
+    Returns:
+        Path to the imported transcript, or None if timeout
+    """
+    from src.claudeconnect.config import email_to_repo_name
+
+    peer_repo_name = email_to_repo_name(peer_email)
+    conv_dir = context_dir / "claudeconnect" / f"with-{peer_repo_name}"
+
+    log(f"Waiting for transcript in {conv_dir}...")
+    log(f"(Timeout: {timeout_seconds}s)")
+
+    start_time = time.time()
+    last_count = 0
+
+    while time.time() - start_time < timeout_seconds:
+        if conv_dir.exists():
+            # Look for markdown files with timestamp format: YYYY-MM-DD-HHMMSS_{uuid}.md
+            transcripts = list(conv_dir.glob("*.md"))
+
+            if len(transcripts) > last_count:
+                log(f"  Found {len(transcripts)} transcript(s)")
+                last_count = len(transcripts)
+
+                # Return the most recent one
+                if transcripts:
+                    newest = max(transcripts, key=lambda p: p.stat().st_mtime)
+                    log(f"  Newest transcript: {newest.name}")
+
+                    # Wait a bit more to ensure file is completely written
+                    time.sleep(5)
+                    return newest
+
+        # Poll every 5 seconds
+        time.sleep(5)
+        elapsed = int(time.time() - start_time)
+        if elapsed % 15 == 0:  # Status every 15s
+            log(f"  Still waiting... ({elapsed}s elapsed)")
+
+    log(f"  Timeout after {timeout_seconds}s")
+    return None
+
+
+def verify_transcript_content(transcript_path: Path, peer_email: str, our_email: str) -> bool:
+    """Verify the transcript has expected format and content.
+
+    Args:
+        transcript_path: Path to the markdown transcript
+        peer_email: Email of the peer
+        our_email: Our email
+
+    Returns:
+        True if transcript looks valid
+    """
+    log(f"Verifying transcript content: {transcript_path.name}")
+
+    content = transcript_path.read_text()
+
+    # Check header
+    checks = [
+        ("Header exists", "# Interactive Session:" in content),
+        ("Session ID present", "**Session ID**:" in content),
+        ("Date present", "**Date**:" in content),
+        ("User present", f"**User**: {our_email}" in content),
+        ("Representing present", f"**Representing**: {peer_email}" in content),
+        ("Type is interactive", "**Type**: interactive" in content),
+        ("Source is claude-code-transcript", "**Source**: claude-code-transcript" in content),
+    ]
+
+    all_passed = True
+    for check_name, passed in checks:
+        status = "✓" if passed else "✗"
+        log(f"  {status} {check_name}")
+        if not passed:
+            all_passed = False
+
+    return all_passed
+
+
+def verify_transcript_on_server(email: str, peer_email: str) -> bool:
+    """Verify transcript exists on the server.
+
+    Args:
+        email: Email of the repo owner
+        peer_email: Email of the peer
+
+    Returns:
+        True if transcript found on server
+    """
+    from src.claudeconnect.config import email_to_repo_name
+    import httpx
+    from src.claudeconnect.cli import get_valid_token
+
+    log(f"Checking server for transcript in {email}'s repo...")
+
+    tokens = get_valid_token()
+    if not tokens:
+        log("  Not logged in, cannot check server")
+        return False
+
+    peer_repo_name = email_to_repo_name(peer_email)
+
+    # Get manifest
+    from conf import API_BASE_URL
+    headers = {"Authorization": f"Bearer {tokens.id_token}"}
+
+    try:
+        response = httpx.get(
+            f"{API_BASE_URL}/manifest/{email}",
+            headers=headers,
+            timeout=30,
+        )
+
+        if response.status_code != 200:
+            log(f"  Failed to get manifest: {response.status_code}")
+            return False
+
+        manifest = response.json()
+        files = manifest.get("files", [])
+
+        # Look for transcript in claudeconnect/with-{peer}/ directory
+        transcript_files = [
+            f for f in files
+            if f["path"].startswith(f"claudeconnect/with-{peer_repo_name}/")
+            and f["path"].endswith(".md")
+        ]
+
+        if transcript_files:
+            log(f"  ✓ Found {len(transcript_files)} transcript(s) on server")
+            for f in transcript_files:
+                log(f"    - {f['path']}")
+            return True
+        else:
+            log(f"  ✗ No transcripts found on server")
+            return False
+
+    except Exception as e:
+        log(f"  Error checking server: {e}")
+        return False
+
+
+@pytest.fixture
+def temp_dirs():
+    """Create and cleanup temp directories for both accounts."""
+    temp1 = Path(tempfile.mkdtemp(prefix="cc_interactive_alice_"))
+    temp2 = Path(tempfile.mkdtemp(prefix="cc_interactive_bob_"))
+    log(f"Created {temp1} (Alice)")
+    log(f"Created {temp2} (Bob)")
+
+    yield temp1, temp2
+
+    # Cleanup
+    if temp1.exists():
+        log(f"Cleaning up {temp1}")
+        shutil.rmtree(temp1)
+    if temp2.exists():
+        log(f"Cleaning up {temp2}")
+        shutil.rmtree(temp2)
+
+
+@pytest.mark.integration
+def test_interactive_session_flow(temp_dirs):
+    """
+    Full interactive session test.
+
+    Tests automatic transcript discovery, import, and sync after
+    an interactive session using Claude Code's native storage.
+
+    Run with: pytest tests/test_interactive_sessions.py -s -m integration
+    """
+    temp1, temp2 = temp_dirs
+
+    log("==========================================")
+    log("Interactive Session Integration Test")
+    log("==========================================")
+
+    # Setup
+    log("\n[1/9] Cleaning server and client...")
+    clean_server()
+    clean_client()
+
+    # Alice setup
+    log("\n[2/9] Setting up Alice's account...")
+    os.chdir(temp1)
+    login("Alice", temp1)
+    alice_email = init_account("Alice", temp1)
+    verify_init_structure("Alice", temp1)
+
+    # Bob setup
+    log("\n[3/9] Setting up Bob's account...")
+    os.chdir(temp2)
+    login("Bob", temp2)
+    bob_email = init_account("Bob", temp2)
+    verify_init_structure("Bob", temp2)
+
+    # Bob sends friend request
+    log("\n[4/9] Bob sending friend request to Alice...")
+    send_friend_request(temp2, alice_email)
+
+    # Alice receives and accepts
+    log("\n[5/9] Alice accepting friend request from Bob...")
+    os.chdir(temp1)
+    login("Alice", temp1)
+    init_account("Alice", temp1)
+    sync_files(temp1)  # Pull friend request from server
+    check_friend_request(temp1, bob_email)
+    accept_friend_request(temp1, bob_email)
+
+    # Alice starts interactive session
+    log("\n[6/9] Alice starting interactive session with Bob...")
+    log("⚠️  IMPORTANT: This will open a new Terminal window!")
+    log("⚠️  macOS only - requires Terminal.app")
+
+    wait_for_user(
+        "\nWhen ready to start the interactive session, press Enter.\n"
+        "A Terminal window will open. Have a short conversation (3-5 exchanges)\n"
+        "with Bob's Claude, then press Ctrl+D to exit.\n"
+    )
+
+    success, message = start_interactive_session(temp1, bob_email)
+    assert success, f"Failed to start interactive session: {message}"
+
+    log("\n✓ Interactive session started!")
+    log("\nPlease interact with Bob's Claude in the Terminal window.")
+    log("Have at least 3-5 exchanges, then press Ctrl+D to exit.")
+
+    wait_for_user("\nAfter you've exited the Terminal window, press Enter to continue...")
+
+    # Wait for transcript discovery and import
+    log("\n[7/9] Waiting for transcript auto-discovery and import...")
+    log("(This should happen within 60-90 seconds)")
+
+    alice_context_dir = temp1 / alice_email.replace("@", "-").replace(".", "-")
+    transcript_path = wait_for_transcript_discovery(alice_context_dir, bob_email, timeout_seconds=120)
+
+    assert transcript_path is not None, "Transcript was not discovered/imported within timeout"
+    log(f"✓ Transcript imported: {transcript_path}")
+
+    # Verify transcript content
+    log("\n[8/9] Verifying transcript content...")
+    content_valid = verify_transcript_content(transcript_path, bob_email, alice_email)
+    assert content_valid, "Transcript content validation failed"
+    log("✓ Transcript content looks good")
+
+    # Wait a bit more for sync to upload to server
+    log("\nWaiting 30 seconds for background sync to upload...")
+    time.sleep(30)
+
+    # Trigger manual sync to ensure upload
+    log("Triggering manual sync...")
+    sync_files(temp1)
+
+    # Verify transcript on Alice's server repo
+    log("\n[9/9] Verifying transcript uploaded to server...")
+    alice_server_ok = verify_transcript_on_server(alice_email, bob_email)
+    assert alice_server_ok, "Transcript not found on Alice's server repo"
+    log("✓ Transcript found on Alice's server repo")
+
+    # TODO: Also verify on Bob's server repo (requires peer upload to work)
+    # bob_server_ok = verify_transcript_on_server(bob_email, alice_email)
+    # assert bob_server_ok, "Transcript not found on Bob's server repo"
+
+    # Summary
+    log("\n==========================================")
+    log("✓ Interactive Session Test Complete!")
+    log("==========================================")
+    log(f"Alice: {alice_email}")
+    log(f"Bob: {bob_email}")
+    log(f"Transcript: {transcript_path.name}")
+    log(f"Size: {len(transcript_path.read_text())} bytes")
+
+
+def main():
+    """Run as standalone script."""
+    temp1 = None
+    temp2 = None
+
+    try:
+        temp1, temp2 = create_temp_dirs()
+
+        log("==========================================")
+        log("Interactive Session Integration Test")
+        log("==========================================")
+
+        # Setup
+        log("\n[1/9] Cleaning server and client...")
+        clean_server()
+        clean_client()
+
+        # Alice setup
+        log("\n[2/9] Setting up Alice's account...")
+        os.chdir(temp1)
+        login("Alice", temp1)
+        alice_email = init_account("Alice", temp1)
+        verify_init_structure("Alice", temp1)
+
+        # Bob setup
+        log("\n[3/9] Setting up Bob's account...")
+        os.chdir(temp2)
+        login("Bob", temp2)
+        bob_email = init_account("Bob", temp2)
+        verify_init_structure("Bob", temp2)
+
+        # Bob sends friend request
+        log("\n[4/9] Bob sending friend request to Alice...")
+        send_friend_request(temp2, alice_email)
+
+        # Alice receives and accepts
+        log("\n[5/9] Alice accepting friend request from Bob...")
+        os.chdir(temp1)
+        login("Alice", temp1)
+        init_account("Alice", temp1)
+        sync_files(temp1)
+        check_friend_request(temp1, bob_email)
+        accept_friend_request(temp1, bob_email)
+
+        # Alice starts interactive session
+        log("\n[6/9] Alice starting interactive session with Bob...")
+        log("⚠️  IMPORTANT: This will open a new Terminal window!")
+        log("⚠️  macOS only - requires Terminal.app")
+
+        wait_for_user(
+            "\nWhen ready to start the interactive session, press Enter.\n"
+            "A Terminal window will open. Have a short conversation (3-5 exchanges)\n"
+            "with Bob's Claude, then press Ctrl+D to exit.\n"
+        )
+
+        success, message = start_interactive_session(temp1, bob_email)
+        if not success:
+            raise RuntimeError(f"Failed to start interactive session: {message}")
+
+        log("\n✓ Interactive session started!")
+        log("\nPlease interact with Bob's Claude in the Terminal window.")
+        log("Have at least 3-5 exchanges, then press Ctrl+D to exit.")
+
+        wait_for_user("\nAfter you've exited the Terminal window, press Enter to continue...")
+
+        # Wait for transcript discovery
+        log("\n[7/9] Waiting for transcript auto-discovery and import...")
+        log("(This should happen within 60-90 seconds)")
+
+        alice_context_dir = temp1 / alice_email.replace("@", "-").replace(".", "-")
+        transcript_path = wait_for_transcript_discovery(alice_context_dir, bob_email, timeout_seconds=120)
+
+        if not transcript_path:
+            raise RuntimeError("Transcript was not discovered/imported within timeout")
+
+        log(f"✓ Transcript imported: {transcript_path}")
+
+        # Verify transcript content
+        log("\n[8/9] Verifying transcript content...")
+        content_valid = verify_transcript_content(transcript_path, bob_email, alice_email)
+        if not content_valid:
+            raise RuntimeError("Transcript content validation failed")
+        log("✓ Transcript content looks good")
+
+        # Wait for sync
+        log("\nWaiting 30 seconds for background sync to upload...")
+        time.sleep(30)
+
+        # Manual sync
+        log("Triggering manual sync...")
+        sync_files(temp1)
+
+        # Verify on server
+        log("\n[9/9] Verifying transcript uploaded to server...")
+        alice_server_ok = verify_transcript_on_server(alice_email, bob_email)
+        if not alice_server_ok:
+            raise RuntimeError("Transcript not found on Alice's server repo")
+        log("✓ Transcript found on Alice's server repo")
+
+        # Summary
+        log("\n==========================================")
+        log("✓ Interactive Session Test Complete!")
+        log("==========================================")
+        log(f"Alice: {alice_email}")
+        log(f"Bob: {bob_email}")
+        log(f"Transcript: {transcript_path.name}")
+        log(f"Size: {len(transcript_path.read_text())} bytes")
+
+    finally:
+        # Cleanup
+        if temp1 and temp1.exists():
+            log(f"\nCleaning up {temp1}")
+            shutil.rmtree(temp1)
+        if temp2 and temp2.exists():
+            log(f"Cleaning up {temp2}")
+            shutil.rmtree(temp2)
+
+
+if __name__ == "__main__":
+    main()
