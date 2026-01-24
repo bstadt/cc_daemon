@@ -1469,6 +1469,31 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
         if len(errors) > 5:
             print(f"    ... and {len(errors) - 5} more")
 
+    # Handle interactive session transcripts
+    try:
+        from .transcripts import (
+            discover_new_interactive_transcripts,
+            import_transcript,
+            commit_transcript_to_peer,
+        )
+
+        # Discover new transcripts from Claude Code's storage
+        new_transcripts = discover_new_interactive_transcripts(email, context_dir)
+
+        for jsonl_path, metadata in new_transcripts:
+            # Import to local context (sync_http will upload to our repo automatically)
+            transcript_path = import_transcript(jsonl_path, metadata, email, context_dir)
+
+            if transcript_path:
+                # Upload to peer's repo explicitly
+                peer_email = metadata.get("peer_email")
+                if peer_email:
+                    commit_transcript_to_peer(transcript_path, peer_email, email, id_token)
+
+    except Exception:
+        # Silent failure - don't crash sync loop
+        pass
+
     return True
 
 
