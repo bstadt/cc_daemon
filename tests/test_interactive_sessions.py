@@ -24,6 +24,10 @@ import time
 from pathlib import Path
 
 import pytest
+import sys
+
+# Add src directory to path so imports work after os.chdir in tests
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from conf import ALICE_EMAIL, BOB_EMAIL
 from test_utils import (

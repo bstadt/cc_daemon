@@ -899,9 +899,10 @@ def run_interactive_session(
         prompt_file = f.name
 
     # Build the command to run in the new terminal
+    # Clear venv variables to avoid activation/deactivation messages that corrupt display
     # cd to peer context first so Claude sees it as its working directory
     # Pass "hi" as initial prompt to trigger Claude's greeting
-    terminal_cmd = f'cd {peer_context_dir} && claude --system-prompt "$(cat {prompt_file})" "hi"'
+    terminal_cmd = f'unset VIRTUAL_ENV CONDA_DEFAULT_ENV; cd {peer_context_dir} && claude --system-prompt "$(cat {prompt_file})" "hi"'
 
     # Escape for AppleScript: backslash-escape double quotes and backslashes
     escaped_cmd = terminal_cmd.replace("\\", "\\\\").replace('"', '\\"')
