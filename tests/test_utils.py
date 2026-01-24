@@ -117,11 +117,29 @@ def clean_server():
 
 
 def clean_client():
-    """Remove local ~/.claude-connect."""
+    """Remove local ~/.claude-connect and ~/.claude/projects test directories."""
     log("Removing local ~/.claude-connect...")
     if CC_CONFIG_DIR.exists():
         shutil.rmtree(CC_CONFIG_DIR)
-    log("Local config removed.")
+
+    # Also clean up Claude Code projects directories from tests
+    # These correspond to peer context directories like:
+    # ~/.claude-connect/peers/connectclaude5-gmail-com
+    # which become ~/.claude/projects/-Users-...-peers-connectclaude5-gmail-com
+    claude_projects = Path.home() / ".claude" / "projects"
+    if claude_projects.exists():
+        # Convert test emails to peer directory names (@ and . become -)
+        alice_peer_name = ALICE_EMAIL.replace("@", "-").replace(".", "-")
+        bob_peer_name = BOB_EMAIL.replace("@", "-").replace(".", "-")
+
+        for project_dir in claude_projects.iterdir():
+            if project_dir.is_dir() and ("-peers-" in project_dir.name):
+                # Check if it's one of our test accounts
+                if alice_peer_name in project_dir.name or bob_peer_name in project_dir.name:
+                    log(f"  Removing test project directory: {project_dir.name}")
+                    shutil.rmtree(project_dir)
+
+    log("Local config and test projects removed.")
 
 
 def create_temp_dirs() -> tuple[Path, Path]:
