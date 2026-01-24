@@ -891,17 +891,17 @@ def run_interactive_session(
     # Generate system prompt
     system_prompt = generate_interactive_prompt(peer_email, our_email)
 
-    # Escape single quotes in system prompt for heredoc
-    escaped_prompt = system_prompt.replace("'", "'\"'\"'")
+    # Write system prompt to a temp file to avoid complex escaping issues
+    # Using tempfile to avoid accumulation in /tmp
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, prefix='cc-prompt-') as f:
+        f.write(system_prompt)
+        prompt_file = f.name
 
     # Build the command to run in the new terminal
     # cd to peer context first so Claude sees it as its working directory
-    # Use heredoc to pass system prompt (avoids temp file)
     # Pass "hi" as initial prompt to trigger Claude's greeting
-    terminal_cmd = f"""cd {peer_context_dir} && claude --system-prompt "$(cat <<'PROMPT_EOF'
-{escaped_prompt}
-PROMPT_EOF
-)" "hi" """
+    terminal_cmd = f'cd {peer_context_dir} && claude --system-prompt "$(cat {prompt_file})" "hi"'
 
     # Escape for AppleScript: backslash-escape double quotes and backslashes
     escaped_cmd = terminal_cmd.replace("\\", "\\\\").replace('"', '\\"')
