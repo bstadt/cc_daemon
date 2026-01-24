@@ -902,7 +902,9 @@ def run_interactive_session(
     # Clear venv variables to avoid activation/deactivation messages that corrupt display
     # Use claudeconnect instead of claude to get dashboard + sync during session
     # Pass context-dir to specify peer's context, system-prompt for persona, initial-prompt to greet
-    terminal_cmd = f'unset VIRTUAL_ENV CONDA_DEFAULT_ENV; cd {peer_context_dir} && claudeconnect start --context-dir "{peer_context_dir}" --system-prompt "$(cat {prompt_file})" --initial-prompt "hi"'
+    # Pass --peer for simplified interactive session banner
+    peer_display_name = peer_email.split("@")[0] if "@" in peer_email else peer_email
+    terminal_cmd = f'unset VIRTUAL_ENV CONDA_DEFAULT_ENV; cd {peer_context_dir} && claudeconnect start --context-dir "{peer_context_dir}" --peer "{peer_display_name}" --system-prompt "$(cat {prompt_file})" --initial-prompt "hi"'
 
     # Escape for AppleScript: backslash-escape double quotes and backslashes
     escaped_cmd = terminal_cmd.replace("\\", "\\\\").replace('"', '\\"')

@@ -155,8 +155,12 @@ except ImportError:
     HAS_ENCRYPTION = False
 
 
-def display_startup_banner(context_dir: Path, email: str, clear_screen: bool = True) -> None:
-    """Display ClaudeConnect startup banner with two Claude creatures and status."""
+def display_startup_banner(context_dir: Path, email: str, clear_screen: bool = True, peer_name: str | None = None) -> None:
+    """Display ClaudeConnect startup banner with two Claude creatures and status.
+
+    If peer_name is provided, shows a simplified "Interactive session with <peer>" banner
+    instead of the full dashboard with notifications/conversations.
+    """
     # Clear screen for clean display (optional)
     if clear_screen:
         print(CLEAR, end='')
@@ -181,6 +185,14 @@ def display_startup_banner(context_dir: Path, email: str, clear_screen: bool = T
         print(f"  {CORAL}▘▘ ▝▝{RESET}     {LIME}▘▘ ▝▝{RESET}")
 
     print()
+
+    # For interactive sessions, show simplified banner and skip notifications
+    if peer_name:
+        print(f"  {WHITE}{BOLD}Interactive session with {LIME}{peer_name}{RESET}")
+        print()
+        # Ensure terminal attributes are reset
+        print(RESET, end='', flush=True)
+        return
 
     # Check for friend requests and conversations
     # New structure per system2.md:
@@ -965,7 +977,8 @@ def dashboard():
 @click.option("--initial-prompt", type=str, default=None, help="Initial user message to send")
 @click.option("--context-dir", type=click.Path(exists=True, file_okay=False, path_type=Path), default=None,
               help="Override context directory (for interactive sessions)")
-def start(system_prompt: str | None, initial_prompt: str | None, context_dir: Path | None):
+@click.option("--peer", type=str, default=None, help="Peer name for interactive session banner")
+def start(system_prompt: str | None, initial_prompt: str | None, context_dir: Path | None, peer: str | None):
     """Start Claude with sync enabled (default command)."""
     # Check for mock/dev mode
     mock_dir = get_mock_dir()
@@ -1052,20 +1065,27 @@ def start(system_prompt: str | None, initial_prompt: str | None, context_dir: Pa
             print("\nRun `claudeconnect init` in your context directory when ready.")
             sys.exit(0)
 
-    print(f"Connecting as {tokens.email}...")
+    # Interactive sessions have quieter output
+    is_interactive = peer is not None
+
+    if not is_interactive:
+        print(f"Connecting as {tokens.email}...")
 
     # Initial sync using HTTP
-    print("\nSyncing...")
+    if not is_interactive:
+        print("\nSyncing...")
     if not sync_http(context_dir, tokens.email, tokens.id_token):
-        print("  Sync failed")
+        if not is_interactive:
+            print("  Sync failed")
         sys.exit(1)
 
     # Display startup banner with friend requests and conversations
-    display_startup_banner(context_dir, tokens.email)
+    display_startup_banner(context_dir, tokens.email, peer_name=peer)
 
     # Start sync loop and Claude
-    print("Starting Claude Code with sync enabled...")
-    print(f"{DIM}(Sync runs every 30 seconds in background){RESET}\n")
+    if not is_interactive:
+        print("Starting Claude Code with sync enabled...")
+        print(f"{DIM}(Sync runs every 30 seconds in background){RESET}\n")
 
     # Ensure terminal state is clean before launching Claude
     # This prevents ANSI escape sequences from bleeding into Claude's rendering
