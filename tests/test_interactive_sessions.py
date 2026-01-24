@@ -91,7 +91,7 @@ def wait_for_transcript_discovery(
     Returns:
         Path to the imported transcript, or None if timeout
     """
-    from src.claudeconnect.config import email_to_repo_name
+    from claudeconnect.config import email_to_repo_name
 
     peer_repo_name = email_to_repo_name(peer_email)
     conv_dir = context_dir / "claudeconnect" / f"with-{peer_repo_name}"
@@ -176,9 +176,9 @@ def verify_transcript_on_server(email: str, peer_email: str) -> bool:
     Returns:
         True if transcript found on server
     """
-    from src.claudeconnect.config import email_to_repo_name
+    from claudeconnect.config import email_to_repo_name
     import httpx
-    from src.claudeconnect.cli import get_valid_token
+    from claudeconnect.cli import get_valid_token
 
     log(f"Checking server for transcript in {email}'s repo...")
 
