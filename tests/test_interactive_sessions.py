@@ -315,30 +315,30 @@ def test_interactive_session_flow(temp_dirs):
     log("==========================================")
 
     # Setup
-    log("\n[1/9] Cleaning server and client...")
+    log("\n[1/11] Cleaning server and client...")
     clean_server()
     clean_client()
 
     # Alice setup
-    log("\n[2/9] Setting up Alice's account...")
+    log("\n[2/11] Setting up Alice's account...")
     os.chdir(temp1)
     login("Alice", temp1)
     alice_email = init_account("Alice", temp1)
     verify_init_structure("Alice", temp1)
 
     # Bob setup
-    log("\n[3/9] Setting up Bob's account...")
+    log("\n[3/11] Setting up Bob's account...")
     os.chdir(temp2)
     login("Bob", temp2)
     bob_email = init_account("Bob", temp2)
     verify_init_structure("Bob", temp2)
 
     # Bob sends friend request
-    log("\n[4/9] Bob sending friend request to Alice...")
+    log("\n[4/11] Bob sending friend request to Alice...")
     send_friend_request(temp2, alice_email)
 
     # Alice receives and accepts
-    log("\n[5/9] Alice accepting friend request from Bob...")
+    log("\n[5/11] Alice accepting friend request from Bob...")
     os.chdir(temp1)
     login("Alice", temp1)
     init_account("Alice", temp1)
@@ -347,7 +347,7 @@ def test_interactive_session_flow(temp_dirs):
     accept_friend_request(temp1, bob_email)
 
     # Alice starts interactive session
-    log("\n[6/9] Alice starting interactive session with Bob...")
+    log("\n[6/11] Alice starting interactive session with Bob...")
     log("⚠️  IMPORTANT: This will open a new Terminal window!")
     log("⚠️  macOS only - requires Terminal.app")
 
@@ -367,7 +367,7 @@ def test_interactive_session_flow(temp_dirs):
     wait_for_user("\nAfter you've exited the Terminal window, press Enter to continue...")
 
     # Wait for transcript discovery and import
-    log("\n[7/9] Waiting for transcript auto-discovery and import...")
+    log("\n[7/11] Waiting for transcript auto-discovery and import...")
     log("(Background sync not running in test - manually polling)")
 
     alice_context_dir = temp1 / alice_email.replace("@", "-").replace(".", "-")
@@ -377,7 +377,7 @@ def test_interactive_session_flow(temp_dirs):
     log(f"✓ Transcript imported: {transcript_path}")
 
     # Verify transcript content
-    log("\n[8/9] Verifying transcript content...")
+    log("\n[8/11] Verifying transcript content...")
     content_valid = verify_transcript_content(transcript_path, bob_email, alice_email)
     assert content_valid, "Transcript content validation failed"
     log("✓ Transcript content looks good")
@@ -391,14 +391,52 @@ def test_interactive_session_flow(temp_dirs):
     sync_files(temp1)
 
     # Verify transcript on Alice's server repo
-    log("\n[9/9] Verifying transcript uploaded to server...")
+    log("\n[9/11] Verifying transcript uploaded to Alice's server repo...")
     alice_server_ok = verify_transcript_on_server(alice_email, bob_email)
     assert alice_server_ok, "Transcript not found on Alice's server repo"
     log("✓ Transcript found on Alice's server repo")
 
-    # TODO: Also verify on Bob's server repo (requires peer upload to work)
-    # bob_server_ok = verify_transcript_on_server(bob_email, alice_email)
-    # assert bob_server_ok, "Transcript not found on Bob's server repo"
+    # Verify transcript on Bob's server repo (peer upload)
+    log("\n[10/11] Verifying transcript uploaded to Bob's server repo...")
+    bob_server_ok = verify_transcript_on_server(bob_email, alice_email)
+    assert bob_server_ok, "Transcript not found on Bob's server repo"
+    log("✓ Transcript found on Bob's server repo")
+
+    # Bob pulls and decrypts the transcript
+    log("\n[11/11] Bob pulling transcript and verifying decryption...")
+    os.chdir(temp2)
+    login("Bob", temp2)
+    init_account("Bob", temp2)
+
+    # Sync to pull the transcript from server
+    log("  Bob syncing to pull transcript...")
+    sync_files(temp2)
+
+    # Verify transcript appears in Bob's local context
+    bob_context_dir = temp2 / bob_email.replace("@", "-").replace(".", "-")
+    from claudeconnect.config import email_to_repo_name
+    alice_repo_name = email_to_repo_name(alice_email)
+    bob_conv_dir = bob_context_dir / "claudeconnect" / f"with-{alice_repo_name}"
+
+    log(f"  Checking for transcript in {bob_conv_dir}...")
+
+    if not bob_conv_dir.exists():
+        assert False, f"Bob's conversation directory doesn't exist: {bob_conv_dir}"
+
+    bob_transcripts = list(bob_conv_dir.glob("*.md"))
+    assert len(bob_transcripts) > 0, "No transcripts found in Bob's local context"
+
+    bob_transcript = max(bob_transcripts, key=lambda p: p.stat().st_mtime)
+    log(f"  ✓ Transcript found: {bob_transcript.name}")
+
+    # Verify Bob can read the transcript (it's decrypted)
+    bob_content = bob_transcript.read_text()
+    assert len(bob_content) > 100, "Bob's transcript appears empty or too short"
+    assert "# Interactive Session:" in bob_content, "Bob's transcript missing header"
+    assert alice_email in bob_content, "Bob's transcript missing Alice's email"
+
+    log(f"  ✓ Transcript decrypted successfully ({len(bob_content)} bytes)")
+    log(f"  ✓ Bob can read the conversation")
 
     # Summary
     log("\n==========================================")
@@ -407,7 +445,10 @@ def test_interactive_session_flow(temp_dirs):
     log(f"Alice: {alice_email}")
     log(f"Bob: {bob_email}")
     log(f"Transcript: {transcript_path.name}")
-    log(f"Size: {len(transcript_path.read_text())} bytes")
+    log(f"Alice's copy: {len(transcript_path.read_text())} bytes")
+    log(f"Bob's copy: {len(bob_content)} bytes")
+    log("✓ Bidirectional sync verified")
+    log("✓ Encryption/decryption verified")
 
 
 def main():
@@ -423,30 +464,30 @@ def main():
         log("==========================================")
 
         # Setup
-        log("\n[1/9] Cleaning server and client...")
+        log("\n[1/11] Cleaning server and client...")
         clean_server()
         clean_client()
 
         # Alice setup
-        log("\n[2/9] Setting up Alice's account...")
+        log("\n[2/11] Setting up Alice's account...")
         os.chdir(temp1)
         login("Alice", temp1)
         alice_email = init_account("Alice", temp1)
         verify_init_structure("Alice", temp1)
 
         # Bob setup
-        log("\n[3/9] Setting up Bob's account...")
+        log("\n[3/11] Setting up Bob's account...")
         os.chdir(temp2)
         login("Bob", temp2)
         bob_email = init_account("Bob", temp2)
         verify_init_structure("Bob", temp2)
 
         # Bob sends friend request
-        log("\n[4/9] Bob sending friend request to Alice...")
+        log("\n[4/11] Bob sending friend request to Alice...")
         send_friend_request(temp2, alice_email)
 
         # Alice receives and accepts
-        log("\n[5/9] Alice accepting friend request from Bob...")
+        log("\n[5/11] Alice accepting friend request from Bob...")
         os.chdir(temp1)
         login("Alice", temp1)
         init_account("Alice", temp1)
@@ -455,7 +496,7 @@ def main():
         accept_friend_request(temp1, bob_email)
 
         # Alice starts interactive session
-        log("\n[6/9] Alice starting interactive session with Bob...")
+        log("\n[6/11] Alice starting interactive session with Bob...")
         log("⚠️  IMPORTANT: This will open a new Terminal window!")
         log("⚠️  macOS only - requires Terminal.app")
 
@@ -476,7 +517,7 @@ def main():
         wait_for_user("\nAfter you've exited the Terminal window, press Enter to continue...")
 
         # Wait for transcript discovery
-        log("\n[7/9] Waiting for transcript auto-discovery and import...")
+        log("\n[7/11] Waiting for transcript auto-discovery and import...")
         log("(Background sync not running in test - manually polling)")
 
         alice_context_dir = temp1 / alice_email.replace("@", "-").replace(".", "-")
@@ -488,7 +529,7 @@ def main():
         log(f"✓ Transcript imported: {transcript_path}")
 
         # Verify transcript content
-        log("\n[8/9] Verifying transcript content...")
+        log("\n[8/11] Verifying transcript content...")
         content_valid = verify_transcript_content(transcript_path, bob_email, alice_email)
         if not content_valid:
             raise RuntimeError("Transcript content validation failed")
@@ -502,12 +543,56 @@ def main():
         log("Triggering manual sync...")
         sync_files(temp1)
 
-        # Verify on server
-        log("\n[9/9] Verifying transcript uploaded to server...")
+        # Verify on Alice's server
+        log("\n[9/11] Verifying transcript uploaded to Alice's server repo...")
         alice_server_ok = verify_transcript_on_server(alice_email, bob_email)
         if not alice_server_ok:
             raise RuntimeError("Transcript not found on Alice's server repo")
         log("✓ Transcript found on Alice's server repo")
+
+        # Verify on Bob's server
+        log("\n[10/11] Verifying transcript uploaded to Bob's server repo...")
+        bob_server_ok = verify_transcript_on_server(bob_email, alice_email)
+        if not bob_server_ok:
+            raise RuntimeError("Transcript not found on Bob's server repo")
+        log("✓ Transcript found on Bob's server repo")
+
+        # Bob pulls and decrypts
+        log("\n[11/11] Bob pulling transcript and verifying decryption...")
+        os.chdir(temp2)
+        login("Bob", temp2)
+        init_account("Bob", temp2)
+
+        log("  Bob syncing to pull transcript...")
+        sync_files(temp2)
+
+        bob_context_dir = temp2 / bob_email.replace("@", "-").replace(".", "-")
+        from claudeconnect.config import email_to_repo_name
+        alice_repo_name = email_to_repo_name(alice_email)
+        bob_conv_dir = bob_context_dir / "claudeconnect" / f"with-{alice_repo_name}"
+
+        log(f"  Checking for transcript in {bob_conv_dir}...")
+
+        if not bob_conv_dir.exists():
+            raise RuntimeError(f"Bob's conversation directory doesn't exist: {bob_conv_dir}")
+
+        bob_transcripts = list(bob_conv_dir.glob("*.md"))
+        if len(bob_transcripts) == 0:
+            raise RuntimeError("No transcripts found in Bob's local context")
+
+        bob_transcript = max(bob_transcripts, key=lambda p: p.stat().st_mtime)
+        log(f"  ✓ Transcript found: {bob_transcript.name}")
+
+        bob_content = bob_transcript.read_text()
+        if len(bob_content) < 100:
+            raise RuntimeError("Bob's transcript appears empty or too short")
+        if "# Interactive Session:" not in bob_content:
+            raise RuntimeError("Bob's transcript missing header")
+        if alice_email not in bob_content:
+            raise RuntimeError("Bob's transcript missing Alice's email")
+
+        log(f"  ✓ Transcript decrypted successfully ({len(bob_content)} bytes)")
+        log(f"  ✓ Bob can read the conversation")
 
         # Summary
         log("\n==========================================")
@@ -516,7 +601,10 @@ def main():
         log(f"Alice: {alice_email}")
         log(f"Bob: {bob_email}")
         log(f"Transcript: {transcript_path.name}")
-        log(f"Size: {len(transcript_path.read_text())} bytes")
+        log(f"Alice's copy: {len(transcript_path.read_text())} bytes")
+        log(f"Bob's copy: {len(bob_content)} bytes")
+        log("✓ Bidirectional sync verified")
+        log("✓ Encryption/decryption verified")
 
     finally:
         # Cleanup
