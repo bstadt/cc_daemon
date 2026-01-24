@@ -74,18 +74,73 @@ def start_interactive_session(temp_dir: Path, peer_email: str) -> tuple[bool, st
         return False, str(e)
 
 
+def manually_import_transcripts(context_dir: Path, our_email: str):
+    """Manually trigger transcript discovery and import.
+
+    Since the background sync loop isn't running during tests, we need to
+    manually trigger the transcript import process.
+
+    Args:
+        context_dir: Path to user's context directory
+        our_email: Our email address
+    """
+    from claudeconnect.transcripts import (
+        discover_new_interactive_transcripts,
+        import_transcript,
+        commit_transcript_to_peer,
+    )
+    from claudeconnect.cli import get_valid_token
+
+    log("Manually triggering transcript discovery and import...")
+
+    # Discover new transcripts
+    new_transcripts = discover_new_interactive_transcripts(our_email, context_dir)
+
+    if not new_transcripts:
+        log("  No new transcripts found")
+        return 0
+
+    log(f"  Found {len(new_transcripts)} new transcript(s)")
+
+    # Import each transcript
+    tokens = get_valid_token()
+    imported = 0
+
+    for jsonl_path, metadata in new_transcripts:
+        log(f"  Importing {jsonl_path.name}...")
+
+        # Import to local context
+        transcript_path = import_transcript(jsonl_path, metadata, our_email, context_dir)
+
+        if transcript_path:
+            log(f"    → Saved to {transcript_path}")
+            imported += 1
+
+            # Upload to peer's repo
+            peer_email = metadata.get("peer_email")
+            if peer_email and tokens:
+                log(f"    → Uploading to {peer_email}'s repo...")
+                commit_transcript_to_peer(transcript_path, peer_email, our_email, tokens.id_token)
+
+    log(f"  Imported {imported} transcript(s)")
+    return imported
+
+
 def wait_for_transcript_discovery(
     context_dir: Path,
     peer_email: str,
+    our_email: str,
     timeout_seconds: int = 120,
 ) -> Path | None:
     """Wait for transcript to be discovered and imported from Claude Code storage.
 
-    Polls the claudeconnect/with-{peer}/ directory for new transcript files.
+    Polls ~/.claude/projects/ for new JSONL files, then manually triggers
+    import since background sync isn't running during tests.
 
     Args:
         context_dir: Path to user's context directory
         peer_email: Email of the peer
+        our_email: Our email address
         timeout_seconds: Maximum time to wait
 
     Returns:
@@ -97,34 +152,30 @@ def wait_for_transcript_discovery(
     conv_dir = context_dir / "claudeconnect" / f"with-{peer_repo_name}"
 
     log(f"Waiting for transcript in {conv_dir}...")
+    log(f"(Checking ~/.claude/projects/ for JSONL files)")
     log(f"(Timeout: {timeout_seconds}s)")
 
     start_time = time.time()
     last_count = 0
 
     while time.time() - start_time < timeout_seconds:
-        if conv_dir.exists():
-            # Look for markdown files with timestamp format: YYYY-MM-DD-HHMMSS_{uuid}.md
-            transcripts = list(conv_dir.glob("*.md"))
+        # Manually trigger import (background sync not running in tests)
+        imported = manually_import_transcripts(context_dir, our_email)
 
-            if len(transcripts) > last_count:
-                log(f"  Found {len(transcripts)} transcript(s)")
-                last_count = len(transcripts)
-
-                # Return the most recent one
+        if imported > 0:
+            # Check if transcript appeared in local context
+            if conv_dir.exists():
+                transcripts = list(conv_dir.glob("*.md"))
                 if transcripts:
                     newest = max(transcripts, key=lambda p: p.stat().st_mtime)
-                    log(f"  Newest transcript: {newest.name}")
-
-                    # Wait a bit more to ensure file is completely written
-                    time.sleep(5)
+                    log(f"  ✓ Transcript imported: {newest.name}")
                     return newest
 
-        # Poll every 5 seconds
-        time.sleep(5)
+        # Poll every 10 seconds (checking for JSONL in ~/.claude/projects/)
+        time.sleep(10)
         elapsed = int(time.time() - start_time)
-        if elapsed % 15 == 0:  # Status every 15s
-            log(f"  Still waiting... ({elapsed}s elapsed)")
+        if elapsed % 30 == 0:  # Status every 30s
+            log(f"  Still waiting for JSONL to appear in ~/.claude/projects/... ({elapsed}s elapsed)")
 
     log(f"  Timeout after {timeout_seconds}s")
     return None
@@ -317,10 +368,10 @@ def test_interactive_session_flow(temp_dirs):
 
     # Wait for transcript discovery and import
     log("\n[7/9] Waiting for transcript auto-discovery and import...")
-    log("(This should happen within 60-90 seconds)")
+    log("(Background sync not running in test - manually polling)")
 
     alice_context_dir = temp1 / alice_email.replace("@", "-").replace(".", "-")
-    transcript_path = wait_for_transcript_discovery(alice_context_dir, bob_email, timeout_seconds=120)
+    transcript_path = wait_for_transcript_discovery(alice_context_dir, bob_email, alice_email, timeout_seconds=120)
 
     assert transcript_path is not None, "Transcript was not discovered/imported within timeout"
     log(f"✓ Transcript imported: {transcript_path}")
@@ -426,10 +477,10 @@ def main():
 
         # Wait for transcript discovery
         log("\n[7/9] Waiting for transcript auto-discovery and import...")
-        log("(This should happen within 60-90 seconds)")
+        log("(Background sync not running in test - manually polling)")
 
         alice_context_dir = temp1 / alice_email.replace("@", "-").replace(".", "-")
-        transcript_path = wait_for_transcript_discovery(alice_context_dir, bob_email, timeout_seconds=120)
+        transcript_path = wait_for_transcript_discovery(alice_context_dir, bob_email, alice_email, timeout_seconds=120)
 
         if not transcript_path:
             raise RuntimeError("Transcript was not discovered/imported within timeout")
