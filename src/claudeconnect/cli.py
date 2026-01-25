@@ -1161,11 +1161,13 @@ async def run_with_http_sync(
 
 @cli.command()
 @click.option("--no-encrypt", is_flag=True, help="Disable client-side encryption")
-def init(no_encrypt: bool):
+@click.option("--scan", is_flag=True, help="Scan for sensitive content before syncing")
+def init(no_encrypt: bool, scan: bool):
     """Initialize current directory as context directory.
 
     Encryption is enabled by default (X25519 + AES-256-GCM).
     Use --no-encrypt to disable if you don't need privacy.
+    Use --scan to check for API keys, passwords, PII before first sync.
     """
     encrypt = not no_encrypt
     # Check for mock/dev mode
@@ -1245,6 +1247,28 @@ def init(no_encrypt: bool):
 
     # Initialize using HTTP-based sync (v2s)
     print(f"\nInitializing: {cwd}")
+
+    # Scan for sensitive content before first sync (if requested)
+    if scan:
+        print("  Scanning for sensitive content...")
+        report = scan_directory(cwd, markdown_only=False)
+        if report.has_high_severity:
+            print()
+            print(report.format_report(cwd))
+            print("High-severity sensitive content detected!")
+            print("This content would be synced to the server.")
+            if not click.confirm("Continue anyway?"):
+                print("\nInit cancelled. Remove or encrypt sensitive files and try again.")
+                return
+        elif report.has_issues:
+            print()
+            print(report.format_report(cwd))
+            if not click.confirm("Continue with these potential issues?"):
+                print("\nInit cancelled.")
+                return
+        else:
+            print("  No sensitive content detected")
+
     if init_context_dir(cwd, tokens.email, tokens.id_token, public_key_hex):
         config.context_dir = str(cwd)
         config.encryption_enabled = encrypt
