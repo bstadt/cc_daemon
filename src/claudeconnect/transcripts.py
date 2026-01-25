@@ -19,8 +19,8 @@ def context_dir_to_claude_projects_dir(context_dir: Path) -> str:
     """Convert context directory path to ~/.claude/projects/ directory name.
 
     Example:
-        /Users/frsc/.claude-connect/peers/brandon-calcifercomputing-com
-        → -Users-frsc--claude-connect-peers-brandon-calcifercomputing-com
+        /Users/frsc/.claude-connect/accounts/frsc@gmail.com/peers/brandon-calcifercomputing-com
+        → -Users-frsc--claude-connect-accounts-frsc-gmail-com-peers-brandon-calcifercomputing-com
     """
     # Replace slashes and dots with hyphens
     path_str = str(context_dir.resolve())
@@ -251,13 +251,13 @@ def discover_new_interactive_transcripts(our_email: str, context_dir: Path) -> l
             metadata["peer_email"] = peer_email
 
             # CRITICAL: Verify this is an interactive session by checking cwd
-            # Must be in OUR account's peers directory
+            # Must be in OUR account's peers directory (email-namespaced)
+            # This ensures Alice can only import transcripts from sessions SHE ran,
+            # not sessions Bob ran, even on a shared machine.
             cwd = metadata.get("cwd", "")
             expected_peers_path = f"/.claude-connect/accounts/{our_email}/peers/"
             if expected_peers_path not in cwd:
-                # Also check legacy path for migration
-                if "/.claude-connect/peers/" not in cwd:
-                    continue  # Not an interactive session, skip
+                continue  # Not an interactive session for THIS account, skip
 
             # Check file modification time (only import if stable for 60+ seconds)
             mtime = jsonl_file.stat().st_mtime
