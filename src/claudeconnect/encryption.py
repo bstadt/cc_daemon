@@ -54,20 +54,8 @@ PLAINTEXT_FILES = {
 # File extensions to encrypt
 ENCRYPTED_EXTENSIONS = {".md"}
 
-# Default key storage locations
-# Keys are account-scoped: ~/.claude-connect/keys/<email>/
-DEFAULT_KEYS_BASE = Path.home() / ".claude-connect" / "keys"
-DEFAULT_FRIENDS_DIR = Path.home() / ".claude-connect" / "friends"
-
-
-def _sanitize_email(email: str) -> str:
-    """Sanitize email for use in filesystem paths."""
-    return email.lower().replace("@", "-").replace(".", "-")
-
-
-def get_keys_dir(email: str) -> Path:
-    """Get account-scoped keys directory for an email."""
-    return DEFAULT_KEYS_BASE / _sanitize_email(email)
+# Import account-scoped directory helpers from config
+from .config import get_keys_dir, get_friends_dir, email_to_repo_name
 
 # Master key encryption format (v2)
 MASTER_KEY_FORMAT_VERSION = 2
@@ -357,8 +345,9 @@ def decrypt_received_master_key(
 
 
 def save_friend_master_key(
-    email: str,
+    friend_email: str,
     master_key: bytes,
+    our_email: str,
     friends_dir: Optional[Path] = None,
 ) -> Path:
     """
@@ -367,17 +356,18 @@ def save_friend_master_key(
     This key allows us to decrypt all of their files.
 
     Args:
-        email: Friend's email address
+        friend_email: Friend's email address
         master_key: Friend's decrypted 32-byte master key
-        friends_dir: Directory to store friend keys
+        our_email: Our email address (for account-scoped storage)
+        friends_dir: Directory to store friend keys (override)
 
     Returns:
         Path to saved key file
     """
-    friends_dir = friends_dir or DEFAULT_FRIENDS_DIR
+    friends_dir = friends_dir or get_friends_dir(our_email)
     friends_dir.mkdir(parents=True, exist_ok=True)
 
-    safe_email = email.lower().replace("@", "-").replace(".", "-")
+    safe_email = email_to_repo_name(friend_email)
     key_path = friends_dir / f"{safe_email}.master"
 
     key_path.write_bytes(master_key)
@@ -386,15 +376,17 @@ def save_friend_master_key(
 
 
 def load_friend_master_key(
-    email: str,
+    friend_email: str,
+    our_email: str,
     friends_dir: Optional[Path] = None,
 ) -> bytes:
     """
     Load a friend's master key.
 
     Args:
-        email: Friend's email address
-        friends_dir: Directory containing friend keys
+        friend_email: Friend's email address
+        our_email: Our email address (for account-scoped storage)
+        friends_dir: Directory containing friend keys (override)
 
     Returns:
         Friend's 32-byte master key
@@ -402,34 +394,36 @@ def load_friend_master_key(
     Raises:
         FileNotFoundError: If friend's master key not found
     """
-    friends_dir = friends_dir or DEFAULT_FRIENDS_DIR
+    friends_dir = friends_dir or get_friends_dir(our_email)
 
-    safe_email = email.lower().replace("@", "-").replace(".", "-")
+    safe_email = email_to_repo_name(friend_email)
     key_path = friends_dir / f"{safe_email}.master"
 
     if not key_path.exists():
-        raise FileNotFoundError(f"Master key for {email} not found at {key_path}")
+        raise FileNotFoundError(f"Master key for {friend_email} not found at {key_path}")
 
     return key_path.read_bytes()
 
 
 def has_friend_master_key(
-    email: str,
+    friend_email: str,
+    our_email: str,
     friends_dir: Optional[Path] = None,
 ) -> bool:
     """
     Check if we have a friend's master key.
 
     Args:
-        email: Friend's email address
-        friends_dir: Directory containing friend keys
+        friend_email: Friend's email address
+        our_email: Our email address (for account-scoped storage)
+        friends_dir: Directory containing friend keys (override)
 
     Returns:
         True if we have their master key
     """
-    friends_dir = friends_dir or DEFAULT_FRIENDS_DIR
+    friends_dir = friends_dir or get_friends_dir(our_email)
 
-    safe_email = email.lower().replace("@", "-").replace(".", "-")
+    safe_email = email_to_repo_name(friend_email)
     key_path = friends_dir / f"{safe_email}.master"
 
     return key_path.exists()
@@ -440,26 +434,28 @@ def has_friend_master_key(
 # =============================================================================
 
 def save_friend_public_key(
-    email: str,
+    friend_email: str,
     public_key_bytes: bytes,
+    our_email: str,
     friends_dir: Optional[Path] = None,
 ) -> Path:
     """
     Save a friend's public key.
 
     Args:
-        email: Friend's email address
+        friend_email: Friend's email address
         public_key_bytes: Friend's raw public key (32 bytes)
-        friends_dir: Directory to store friend keys
+        our_email: Our email address (for account-scoped storage)
+        friends_dir: Directory to store friend keys (override)
 
     Returns:
         Path to saved key file
     """
-    friends_dir = friends_dir or DEFAULT_FRIENDS_DIR
+    friends_dir = friends_dir or get_friends_dir(our_email)
     friends_dir.mkdir(parents=True, exist_ok=True)
 
     # Sanitize email for filename
-    safe_email = email.lower().replace("@", "-").replace(".", "-")
+    safe_email = email_to_repo_name(friend_email)
     key_path = friends_dir / f"{safe_email}.pub"
 
     key_path.write_bytes(public_key_bytes)
@@ -467,15 +463,17 @@ def save_friend_public_key(
 
 
 def load_friend_public_key(
-    email: str,
+    friend_email: str,
+    our_email: str,
     friends_dir: Optional[Path] = None,
 ) -> bytes:
     """
     Load a friend's public key.
 
     Args:
-        email: Friend's email address
-        friends_dir: Directory containing friend keys
+        friend_email: Friend's email address
+        our_email: Our email address (for account-scoped storage)
+        friends_dir: Directory containing friend keys (override)
 
     Returns:
         Raw public key bytes (32 bytes)
@@ -483,28 +481,29 @@ def load_friend_public_key(
     Raises:
         FileNotFoundError: If friend's key not found
     """
-    friends_dir = friends_dir or DEFAULT_FRIENDS_DIR
+    friends_dir = friends_dir or get_friends_dir(our_email)
 
-    safe_email = email.lower().replace("@", "-").replace(".", "-")
+    safe_email = email_to_repo_name(friend_email)
     key_path = friends_dir / f"{safe_email}.pub"
 
     if not key_path.exists():
-        raise FileNotFoundError(f"Public key for {email} not found at {key_path}")
+        raise FileNotFoundError(f"Public key for {friend_email} not found at {key_path}")
 
     return key_path.read_bytes()
 
 
-def list_friends(friends_dir: Optional[Path] = None) -> list[str]:
+def list_friends(our_email: str, friends_dir: Optional[Path] = None) -> list[str]:
     """
     List all friends with stored public keys.
 
     Args:
-        friends_dir: Directory containing friend keys
+        our_email: Our email address (for account-scoped storage)
+        friends_dir: Directory containing friend keys (override)
 
     Returns:
-        List of email addresses
+        List of email addresses (sanitized form)
     """
-    friends_dir = friends_dir or DEFAULT_FRIENDS_DIR
+    friends_dir = friends_dir or get_friends_dir(our_email)
 
     if not friends_dir.exists():
         return []
@@ -521,22 +520,24 @@ def list_friends(friends_dir: Optional[Path] = None) -> list[str]:
 
 
 def delete_friend_public_key(
-    email: str,
+    friend_email: str,
+    our_email: str,
     friends_dir: Optional[Path] = None,
 ) -> bool:
     """
     Delete a friend's public key.
 
     Args:
-        email: Friend's email address
-        friends_dir: Directory containing friend keys
+        friend_email: Friend's email address
+        our_email: Our email address (for account-scoped storage)
+        friends_dir: Directory containing friend keys (override)
 
     Returns:
         True if key was deleted, False if it didn't exist
     """
-    friends_dir = friends_dir or DEFAULT_FRIENDS_DIR
+    friends_dir = friends_dir or get_friends_dir(our_email)
 
-    safe_email = email.lower().replace("@", "-").replace(".", "-")
+    safe_email = email_to_repo_name(friend_email)
     key_path = friends_dir / f"{safe_email}.pub"
 
     if key_path.exists():
@@ -985,6 +986,7 @@ def encrypt_file_with_master_key(
 def encrypt_file_for_friend(
     plaintext: bytes,
     friend_email: str,
+    our_email: str,
 ) -> bytes:
     """
     Encrypt file content using a friend's master key.
@@ -996,6 +998,7 @@ def encrypt_file_for_friend(
     Args:
         plaintext: Raw file content to encrypt
         friend_email: Friend's email address
+        our_email: Our email address (for account-scoped key storage)
 
     Returns:
         Encrypted file bytes (same v2 format as encrypt_file_with_master_key)
@@ -1005,7 +1008,7 @@ def encrypt_file_for_friend(
     """
     _ensure_crypto()
 
-    master_key = load_friend_master_key(friend_email)
+    master_key = load_friend_master_key(friend_email, our_email)
 
     # Encrypt content with AES-GCM (same format as own files)
     nonce = os.urandom(NONCE_SIZE)
@@ -1062,6 +1065,7 @@ def decrypt_file_with_master_key(
 def decrypt_file_with_friend_master_key(
     ciphertext: bytes,
     friend_email: str,
+    our_email: str,
     friends_dir: Optional[Path] = None,
 ) -> bytes:
     """
@@ -1070,7 +1074,8 @@ def decrypt_file_with_friend_master_key(
     Args:
         ciphertext: Encrypted file bytes (v2 format)
         friend_email: Friend's email address
-        friends_dir: Directory containing friend master keys
+        our_email: Our email address (for account-scoped key storage)
+        friends_dir: Directory containing friend master keys (override)
 
     Returns:
         Decrypted plaintext bytes
@@ -1090,7 +1095,7 @@ def decrypt_file_with_friend_master_key(
     nonce = ciphertext[6:18]
     encrypted_content = ciphertext[18:]
 
-    master_key = load_friend_master_key(friend_email, friends_dir)
+    master_key = load_friend_master_key(friend_email, our_email, friends_dir)
     aesgcm = AESGCM(master_key)
 
     return aesgcm.decrypt(nonce, encrypted_content, None)
