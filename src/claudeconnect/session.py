@@ -19,7 +19,10 @@ from uuid import uuid4
 
 import httpx
 
-from .config import get_config, get_tokens, Tokens, get_shadow_dir, SERVER_URL, API_BASE_URL, email_to_repo_name
+from .config import (
+    get_config, get_tokens, Tokens, get_shadow_dir, get_peers_dir,
+    SERVER_URL, API_BASE_URL, email_to_repo_name, get_active_account,
+)
 
 # Encryption imports (optional)
 try:
@@ -32,10 +35,6 @@ try:
     HAS_ENCRYPTION = is_encryption_available()
 except ImportError:
     HAS_ENCRYPTION = False
-
-
-# Cache directory for peer contexts
-PEERS_DIR = Path.home() / ".claude-connect" / "peers"
 
 
 def lookup_repo(email: str) -> str | None:
@@ -53,13 +52,14 @@ def lookup_repo(email: str) -> str | None:
         return None
 
 
-def decrypt_peer_context(peer_dir: Path, peer_email: str) -> int:
+def decrypt_peer_context(peer_dir: Path, peer_email: str, our_email: str) -> int:
     """
     Decrypt all encrypted files in a peer's context using their master key.
 
     Args:
         peer_dir: Path to the peer's checked-out context
         peer_email: The peer's email (to look up their master key)
+        our_email: Our email (for account-scoped key storage)
 
     Returns:
         Number of files decrypted
@@ -67,7 +67,7 @@ def decrypt_peer_context(peer_dir: Path, peer_email: str) -> int:
     if not HAS_ENCRYPTION:
         return 0
 
-    if not has_friend_master_key(peer_email):
+    if not has_friend_master_key(peer_email, our_email):
         print(f"  Warning: No master key for {peer_email}, cannot decrypt their files")
         return 0
 
@@ -87,7 +87,7 @@ def decrypt_peer_context(peer_dir: Path, peer_email: str) -> int:
         try:
             content = md_file.read_bytes()
             if is_encrypted_file(content):
-                plaintext = decrypt_file_with_friend_master_key(content, peer_email)
+                plaintext = decrypt_file_with_friend_master_key(content, peer_email, our_email)
                 md_file.write_bytes(plaintext)
                 decrypted_count += 1
 
@@ -100,13 +100,14 @@ def decrypt_peer_context(peer_dir: Path, peer_email: str) -> int:
     return decrypted_count
 
 
-def pull_peer_context_http(peer_email: str, id_token: str, max_workers: int = 10) -> Path | None:
+def pull_peer_context_http(peer_email: str, id_token: str, our_email: str, max_workers: int = 10) -> Path | None:
     """
     Pull or update a peer's context to local cache using HTTP API (parallel downloads).
 
     Args:
         peer_email: The peer's email address
         id_token: JWT token for authentication
+        our_email: Our email (to determine which account's peers dir to use)
         max_workers: Number of parallel download threads
 
     Returns:
@@ -114,11 +115,12 @@ def pull_peer_context_http(peer_email: str, id_token: str, max_workers: int = 10
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
+    peers_dir = get_peers_dir(our_email)
     peer_name = email_to_repo_name(peer_email)
-    peer_dir = PEERS_DIR / peer_name
+    peer_dir = peers_dir / peer_name
 
     # Ensure peers directory exists
-    PEERS_DIR.mkdir(parents=True, exist_ok=True)
+    peers_dir.mkdir(parents=True, exist_ok=True)
     peer_dir.mkdir(parents=True, exist_ok=True)
 
     headers = {"Authorization": f"Bearer {id_token}"}
@@ -172,12 +174,12 @@ def pull_peer_context_http(peer_email: str, id_token: str, max_workers: int = 10
                 pass
 
     # Decrypt any encrypted files
-    decrypt_peer_context(peer_dir, peer_email)
+    decrypt_peer_context(peer_dir, peer_email, our_email)
 
     return peer_dir
 
 
-def upload_file_http(email: str, path: str, content: bytes, id_token: str, encrypt_for: str | None = None, use_friend_key: bool = False) -> bool:
+def upload_file_http(email: str, path: str, content: bytes, id_token: str, encrypt_for: str | None = None, use_friend_key: bool = False, our_email: str | None = None) -> bool:
     """Upload a file to a user's storage via HTTP API.
 
     Args:
@@ -187,6 +189,7 @@ def upload_file_http(email: str, path: str, content: bytes, id_token: str, encry
         id_token: JWT for authentication
         encrypt_for: If set, encrypt content using this user's master key
         use_friend_key: If True, encrypt using friend's master key (for transcript delivery to peer's repo)
+        our_email: Our email (required when use_friend_key=True, for account-scoped key lookup)
     """
     encrypted_content = content
 
@@ -197,7 +200,10 @@ def upload_file_http(email: str, path: str, content: bytes, id_token: str, encry
             if should_encrypt_file(path):
                 if use_friend_key:
                     # Delivering to friend's repo - use their master key
-                    encrypted_content = encrypt_file_for_friend(content, encrypt_for)
+                    # our_email is required to know where to find friend's key
+                    if our_email is None:
+                        raise ValueError("our_email required when use_friend_key=True")
+                    encrypted_content = encrypt_file_for_friend(content, encrypt_for, our_email)
                 else:
                     # Our own repo - use our master key
                     encrypted_content = encrypt_file_with_master_key(content, encrypt_for)
@@ -407,7 +413,7 @@ async def run_session(
 
     # Pull peer's context
     print(f"\nPreparing session with {peer_email}...")
-    peer_context_dir = pull_peer_context_http(peer_email, tokens.id_token)
+    peer_context_dir = pull_peer_context_http(peer_email, tokens.id_token, our_email)
     if not peer_context_dir:
         return False, f"Failed to pull {peer_email}'s context"
 
@@ -485,7 +491,7 @@ async def run_session(
     print(f"\nUploading to {peer_email}'s repo...")
     if tokens:
         peer_transcript_rel_path = f"claudeconnect/with-{email_to_repo_name(our_email)}/{transcript_filename}"
-        if upload_file_http(peer_email, peer_transcript_rel_path, transcript.encode(), tokens.id_token, encrypt_for=peer_email, use_friend_key=True):
+        if upload_file_http(peer_email, peer_transcript_rel_path, transcript.encode(), tokens.id_token, encrypt_for=peer_email, use_friend_key=True, our_email=our_email):
             print(f"  Uploaded to {peer_email}'s repo")
         else:
             print(f"  Warning: Failed to upload to peer's repo")
@@ -626,7 +632,7 @@ async def run_dual_session(
 
     # Pull peer's context
     print(f"\nPreparing dual-instance session with {peer_email}...")
-    peer_context_dir = pull_peer_context_http(peer_email, tokens.id_token)
+    peer_context_dir = pull_peer_context_http(peer_email, tokens.id_token, our_email)
     if not peer_context_dir:
         return False, f"Failed to pull {peer_email}'s context"
 
@@ -733,7 +739,7 @@ async def run_dual_session(
     print(f"\nUploading to {peer_email}'s repo...")
     if tokens:
         peer_transcript_rel_path = f"claudeconnect/with-{email_to_repo_name(our_email)}/{transcript_filename}"
-        if upload_file_http(peer_email, peer_transcript_rel_path, transcript.encode(), tokens.id_token, encrypt_for=peer_email, use_friend_key=True):
+        if upload_file_http(peer_email, peer_transcript_rel_path, transcript.encode(), tokens.id_token, encrypt_for=peer_email, use_friend_key=True, our_email=our_email):
             print(f"  Uploaded to {peer_email}'s repo")
         else:
             print(f"  Warning: Failed to upload to peer's repo")
@@ -840,7 +846,7 @@ def run_interactive_session(
 
     # Pull peer's context
     print(f"\nPreparing interactive session with {peer_email}...")
-    peer_context_dir = pull_peer_context_http(peer_email, tokens.id_token)
+    peer_context_dir = pull_peer_context_http(peer_email, tokens.id_token, our_email)
     if not peer_context_dir:
         return False, f"Failed to pull {peer_email}'s context. Are you connected as friends?"
 

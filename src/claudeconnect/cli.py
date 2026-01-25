@@ -56,9 +56,6 @@ YELLOW = '\033[38;5;228m'     # Soft yellow for sparkles
 RESET = '\033[0m'
 CLEAR = '\033[2J\033[H'       # Clear screen and move cursor to top
 
-# Peers directory for cached friend contexts
-PEERS_DIR = Path.home() / ".claude-connect" / "peers"
-
 
 def get_cell_aspect_ratio() -> float | None:
     """Get the height/width ratio of a terminal cell.
@@ -761,7 +758,7 @@ def verify_init_structure(context_dir: Path, email: str) -> list[str]:
     Verify that init created all expected directories and files.
 
     Shadow directory architecture (HTTP sync):
-        ~/.claude-connect/shadow/<sanitized-email>/
+        ~/.claude-connect/accounts/<email>/shadow/
         ├── authz                           # Access control file (encrypted copy)
         └── claudeconnect/
             └── with-claudeconnect-io/      # System messages folder
@@ -1270,10 +1267,9 @@ def init(no_encrypt: bool):
 
         print("\n✓ Context directory initialized")
         if encrypt:
-            safe_email = tokens.email.lower().replace("@", "-").replace(".", "-")
             print("  Encryption: ENABLED (zero-trust)")
             print(f"  Key fingerprint: {fingerprint}")
-            print(f"  Your private key is stored at ~/.claude-connect/keys/{safe_email}/private.key")
+            print(f"  Your private key is stored at ~/.claude-connect/accounts/{tokens.email}/keys/private.key")
         print(f"  Run `claudeconnect` to start Claude with sync.")
     else:
         sys.exit(1)
@@ -1618,7 +1614,7 @@ def pull(peer_email: str):
         sys.exit(1)
 
     print(f"Pulling {peer_email}'s context...")
-    peer_dir = pull_peer_context_http(peer_email, tokens.id_token)
+    peer_dir = pull_peer_context_http(peer_email, tokens.id_token, tokens.email)
 
     if peer_dir:
         print(f"\n✓ Context pulled to: {peer_dir}")
@@ -1993,7 +1989,7 @@ def accept_friend(peer_email: str):
             if key_match:
                 peer_public_key_hex = key_match.group(1)
                 peer_public_key = bytes.fromhex(peer_public_key_hex)
-                save_friend_public_key(peer_email, peer_public_key)
+                save_friend_public_key(peer_email, peer_public_key, my_email)
                 fingerprint = get_key_fingerprint(peer_public_key)
                 print(f"  Saved friend's public key (fingerprint: {fingerprint})")
             else:
@@ -2006,7 +2002,7 @@ def accept_friend(peer_email: str):
                 encrypted_blob = bytes.fromhex(encrypted_master_key_hex)
                 # Decrypt with our private key (account-scoped)
                 friend_master_key = decrypt_received_master_key(encrypted_blob, my_email)
-                save_friend_master_key(peer_email, friend_master_key)
+                save_friend_master_key(peer_email, friend_master_key, my_email)
                 print(f"  Decrypted and saved friend's master key - you can now read their files!")
             else:
                 print("  Note: Friend request did not include encrypted master key")
@@ -2019,7 +2015,7 @@ def accept_friend(peer_email: str):
     if HAS_ENCRYPTION:
         try:
             # We have peer's public key from step 2, now encrypt our master key for them
-            peer_public_key = load_friend_public_key(peer_email)
+            peer_public_key = load_friend_public_key(peer_email, my_email)
             if peer_public_key:
                 my_master_key = load_master_key(my_email)
                 encrypted_blob = encrypt_master_key_for_recipient(my_master_key, peer_public_key)

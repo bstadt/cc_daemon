@@ -12,7 +12,7 @@ from pathlib import Path
 
 import httpx
 
-from .config import API_BASE_URL, email_to_repo_name, repo_name_to_email
+from .config import API_BASE_URL, email_to_repo_name, repo_name_to_email, get_peers_dir
 
 
 def context_dir_to_claude_projects_dir(context_dir: Path) -> str:
@@ -209,7 +209,8 @@ def discover_new_interactive_transcripts(our_email: str, context_dir: Path) -> l
     if not claude_projects.exists():
         return []
 
-    peers_dir = Path.home() / ".claude-connect" / "peers"
+    # Use email-namespaced peers directory
+    peers_dir = get_peers_dir(our_email)
     if not peers_dir.exists():
         return []
 
@@ -223,6 +224,10 @@ def discover_new_interactive_transcripts(our_email: str, context_dir: Path) -> l
         # Extract peer email from directory name (e.g., brandon-gmail-com → brandon@gmail.com)
         peer_repo_name = peer_dir.name
         peer_email = repo_name_to_email(peer_repo_name)
+
+        # Skip if peer email matches our email (can't have session with self)
+        if peer_email.lower() == our_email.lower():
+            continue
 
         # Map to expected ~/.claude/projects/ subdirectory
         projects_subdir_name = context_dir_to_claude_projects_dir(peer_dir)
@@ -246,9 +251,13 @@ def discover_new_interactive_transcripts(our_email: str, context_dir: Path) -> l
             metadata["peer_email"] = peer_email
 
             # CRITICAL: Verify this is an interactive session by checking cwd
+            # Must be in OUR account's peers directory
             cwd = metadata.get("cwd", "")
-            if "/.claude-connect/peers/" not in cwd:
-                continue  # Not an interactive session, skip
+            expected_peers_path = f"/.claude-connect/accounts/{our_email}/peers/"
+            if expected_peers_path not in cwd:
+                # Also check legacy path for migration
+                if "/.claude-connect/peers/" not in cwd:
+                    continue  # Not an interactive session, skip
 
             # Check file modification time (only import if stable for 60+ seconds)
             mtime = jsonl_file.stat().st_mtime
@@ -362,6 +371,7 @@ def commit_transcript_to_peer(
         id_token=id_token,
         encrypt_for=peer_email,  # Encrypt with peer's key if enabled
         use_friend_key=True,
+        our_email=our_email,
     )
 
     return success
