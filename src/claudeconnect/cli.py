@@ -216,6 +216,9 @@ def display_startup_banner(context_dir: Path, email: str, clear_screen: bool = T
                         if "**From**:" in line or "From:" in line:
                             sender = line.split(":", 1)[1].strip()
                             sender = sender.replace("**", "").strip()
+                            # Skip friend requests from yourself (shouldn't see own outgoing requests)
+                            if sender.lower() == email.lower():
+                                break
                             friend_notifications.append((sender, False))
                             break
             except Exception:
