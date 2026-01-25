@@ -427,7 +427,6 @@ def get_valid_token() -> Tokens | None:
     if exp < int(time.time()):
         # Token expired - try to refresh
         if tokens.refresh_token:
-            print("Token expired, refreshing...")
             new_tokens = refresh_token(tokens.refresh_token)
             if new_tokens:
                 return new_tokens
