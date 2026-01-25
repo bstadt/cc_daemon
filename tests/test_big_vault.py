@@ -32,7 +32,7 @@ from test_utils import (
     log, warn, error, timing,
     clean_server, clean_client, claudeconnect,
     get_current_email, email_to_repo_name, wait_for_user,
-    CC_CONFIG_DIR, PEERS_DIR, Colors,
+    CC_CONFIG_DIR, get_peers_dir, Colors,
 )
 
 # Test config
@@ -230,8 +230,10 @@ def verify_vault_files(peer_email: str, expected_files: int = NUM_VAULT_FILES) -
     """Verify vault files were pulled correctly."""
     log(f"Verifying {expected_files} vault files...")
 
+    our_email = get_current_email()
+    peers_dir = get_peers_dir(our_email)
     repo_name = email_to_repo_name(peer_email)
-    peer_vault = PEERS_DIR / repo_name / "vault"
+    peer_vault = peers_dir / repo_name / "vault"
 
     if not peer_vault.exists():
         error(f"Vault directory not found: {peer_vault}")

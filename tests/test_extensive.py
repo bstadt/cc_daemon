@@ -34,7 +34,7 @@ from test_utils import (
     clean_client,
     create_temp_dirs,
     CC_CONFIG_DIR,
-    PEERS_DIR,
+    get_peers_dir,
     CCENC_MAGIC,
     # Account operations
     login,
@@ -79,8 +79,10 @@ def read_peer_file_content(peer_email: str, filename: str) -> tuple[bool, str]:
     Returns (success, content_or_error_message).
     If file is still encrypted, returns (False, "encrypted").
     """
+    our_email = get_current_email()
+    peers_dir = get_peers_dir(our_email)
     repo_name = email_to_repo_name(peer_email)
-    file_path = PEERS_DIR / repo_name / filename
+    file_path = peers_dir / repo_name / filename
 
     if not file_path.exists():
         return False, f"File not found: {file_path}"
@@ -146,8 +148,10 @@ def verify_api_access(owner_email: str, path: str, should_succeed: bool) -> bool
 
 def verify_peer_file_exists(peer_email: str, filename: str) -> bool:
     """Verify a file exists in the peer cache."""
+    our_email = get_current_email()
+    peers_dir = get_peers_dir(our_email)
     repo_name = email_to_repo_name(peer_email)
-    file_path = PEERS_DIR / repo_name / filename
+    file_path = peers_dir / repo_name / filename
 
     if file_path.exists():
         log(f"    ✓ {filename} exists in peer cache")
@@ -159,8 +163,10 @@ def verify_peer_file_exists(peer_email: str, filename: str) -> bool:
 
 def verify_peer_file_missing(peer_email: str, filename: str) -> bool:
     """Verify a file does NOT exist in the peer cache."""
+    our_email = get_current_email()
+    peers_dir = get_peers_dir(our_email)
     repo_name = email_to_repo_name(peer_email)
-    file_path = PEERS_DIR / repo_name / filename
+    file_path = peers_dir / repo_name / filename
 
     if not file_path.exists():
         log(f"    ✓ {filename} correctly absent from peer cache")

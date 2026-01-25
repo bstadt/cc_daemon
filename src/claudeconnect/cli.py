@@ -1248,7 +1248,7 @@ def init(no_encrypt: bool):
     if init_context_dir(cwd, tokens.email, tokens.id_token, public_key_hex):
         config.context_dir = str(cwd)
         config.encryption_enabled = encrypt
-        config.save()
+        config.save(tokens.email)
 
         # Install skill for Claude Code
         if install_skill():

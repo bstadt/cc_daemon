@@ -30,9 +30,23 @@ from conf import ALICE_EMAIL, BOB_EMAIL, SERVER, SERVER_URL, SSH_KEY_PATH
 
 SSH_KEY = Path(SSH_KEY_PATH)
 CC_CONFIG_DIR = Path.home() / ".claude-connect"
+ACCOUNTS_DIR = CC_CONFIG_DIR / "accounts"
+ACTIVE_ACCOUNT_FILE = CC_CONFIG_DIR / "active_account"
 
 # Test accounts to purge
 TEST_ACCOUNTS = [ALICE_EMAIL, BOB_EMAIL]
+
+
+def get_active_account() -> str:
+    """Get the currently active account email."""
+    if not ACTIVE_ACCOUNT_FILE.exists():
+        raise RuntimeError("No active account - run claudeconnect login first")
+    return ACTIVE_ACCOUNT_FILE.read_text().strip()
+
+
+def get_account_dir(email: str) -> Path:
+    """Get account directory for an email."""
+    return ACCOUNTS_DIR / email
 
 
 class Colors:
@@ -81,15 +95,14 @@ def claudeconnect(*args, cwd: Path | None = None, input_text: str | None = None)
 
 
 def get_current_email() -> str:
-    """Get email from current tokens."""
-    tokens_file = CC_CONFIG_DIR / "tokens.json"
-    with open(tokens_file) as f:
-        return json.load(f)["email"]
+    """Get email from active account."""
+    return get_active_account()
 
 
 def get_id_token() -> str:
     """Get the current id_token for API calls."""
-    tokens_file = CC_CONFIG_DIR / "tokens.json"
+    email = get_active_account()
+    tokens_file = get_account_dir(email) / "tokens.json"
     with open(tokens_file) as f:
         return json.load(f)["id_token"]
 

@@ -20,10 +20,28 @@ from conf import ALICE_EMAIL, BOB_EMAIL, SERVER, SERVER_URL, API_BASE_URL, SSH_K
 
 SSH_KEY = Path(SSH_KEY_PATH)
 CC_CONFIG_DIR = Path.home() / ".claude-connect"
-PEERS_DIR = CC_CONFIG_DIR / "peers"
+ACCOUNTS_DIR = CC_CONFIG_DIR / "accounts"
+ACTIVE_ACCOUNT_FILE = CC_CONFIG_DIR / "active_account"
 
 # Encryption magic bytes
 CCENC_MAGIC = b"CCENC"
+
+
+def get_active_account() -> str:
+    """Get the currently active account email."""
+    if not ACTIVE_ACCOUNT_FILE.exists():
+        raise RuntimeError("No active account - run claudeconnect login first")
+    return ACTIVE_ACCOUNT_FILE.read_text().strip()
+
+
+def get_account_dir(email: str) -> Path:
+    """Get account directory for an email."""
+    return ACCOUNTS_DIR / email
+
+
+def get_peers_dir(email: str) -> Path:
+    """Get email-namespaced peers directory."""
+    return get_account_dir(email) / "peers"
 
 
 class Colors:
@@ -83,15 +101,14 @@ def claudeconnect(*args, cwd: Path | None = None, input_text: str | None = None)
 
 
 def get_current_email() -> str:
-    """Get email from current tokens."""
-    tokens_file = CC_CONFIG_DIR / "tokens.json"
-    with open(tokens_file) as f:
-        return json.load(f)["email"]
+    """Get email from active account."""
+    return get_active_account()
 
 
 def get_id_token() -> str:
     """Get the current id_token for API calls."""
-    tokens_file = CC_CONFIG_DIR / "tokens.json"
+    email = get_active_account()
+    tokens_file = get_account_dir(email) / "tokens.json"
     with open(tokens_file) as f:
         return json.load(f)["id_token"]
 
@@ -124,8 +141,8 @@ def clean_client():
 
     # Also clean up Claude Code projects directories from tests
     # These correspond to peer context directories like:
-    # ~/.claude-connect/peers/connectclaude5-gmail-com
-    # which become ~/.claude/projects/-Users-...-peers-connectclaude5-gmail-com
+    # ~/.claude-connect/accounts/{email}/peers/connectclaude5-gmail-com
+    # which become ~/.claude/projects/-Users-...-accounts-{email}-peers-connectclaude5-gmail-com
     claude_projects = Path.home() / ".claude" / "projects"
     if claude_projects.exists():
         # Convert test emails to peer directory names (@ and . become -)
@@ -133,7 +150,7 @@ def clean_client():
         bob_peer_name = BOB_EMAIL.replace("@", "-").replace(".", "-")
 
         for project_dir in claude_projects.iterdir():
-            if project_dir.is_dir() and ("-peers-" in project_dir.name):
+            if project_dir.is_dir() and ("-peers-" in project_dir.name or "-accounts-" in project_dir.name):
                 # Check if it's one of our test accounts
                 if alice_peer_name in project_dir.name or bob_peer_name in project_dir.name:
                     log(f"  Removing test project directory: {project_dir.name}")
@@ -614,8 +631,10 @@ def pull_and_verify_poetry(temp_dir: Path, peer_email: str) -> bool:
     log(f"Pulling {peer_email}'s context...")
     claudeconnect("pull", peer_email, cwd=temp_dir)
 
+    our_email = get_current_email()
+    peers_dir = get_peers_dir(our_email)
     repo_name = email_to_repo_name(peer_email)
-    peer_poetry = PEERS_DIR / repo_name / "poetry.md"
+    peer_poetry = peers_dir / repo_name / "poetry.md"
 
     if peer_poetry.exists():
         content = peer_poetry.read_text()
@@ -629,9 +648,9 @@ def pull_and_verify_poetry(temp_dir: Path, peer_email: str) -> bool:
             return False
     else:
         error(f"Could not find: {peer_poetry}")
-        if PEERS_DIR.exists():
+        if peers_dir.exists():
             warn("Peers directory contents:")
-            for p in PEERS_DIR.iterdir():
+            for p in peers_dir.iterdir():
                 print(f"  {p}")
         return False
 
@@ -656,8 +675,10 @@ def verify_poetry(peer_email: str, expected_content: str = "widening gyre") -> b
     """Verify poetry.md was pulled correctly."""
     log("Verifying poetry.md...")
 
+    our_email = get_current_email()
+    peers_dir = get_peers_dir(our_email)
     repo_name = email_to_repo_name(peer_email)
-    peer_poetry = PEERS_DIR / repo_name / "poetry.md"
+    peer_poetry = peers_dir / repo_name / "poetry.md"
 
     if not peer_poetry.exists():
         error(f"poetry.md not found: {peer_poetry}")
@@ -677,8 +698,10 @@ def verify_philosophy(peer_email: str) -> bool:
     """Verify philosophy.md was pulled correctly."""
     log("Verifying philosophy.md...")
 
+    our_email = get_current_email()
+    peers_dir = get_peers_dir(our_email)
     repo_name = email_to_repo_name(peer_email)
-    peer_philosophy = PEERS_DIR / repo_name / "philosophy.md"
+    peer_philosophy = peers_dir / repo_name / "philosophy.md"
 
     if not peer_philosophy.exists():
         error(f"philosophy.md not found: {peer_philosophy}")
