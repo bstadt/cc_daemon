@@ -695,7 +695,7 @@ def verify_poetry(peer_email: str, expected_content: str = "widening gyre") -> b
 
 
 def verify_philosophy(peer_email: str) -> bool:
-    """Verify philosophy.md was pulled correctly."""
+    """Verify philosophy.md was pulled and decrypted correctly."""
     log("Verifying philosophy.md...")
 
     our_email = get_current_email()
@@ -707,10 +707,45 @@ def verify_philosophy(peer_email: str) -> bool:
         error(f"philosophy.md not found: {peer_philosophy}")
         return False
 
+    # Check file is NOT still encrypted (should be plaintext after pull)
+    raw_bytes = peer_philosophy.read_bytes()
+    if raw_bytes[:5] == CCENC_MAGIC:
+        error("philosophy.md is still encrypted! Decryption failed.")
+        return False
+    log("  ✓ File is decrypted (no CCENC header)")
+
     content = peer_philosophy.read_text()
     if "ineffability" in content:
-        log("philosophy.md verified - 'ineffability' found!")
+        log("  ✓ Content verified - 'ineffability' found!")
         return True
     else:
         error("philosophy.md verification failed - 'ineffability' not found")
         return False
+
+
+def verify_peer_files_decrypted(peer_email: str) -> bool:
+    """Verify that pulled peer files are decrypted (not still CCENC encrypted)."""
+    log(f"Verifying {peer_email}'s pulled files are decrypted...")
+
+    our_email = get_current_email()
+    peers_dir = get_peers_dir(our_email)
+    repo_name = email_to_repo_name(peer_email)
+    peer_dir = peers_dir / repo_name
+
+    if not peer_dir.exists():
+        error(f"Peer directory not found: {peer_dir}")
+        return False
+
+    md_files = list(peer_dir.rglob("*.md"))
+    if not md_files:
+        log("  No .md files found in peer context")
+        return True
+
+    for md_file in md_files:
+        raw_bytes = md_file.read_bytes()
+        if raw_bytes[:5] == CCENC_MAGIC:
+            error(f"  ✗ {md_file.name} is still encrypted!")
+            return False
+
+    log(f"  ✓ All {len(md_files)} .md files are decrypted")
+    return True

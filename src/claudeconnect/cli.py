@@ -1552,6 +1552,15 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
         # Silent failure - don't crash sync loop
         pass
 
+    # Auto-accept reciprocal friend requests (from people we already friended)
+    try:
+        accepted = auto_accept_reciprocal_requests(context_dir, email, id_token, verbose=verbose)
+        if accepted and verbose:
+            print(f"  Auto-accepted {accepted} reciprocal friend request(s)")
+    except Exception:
+        # Silent failure - don't crash sync loop
+        pass
+
     return True
 
 
@@ -2088,6 +2097,129 @@ def accept_friend(peer_email: str):
     print(f"\n✓ Friend request accepted!")
     print(f"  {peer_email} can now read your context and send you conversations.")
     print(f"  Pull their context with: claudeconnect pull {peer_email}")
+
+
+def auto_accept_reciprocal_requests(
+    context_dir: Path,
+    my_email: str,
+    id_token: str,
+    verbose: bool = False,
+) -> int:
+    """
+    Auto-accept friend requests from people we already initiated friendship with.
+
+    A "reciprocal" request is one where:
+    - We already sent them a friend request (they're in our authz)
+    - They accepted and sent their master key back to us
+
+    For these, we just need to extract their master key - no authz update needed.
+
+    Args:
+        context_dir: Path to context directory
+        my_email: Our email address
+        id_token: JWT for API calls
+        verbose: If True, print status messages
+
+    Returns:
+        Number of requests auto-accepted
+    """
+    import re
+
+    system_messages_dir = context_dir / "claudeconnect" / "with-claudeconnect-io"
+    if not system_messages_dir.exists():
+        return 0
+
+    # Load authz to check who we've already friended
+    authz_path = context_dir / "authz"
+    if not authz_path.exists():
+        return 0
+
+    authz_content = authz_path.read_text()
+
+    # Find all friend request files
+    request_files = list(system_messages_dir.glob("friend-request-*.md"))
+    if not request_files:
+        return 0
+
+    accepted_count = 0
+
+    for request_file in request_files:
+        try:
+            request_content = request_file.read_text()
+
+            # Extract sender's email from the request
+            from_match = re.search(r'\*\*From\*\*:\s*(\S+@\S+)', request_content)
+            if not from_match:
+                continue
+
+            peer_email = from_match.group(1).strip().lower()
+
+            # Check if this person is already in our authz (we initiated to them)
+            # They should have read access in [/] section
+            peer_has_access = f"{peer_email} = r" in authz_content or f"{peer_email} = rw" in authz_content
+
+            if not peer_has_access:
+                # Not a reciprocal request - needs manual acceptance
+                continue
+
+            # Check if we already have their master key
+            if HAS_ENCRYPTION and has_friend_master_key(peer_email, my_email):
+                # Already have their key, just clean up the request file
+                pass
+            elif HAS_ENCRYPTION:
+                # Extract and save their master key
+                master_key_match = re.search(r'\*\*Encrypted-Master-Key\*\*:\s*([a-fA-F0-9]+)', request_content)
+                if master_key_match:
+                    try:
+                        encrypted_master_key_hex = master_key_match.group(1)
+                        encrypted_blob = bytes.fromhex(encrypted_master_key_hex)
+                        friend_master_key = decrypt_received_master_key(encrypted_blob, my_email)
+                        save_friend_master_key(peer_email, friend_master_key, my_email)
+                        if verbose:
+                            print(f"  Auto-accepted reciprocal request from {peer_email} (got their master key)")
+                    except Exception as e:
+                        if verbose:
+                            print(f"  Warning: Could not decrypt master key from {peer_email}: {e}")
+                        continue
+                else:
+                    if verbose:
+                        print(f"  Auto-accepted reciprocal request from {peer_email} (no master key included)")
+
+                # Also save their public key if present
+                key_match = re.search(r'\*\*Public-Key\*\*:\s*([a-fA-F0-9]{64})', request_content)
+                if key_match:
+                    try:
+                        peer_public_key = bytes.fromhex(key_match.group(1))
+                        save_friend_public_key(peer_email, peer_public_key, my_email)
+                    except Exception:
+                        pass  # Non-fatal
+
+            # Delete the request file locally
+            try:
+                request_file.unlink()
+            except Exception:
+                pass
+
+            # Delete from server
+            try:
+                response = httpx.post(
+                    f"{API_BASE_URL}/accept-friend",
+                    headers={"Authorization": f"Bearer {id_token}"},
+                    json={"from_email": peer_email},
+                    timeout=30,
+                )
+                # Ignore response - best effort cleanup
+            except Exception:
+                pass
+
+            accepted_count += 1
+
+        except Exception as e:
+            if verbose:
+                print(f"  Warning: Error processing {request_file.name}: {e}")
+            continue
+
+    return accepted_count
 
 
 @cli.command("reject-friend")
