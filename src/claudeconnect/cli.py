@@ -427,7 +427,6 @@ def get_valid_token() -> Tokens | None:
     if exp < int(time.time()):
         # Token expired - try to refresh
         if tokens.refresh_token:
-            print("Token expired, refreshing...")
             new_tokens = refresh_token(tokens.refresh_token)
             if new_tokens:
                 return new_tokens
@@ -1306,7 +1305,6 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
     - Uploads and downloads run in parallel for speed
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    import threading
 
     config = get_config()
     encryption_enabled = config.encryption_enabled and HAS_ENCRYPTION
@@ -1394,28 +1392,11 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
                 # Context missing - decrypt from shadow to context
                 to_download.append((path, shadow_path, context_path, server_info))
 
-    total_ops = len(to_upload) + len(to_download)
-    if total_ops == 0:
+    if not to_upload and not to_download:
         return True
-
-    # Progress tracking
-    completed = 0
-    uploaded = 0
-    downloaded = 0
-    errors = []
-    lock = threading.Lock()
-
-    def print_progress(action: str, path: str):
-        nonlocal completed
-        with lock:
-            completed += 1
-            pct = int(completed / total_ops * 100)
-            # Clear line and print progress
-            print(f"\r  [{pct:3d}%] {action}: {path[:60]:<60}", end="", flush=True)
 
     def upload_file(path: str, context_path: Path, shadow_path: Path) -> bool:
         """Upload a single file to server."""
-        nonlocal uploaded
         try:
             content = context_path.read_bytes()
             encrypted_content = content
@@ -1434,22 +1415,13 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
             if response.status_code == 200:
                 shadow_path.parent.mkdir(parents=True, exist_ok=True)
                 shadow_path.write_bytes(encrypted_content)
-                with lock:
-                    uploaded += 1
-                print_progress("UP", path)
                 return True
-            else:
-                with lock:
-                    errors.append(f"Upload {path}: HTTP {response.status_code}")
-                return False
-        except Exception as e:
-            with lock:
-                errors.append(f"Upload {path}: {e}")
+            return False
+        except Exception:
             return False
 
     def download_file(path: str, shadow_path: Path, context_path: Path) -> bool:
         """Download a single file from server."""
-        nonlocal downloaded
         try:
             response = httpx.get(
                 f"{API_BASE_URL}/files/{email}/{path}",
@@ -1475,22 +1447,12 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
 
                 context_path.parent.mkdir(parents=True, exist_ok=True)
                 context_path.write_bytes(decrypted_content)
-                with lock:
-                    downloaded += 1
-                print_progress("DOWN", path)
                 return True
-            else:
-                with lock:
-                    errors.append(f"Download {path}: HTTP {response.status_code}")
-                return False
-        except Exception as e:
-            with lock:
-                errors.append(f"Download {path}: {e}")
+            return False
+        except Exception:
             return False
 
     # Step 5: Execute uploads and downloads in parallel
-    print(f"  Syncing {len(to_upload)} upload(s), {len(to_download)} download(s)...")
-
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = []
 
@@ -1506,19 +1468,8 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
         for future in as_completed(futures):
             try:
                 future.result()
-            except Exception as e:
-                with lock:
-                    errors.append(str(e))
-
-    # Clear progress line and print summary
-    print(f"\r  Downloaded {downloaded} file(s), uploaded {uploaded} file(s)" + " " * 40)
-
-    if errors:
-        print(f"  Warnings ({len(errors)}):")
-        for err in errors[:5]:
-            print(f"    - {err}")
-        if len(errors) > 5:
-            print(f"    ... and {len(errors) - 5} more")
+            except Exception:
+                pass
 
     # Handle interactive session transcripts
     try:

@@ -113,7 +113,6 @@ def pull_peer_context_http(peer_email: str, id_token: str, max_workers: int = 10
         Path to the peer's cached context, or None on failure.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    import threading
 
     peer_name = email_to_repo_name(peer_email)
     peer_dir = PEERS_DIR / peer_name
@@ -125,7 +124,6 @@ def pull_peer_context_http(peer_email: str, id_token: str, max_workers: int = 10
     headers = {"Authorization": f"Bearer {id_token}"}
 
     # Get manifest from peer
-    print(f"  Fetching {peer_email}'s manifest...")
     try:
         response = httpx.get(
             f"{API_BASE_URL}/manifest/{peer_email}",
@@ -145,18 +143,9 @@ def pull_peer_context_http(peer_email: str, id_token: str, max_workers: int = 10
 
     files = manifest.get("files", [])
     if not files:
-        print("  No files to download")
         return peer_dir
 
-    # Progress tracking
-    completed = 0
-    downloaded = 0
-    skipped = 0
-    lock = threading.Lock()
-    total = len(files)
-
     def download_file(file_info: dict) -> bool:
-        nonlocal completed, downloaded, skipped
         path = file_info["path"]
         try:
             response = httpx.get(
@@ -164,28 +153,16 @@ def pull_peer_context_http(peer_email: str, id_token: str, max_workers: int = 10
                 headers=headers,
                 timeout=60,
             )
-            with lock:
-                completed += 1
-                pct = int(completed / total * 100)
-                if response.status_code == 200:
-                    local_path = peer_dir / path
-                    local_path.parent.mkdir(parents=True, exist_ok=True)
-                    local_path.write_bytes(response.content)
-                    downloaded += 1
-                    print(f"\r  [{pct:3d}%] Downloaded: {path[:50]:<50}", end="", flush=True)
-                    return True
-                elif response.status_code == 403:
-                    skipped += 1
-                    return False
-                else:
-                    return False
+            if response.status_code == 200:
+                local_path = peer_dir / path
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                local_path.write_bytes(response.content)
+                return True
+            return False
         except Exception:
-            with lock:
-                completed += 1
             return False
 
     # Download in parallel
-    print(f"  Downloading {total} file(s)...")
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [executor.submit(download_file, f) for f in files]
         for future in as_completed(futures):
@@ -194,12 +171,8 @@ def pull_peer_context_http(peer_email: str, id_token: str, max_workers: int = 10
             except Exception:
                 pass
 
-    print(f"\r  Downloaded {downloaded} file(s), skipped {skipped}" + " " * 30)
-
     # Decrypt any encrypted files
-    decrypted = decrypt_peer_context(peer_dir, peer_email)
-    if decrypted:
-        print(f"  Decrypted {decrypted} files")
+    decrypt_peer_context(peer_dir, peer_email)
 
     return peer_dir
 
@@ -257,7 +230,6 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
     """Sync local files with server using HTTP API (parallel uploads)."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import hashlib
-    import threading
 
     def compute_sha256(file_path: Path) -> str:
         sha256_hash = hashlib.sha256()
@@ -304,22 +276,10 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
     if not to_upload:
         return True
 
-    # Progress tracking
-    completed = 0
-    lock = threading.Lock()
-    total = len(to_upload)
-
     def upload_one(path: str, local_path: Path) -> bool:
-        nonlocal completed
-        result = upload_file_http(email, path, local_path.read_bytes(), id_token)
-        with lock:
-            completed += 1
-            pct = int(completed / total * 100)
-            print(f"\r  [{pct:3d}%] Uploading: {path[:50]:<50}", end="", flush=True)
-        return result
+        return upload_file_http(email, path, local_path.read_bytes(), id_token)
 
     # Upload in parallel
-    print(f"  Uploading {total} file(s)...")
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [executor.submit(upload_one, path, local_path) for path, local_path in to_upload]
         for future in as_completed(futures):
@@ -328,7 +288,6 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
             except Exception:
                 pass
 
-    print(f"\r  Uploaded {completed} file(s)" + " " * 40)
     return True
 
 
