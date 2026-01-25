@@ -266,6 +266,9 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
     for file_path in context_dir.rglob("*"):
         if file_path.is_file():
             rel_path = str(file_path.relative_to(context_dir))
+            # Skip hidden files (any path component starting with '.')
+            if any(part.startswith('.') for part in Path(rel_path).parts):
+                continue
             local_files[rel_path] = {
                 "path": rel_path,
                 "sha256": compute_sha256(file_path),
