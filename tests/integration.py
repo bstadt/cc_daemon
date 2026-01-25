@@ -55,7 +55,9 @@ from test_utils import (
     verify_file_access,
     verify_files_encrypted_on_server,
     verify_transcript_encrypted_on_server,
+    verify_peer_files_decrypted,
     pull_and_verify_poetry,
+    pull_peer_context,
     # Logging
     log,
 )
@@ -128,11 +130,16 @@ def test_full_flow(temp_dirs):
     verify_transcript("Alice", temp1, bob_email)
     pull_and_verify_poetry(temp1, bob_email)
 
-    # Bob verifies transcript
+    # Bob verifies transcript and can decrypt Alice's files
     os.chdir(temp2)
     login("Bob", temp2)
     init_account("Bob", temp2)
+    sync_files(temp2)  # Should auto-accept Alice's reciprocal request
     success = verify_transcript("Bob", temp2, alice_email)
+
+    # Verify Bob can pull and decrypt Alice's context
+    pull_peer_context(temp2, alice_email)
+    assert verify_peer_files_decrypted(alice_email), "Bob should be able to decrypt Alice's files"
 
     # Summary
     print()
@@ -198,15 +205,19 @@ def main():
 
         pull_and_verify_poetry(temp1, bob_email)
 
-        # Bob verifies transcript
+        # Bob verifies transcript and can decrypt Alice's files
         os.chdir(temp2)
         login("Bob", temp2)
         init_account("Bob", temp2)
-        sync_files(temp2)  # Pull transcript that Alice uploaded to Bob's repo
+        sync_files(temp2)  # Pull transcript + auto-accept Alice's reciprocal request
         verify_transcript("Bob", temp2, alice_email)
 
         # Verify Bob's copy of transcript is also encrypted on server
         verify_transcript_encrypted_on_server(bob_email, alice_email)
+
+        # Verify Bob can pull and decrypt Alice's context
+        pull_peer_context(temp2, alice_email)
+        assert verify_peer_files_decrypted(alice_email), "Bob should be able to decrypt Alice's files"
 
         log("==========================================")
         log("Integration test complete!")
