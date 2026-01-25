@@ -1074,7 +1074,7 @@ def start(system_prompt: str | None, initial_prompt: str | None, context_dir: Pa
     # Initial sync using HTTP
     if not is_interactive:
         print("\nSyncing...")
-    if not sync_http(context_dir, tokens.email, tokens.id_token):
+    if not sync_http(context_dir, tokens.email, tokens.id_token, verbose=not is_interactive):
         if not is_interactive:
             print("  Sync failed")
         sys.exit(1)
@@ -1296,7 +1296,7 @@ def compute_bytes_sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
-def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 10) -> bool:
+def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 10, verbose: bool = False) -> bool:
     """Sync local files with server using HTTP API.
 
     Uses shadow directory for encrypted file storage and comparison.
@@ -1304,6 +1304,9 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
     - Context dir contains plaintext versions (user's working copy)
     - Conflicts resolved by most recent mtime
     - Uploads and downloads run in parallel for speed
+
+    Args:
+        verbose: If True, print progress and summary. Default False for silent background sync.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import threading
@@ -1409,9 +1412,10 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
         nonlocal completed
         with lock:
             completed += 1
-            pct = int(completed / total_ops * 100)
-            # Clear line and print progress
-            print(f"\r  [{pct:3d}%] {action}: {path[:60]:<60}", end="", flush=True)
+            if verbose:
+                pct = int(completed / total_ops * 100)
+                # Clear line and print progress
+                print(f"\r  [{pct:3d}%] {action}: {path[:60]:<60}", end="", flush=True)
 
     def upload_file(path: str, context_path: Path, shadow_path: Path) -> bool:
         """Upload a single file to server."""
@@ -1489,7 +1493,8 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
             return False
 
     # Step 5: Execute uploads and downloads in parallel
-    print(f"  Syncing {len(to_upload)} upload(s), {len(to_download)} download(s)...")
+    if verbose:
+        print(f"  Syncing {len(to_upload)} upload(s), {len(to_download)} download(s)...")
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = []
@@ -1511,14 +1516,15 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
                     errors.append(str(e))
 
     # Clear progress line and print summary
-    print(f"\r  Downloaded {downloaded} file(s), uploaded {uploaded} file(s)" + " " * 40)
+    if verbose:
+        print(f"\r  Downloaded {downloaded} file(s), uploaded {uploaded} file(s)" + " " * 40)
 
-    if errors:
-        print(f"  Warnings ({len(errors)}):")
-        for err in errors[:5]:
-            print(f"    - {err}")
-        if len(errors) > 5:
-            print(f"    ... and {len(errors) - 5} more")
+        if errors:
+            print(f"  Warnings ({len(errors)}):")
+            for err in errors[:5]:
+                print(f"    - {err}")
+            if len(errors) > 5:
+                print(f"    ... and {len(errors) - 5} more")
 
     # Handle interactive session transcripts
     try:
@@ -1565,7 +1571,7 @@ def sync():
     context_dir = Path(config.context_dir)
 
     print("Syncing...")
-    if sync_http(context_dir, tokens.email, tokens.id_token):
+    if sync_http(context_dir, tokens.email, tokens.id_token, verbose=True):
         print("✓ Sync complete")
     else:
         sys.exit(1)
