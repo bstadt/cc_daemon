@@ -1306,7 +1306,7 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import threading
 
-    config = get_config()
+    config = get_config(email)
     encryption_enabled = config.encryption_enabled and HAS_ENCRYPTION
 
     # Shadow directory stores encrypted files (mirrors server)
