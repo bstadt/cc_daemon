@@ -90,13 +90,13 @@ def get_terminal_width(default: int = 80) -> int:
     return shutil.get_terminal_size((default, 24)).columns
 
 
-def get_dashboard_width(default_max: int = 78) -> int:
+def get_dashboard_width() -> int:
     """Return the target dashboard width (matches Claude Code box width)."""
     override = os.environ.get("CC_DASHBOARD_WIDTH", "").strip()
     if override.isdigit():
         return max(40, int(override))
     terminal_width = get_terminal_width()
-    return max(40, min(default_max, terminal_width - 4))
+    return max(40, terminal_width - 2)
 
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
