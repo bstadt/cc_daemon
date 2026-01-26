@@ -78,6 +78,7 @@ def test_recursive_delete_and_permissions(temp_dirs):
     authz_content = authz_path.read_text()
     with_section = f"[/claudeconnect/with-{email_to_repo_name(bob_email)}]"
     if with_section not in authz_content:
+        log("Granting Bob write access to Alice's conversation folder in authz...")
         authz_content = (
             authz_content.rstrip()
             + "\n\n"
@@ -100,6 +101,7 @@ def test_recursive_delete_and_permissions(temp_dirs):
     os.chdir(temp2)
     login("Bob", temp2)
     bob_token = get_id_token()
+    log("Bob tries to delete a file in Alice's repo (should be 403)...")
     response = httpx.delete(
         f"{API_BASE_URL}/files/{alice_email}/{friend_dir}/one.md",
         headers={"Authorization": f"Bearer {bob_token}"},
@@ -107,6 +109,7 @@ def test_recursive_delete_and_permissions(temp_dirs):
     )
     assert response.status_code == 403, f"Expected 403, got {response.status_code}: {response.text}"
 
+    log("Bob tries to delete Alice's directory recursively (should be 403)...")
     response = httpx.delete(
         f"{API_BASE_URL}/files/{alice_email}/{friend_dir}",
         headers={"Authorization": f"Bearer {bob_token}"},
@@ -119,6 +122,7 @@ def test_recursive_delete_and_permissions(temp_dirs):
     os.chdir(temp1)
     login("Alice", temp1)
     alice_token = get_id_token()
+    log("Alice tries to delete directory without recursive flag (should be 400)...")
     response = httpx.delete(
         f"{API_BASE_URL}/files/{alice_email}/{friend_dir}",
         headers={"Authorization": f"Bearer {alice_token}"},
@@ -127,6 +131,7 @@ def test_recursive_delete_and_permissions(temp_dirs):
     assert response.status_code == 400, f"Expected 400, got {response.status_code}: {response.text}"
 
     # Alice can delete directory recursively
+    log("Alice deletes directory recursively (should be 200, deleted=2)...")
     response = httpx.delete(
         f"{API_BASE_URL}/files/{alice_email}/{friend_dir}",
         headers={"Authorization": f"Bearer {alice_token}"},
@@ -138,6 +143,7 @@ def test_recursive_delete_and_permissions(temp_dirs):
     assert deleted == 2, f"Expected 2 files deleted, got {deleted}"
 
     # Verify file is gone
+    log("Verify deleted file is now 404...")
     response = httpx.get(
         f"{API_BASE_URL}/files/{alice_email}/{friend_dir}/one.md",
         headers={"Authorization": f"Bearer {alice_token}"},

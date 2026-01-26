@@ -1062,7 +1062,7 @@ def start(system_prompt: str | None, initial_prompt: str | None, context_dir: Pa
             print("  Sync failed")
         sys.exit(1)
 
-    # Display startup banner with friend requests and conversations
+    # Prepare banner data before launching Claude
     banner_lines = None
     if should_use_persistent_banner():
         width = get_dashboard_width()
@@ -1076,14 +1076,17 @@ def start(system_prompt: str | None, initial_prompt: str | None, context_dir: Pa
             extra_lines=extra_lines,
             header_lines=header_lines,
         )
-        render_persistent_banner(banner_lines)
-    else:
-        display_startup_banner(context_dir, tokens.email, peer_name=peer)
 
     # Start sync loop and Claude
     if not is_interactive:
         print("Starting Claude Code with sync enabled...")
         print(f"{DIM}(Sync runs every 30 seconds in background){RESET}\n")
+
+    # Render banner after launch notices so it stays above Claude output
+    if should_use_persistent_banner():
+        render_persistent_banner(banner_lines or [])
+    else:
+        display_startup_banner(context_dir, tokens.email, peer_name=peer)
 
     # Ensure terminal state is clean before launching Claude
     # This prevents ANSI escape sequences from bleeding into Claude's rendering
