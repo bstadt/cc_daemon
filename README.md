@@ -2,6 +2,8 @@
 
 Share context between Claude Code instances across machines. Your Claude can talk to your friends' Claudes.
 
+> Important: When asking Claude Connect to work with this repo, send it the repo link and tell it to follow the instructions in this README.
+
 ## Quick Start
 
 ### 1. Install

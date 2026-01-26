@@ -101,6 +101,47 @@ def decrypt_peer_context(peer_dir: Path, peer_email: str, our_email: str) -> int
     return decrypted_count
 
 
+def _load_peer_manifest(manifest_path: Path) -> dict[str, dict]:
+    if not manifest_path.exists():
+        return {}
+    try:
+        data = json.loads(manifest_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+    if isinstance(data, dict) and "files" in data and isinstance(data["files"], list):
+        return {f["path"]: f for f in data["files"] if isinstance(f, dict) and "path" in f}
+    if isinstance(data, dict):
+        return {k: v for k, v in data.items() if isinstance(v, dict)}
+    return {}
+
+
+def _write_peer_manifest(manifest_path: Path, peer_email: str, files: dict[str, dict]) -> None:
+    payload = {"user": peer_email, "files": list(files.values())}
+    manifest_path.write_text(json.dumps(payload, indent=2))
+
+
+def _compute_peer_pull_plan(
+    server_files: dict[str, dict],
+    cached_files: dict[str, dict],
+) -> tuple[list[str], list[str]]:
+    to_download: list[str] = []
+    for path, info in server_files.items():
+        cached = cached_files.get(path)
+        if not cached:
+            to_download.append(path)
+            continue
+        server_sha = info.get("sha256")
+        cached_sha = cached.get("sha256")
+        if server_sha and cached_sha:
+            if server_sha != cached_sha:
+                to_download.append(path)
+            continue
+        if info.get("size") != cached.get("size") or info.get("mtime") != cached.get("mtime"):
+            to_download.append(path)
+    removed = [path for path in cached_files if path not in server_files]
+    return to_download, removed
+
+
 def pull_peer_context_http(peer_email: str, id_token: str, our_email: str, max_workers: int = 10) -> Path | None:
     """
     Pull or update a peer's context to local cache using HTTP API (parallel downloads).
@@ -119,6 +160,9 @@ def pull_peer_context_http(peer_email: str, id_token: str, our_email: str, max_w
     peers_dir = get_peers_dir(our_email)
     peer_name = email_to_repo_name(peer_email)
     peer_dir = peers_dir / peer_name
+    peer_shadow_dir = get_shadow_dir(our_email) / "peers" / peer_name
+    peer_shadow_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = peer_shadow_dir / ".peer_manifest.json"
 
     # Ensure peers directory exists
     peers_dir.mkdir(parents=True, exist_ok=True)
@@ -147,6 +191,10 @@ def pull_peer_context_http(peer_email: str, id_token: str, our_email: str, max_w
     files = manifest.get("files", [])
     if not files:
         return peer_dir
+    server_files = {f["path"]: f for f in files if isinstance(f, dict) and "path" in f}
+    cached_files = _load_peer_manifest(manifest_path)
+    to_download, removed = _compute_peer_pull_plan(server_files, cached_files)
+    to_download_set = set(to_download)
 
     def download_file(file_info: dict) -> bool:
         path = file_info["path"]
@@ -157,9 +205,28 @@ def pull_peer_context_http(peer_email: str, id_token: str, our_email: str, max_w
                 timeout=60,
             )
             if response.status_code == 200:
+                encrypted_content = response.content
+                shadow_path = peer_shadow_dir / path
+                shadow_path.parent.mkdir(parents=True, exist_ok=True)
+                shadow_path.write_bytes(encrypted_content)
+
                 local_path = peer_dir / path
                 local_path.parent.mkdir(parents=True, exist_ok=True)
-                local_path.write_bytes(response.content)
+                if HAS_ENCRYPTION and is_encrypted_file(encrypted_content):
+                    if has_friend_master_key(peer_email, our_email):
+                        try:
+                            plaintext = decrypt_file_with_friend_master_key(
+                                encrypted_content, peer_email, our_email
+                            )
+                            local_path.write_bytes(plaintext)
+                        except Exception as e:
+                            print(f"  Warning: Could not decrypt {path}: {e}")
+                            local_path.write_bytes(encrypted_content)
+                    else:
+                        print(f"  Warning: No master key for {peer_email}, cannot decrypt {path}")
+                        local_path.write_bytes(encrypted_content)
+                else:
+                    local_path.write_bytes(encrypted_content)
                 return True
             return False
         except Exception:
@@ -167,15 +234,44 @@ def pull_peer_context_http(peer_email: str, id_token: str, our_email: str, max_w
 
     # Download in parallel
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(download_file, f) for f in files]
+        futures = {executor.submit(download_file, server_files[p]): p for p in to_download}
         for future in as_completed(futures):
             try:
-                future.result()
+                path = futures[future]
+                success = future.result()
+                if success:
+                    cached_files[path] = server_files[path]
             except Exception:
                 pass
 
-    # Decrypt any encrypted files
-    decrypt_peer_context(peer_dir, peer_email, our_email)
+    # Restore missing local files from shadow for unchanged paths
+    for path, info in server_files.items():
+        if path in to_download_set:
+            continue
+        local_path = peer_dir / path
+        if local_path.exists():
+            continue
+        shadow_path = peer_shadow_dir / path
+        if not shadow_path.exists():
+            continue
+        encrypted_content = shadow_path.read_bytes()
+        if HAS_ENCRYPTION and is_encrypted_file(encrypted_content) and has_friend_master_key(peer_email, our_email):
+            try:
+                plaintext = decrypt_file_with_friend_master_key(encrypted_content, peer_email, our_email)
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                local_path.write_bytes(plaintext)
+                continue
+            except Exception:
+                pass
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path.write_bytes(encrypted_content)
+
+    for path in removed:
+        cached_files.pop(path, None)
+        (peer_dir / path).unlink(missing_ok=True)
+        (peer_shadow_dir / path).unlink(missing_ok=True)
+
+    _write_peer_manifest(manifest_path, peer_email, cached_files)
 
     return peer_dir
 
@@ -953,4 +1049,3 @@ def run_interactive_session(
     print(f"  within 60-90 seconds after you exit.")
 
     return True, f"Interactive session with {peer_email} started"
-

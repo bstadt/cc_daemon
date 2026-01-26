@@ -1382,6 +1382,49 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
                 "mtime": file_path.stat().st_mtime,
             }
 
+    context_hash_cache: dict[str, str | None] = {}
+    shadow_plaintext_hash_cache: dict[str, str | None] = {}
+
+    def get_context_hash(path: str, context_path: Path) -> str | None:
+        if path in context_hash_cache:
+            return context_hash_cache[path]
+        try:
+            digest = compute_file_sha256(context_path)
+        except Exception:
+            digest = None
+        context_hash_cache[path] = digest
+        return digest
+
+    def get_shadow_plaintext_hash(path: str, shadow_path: Path) -> str | None:
+        if path in shadow_plaintext_hash_cache:
+            return shadow_plaintext_hash_cache[path]
+        if not shadow_path.exists():
+            shadow_plaintext_hash_cache[path] = None
+            return None
+        try:
+            data = shadow_path.read_bytes()
+        except Exception:
+            shadow_plaintext_hash_cache[path] = None
+            return None
+        if HAS_ENCRYPTION:
+            try:
+                from .encryption import is_encrypted_file, decrypt_file_with_master_key
+                if is_encrypted_file(data):
+                    data = decrypt_file_with_master_key(data, email)
+            except Exception:
+                shadow_plaintext_hash_cache[path] = None
+                return None
+        digest = compute_bytes_sha256(data)
+        shadow_plaintext_hash_cache[path] = digest
+        return digest
+
+    def context_matches_shadow(path: str, context_path: Path, shadow_path: Path) -> bool:
+        context_hash = get_context_hash(path, context_path)
+        shadow_hash = get_shadow_plaintext_hash(path, shadow_path)
+        if context_hash is None or shadow_hash is None:
+            return False
+        return context_hash == shadow_hash
+
     # Step 4: Categorize files into upload/download lists
     to_upload = []  # (path, context_path, shadow_path)
     to_download = []  # (path, shadow_path, context_path, server_info)
@@ -1402,8 +1445,11 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
             server_mtime = server_info.get("mtime", 0)
 
             if local_mtime > server_mtime and context_info:
-                # Local is newer - upload
-                to_upload.append((path, context_path, shadow_path))
+                # Local is newer - upload only if content changed
+                if shadow_info and context_matches_shadow(path, context_path, shadow_path):
+                    to_download.append((path, shadow_path, context_path, server_info))
+                else:
+                    to_upload.append((path, context_path, shadow_path))
             else:
                 # Server is newer - download
                 to_download.append((path, shadow_path, context_path, server_info))
@@ -1415,8 +1461,9 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
         # Case 3: File in shadow matches server
         elif shadow_info and server_info and shadow_info["sha256"] == server_info["sha256"]:
             if context_info and context_info["mtime"] > shadow_info["mtime"]:
-                # Context changed - upload
-                to_upload.append((path, context_path, shadow_path))
+                # Context changed - upload only if content changed
+                if not context_matches_shadow(path, context_path, shadow_path):
+                    to_upload.append((path, context_path, shadow_path))
             elif not context_info:
                 # Context missing - decrypt from shadow to context
                 to_download.append((path, shadow_path, context_path, server_info))
