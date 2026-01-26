@@ -1082,10 +1082,8 @@ def start(system_prompt: str | None, initial_prompt: str | None, context_dir: Pa
         print("Starting Claude Code with sync enabled...")
         print(f"{DIM}(Sync runs every 30 seconds in background){RESET}\n")
 
-    # Render banner after launch notices so it stays above Claude output
-    if should_use_persistent_banner():
-        render_persistent_banner(banner_lines or [])
-    else:
+    # Render startup banner only in non-persistent mode
+    if not should_use_persistent_banner():
         display_startup_banner(context_dir, tokens.email, peer_name=peer)
 
     # Ensure terminal state is clean before launching Claude
@@ -1099,7 +1097,6 @@ def start(system_prompt: str | None, initial_prompt: str | None, context_dir: Pa
         system_prompt=system_prompt, initial_prompt=initial_prompt,
         session_id=session_id,
         banner_lines=banner_lines,
-        render_initial_banner=False,
     ))
 
 
