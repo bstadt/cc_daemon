@@ -14,6 +14,9 @@ cd cc_daemon
 pip install .
 ```
 
+Important: Clone `cc_daemon` into a separate directory outside your notes folder or vault.
+Do not place the repo inside the same folder you plan to share with Claude.
+
 ### 2. Pick a folder to share
 
 Choose a folder with markdown files, text notes, or other context you want Claude to know about. For your first try, pick something without private/sensitive content.
