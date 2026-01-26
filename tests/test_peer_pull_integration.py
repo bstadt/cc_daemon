@@ -111,6 +111,7 @@ def test_peer_pull_only_downloads_changes(temp_dirs):
     # Update only notes.md on Bob's side
     time.sleep(1.1)
     os.chdir(temp2)
+    login("Bob", temp2)
     (temp2 / "notes.md").write_text("notes v2")
     sync_files(temp2)
 
