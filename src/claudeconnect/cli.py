@@ -41,8 +41,9 @@ from .terminal_ui import (
     LIME,
     RESET,
     WHITE,
+    build_banner_box_lines,
+    get_dashboard_width,
     get_double_banner_lines,
-    get_terminal_width,
     get_persistent_banner_lines,
     render_persistent_banner,
     reset_persistent_banner,
@@ -58,7 +59,7 @@ from .config import (
     TestUserCredentials, TEST_USERS_DIR, get_shadow_dir, sanitize_email,
     SERVER_URL, API_BASE_URL, email_to_repo_name, get_active_account,
     get_tokens_file, get_config_file, ACTIVE_ACCOUNT_FILE, LEGACY_TOKENS_FILE,
-    get_friends_dir,
+    get_friends_dir, get_peers_dir,
 )
 from .scanner import scan_directory
 
@@ -99,17 +100,14 @@ def display_startup_banner(context_dir: Path, email: str, clear_screen: bool = T
         print(CLEAR, end='')
 
     print()
-    for line in get_double_banner_lines(email):
+    width = get_dashboard_width()
+    for line in build_banner_box_lines(email, peer_name, width):
         print(line)
 
     print()
 
     # For interactive sessions, show simplified banner and skip notifications
     if peer_name:
-        print(f"  {WHITE}{BOLD}Interactive session with {LIME}{peer_name}{RESET}")
-        print()
-        # Ensure terminal attributes are reset
-        print(RESET, end='', flush=True)
         return
 
     display_notifications(context_dir)
@@ -303,7 +301,7 @@ def build_notifications_lines(context_dir: Path, total_width: int) -> list[str]:
 
 def display_notifications(context_dir: Path) -> None:
     """Display friend request and conversation notifications."""
-    lines = build_notifications_lines(context_dir, get_terminal_width())
+    lines = build_notifications_lines(context_dir, get_dashboard_width())
     if lines:
         for line in lines:
             print(line)
@@ -1066,10 +1064,17 @@ def start(system_prompt: str | None, initial_prompt: str | None, context_dir: Pa
     # Display startup banner with friend requests and conversations
     banner_lines = None
     if should_use_persistent_banner():
+        width = get_dashboard_width()
+        header_lines = build_banner_box_lines(tokens.email, peer, width)
         extra_lines = None
         if not is_interactive:
-            extra_lines = build_notifications_lines(context_dir, get_terminal_width())
-        banner_lines = get_persistent_banner_lines(tokens.email, peer, extra_lines=extra_lines)
+            extra_lines = build_notifications_lines(context_dir, width)
+        banner_lines = get_persistent_banner_lines(
+            tokens.email,
+            peer,
+            extra_lines=extra_lines,
+            header_lines=header_lines,
+        )
         render_persistent_banner(banner_lines)
     else:
         display_startup_banner(context_dir, tokens.email, peer_name=peer)
@@ -2213,7 +2218,18 @@ def accept_friend(peer_email: str):
 
 @cli.command()
 @click.argument("peer_email")
-def unfriend(peer_email: str):
+@click.option(
+    "--purge-remote",
+    is_flag=True,
+    help="Delete conversation files with this friend from server and local cache.",
+)
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    help="Skip confirmation prompt for --purge-remote.",
+)
+def unfriend(peer_email: str, purge_remote: bool, yes: bool):
     """Remove a friend's access from your authz and sync the change."""
     tokens = get_valid_token()
     if not tokens:
@@ -2227,6 +2243,7 @@ def unfriend(peer_email: str):
 
     peer_email = peer_email.strip().lower()
     my_email = tokens.email
+    peer_email_sanitized = email_to_repo_name(peer_email)
 
     if peer_email == my_email:
         print("Cannot unfriend yourself.")
@@ -2258,6 +2275,78 @@ def unfriend(peer_email: str):
         if removed_master:
             removed_parts.append("master key")
         print(f"  Removed local {peer_email} {' and '.join(removed_parts)}")
+
+    if purge_remote and not yes:
+        if not click.confirm(
+            "Are you sure? This will delete peer context and conversations peer had with your Claude.",
+            default=False,
+        ):
+            print("  Purge cancelled.")
+            purge_remote = False
+
+    if purge_remote:
+        print("  Purging conversation files...")
+        context_dir = Path(config.context_dir)
+        conv_rel_dir = Path("claudeconnect") / f"with-{peer_email_sanitized}"
+        conv_dir = context_dir / conv_rel_dir
+        if conv_dir.exists():
+            shutil.rmtree(conv_dir)
+            print(f"  Removed local conversations at {conv_rel_dir}")
+
+        shadow_dir = get_shadow_dir(my_email)
+        shadow_conv_dir = shadow_dir / conv_rel_dir
+        if shadow_conv_dir.exists():
+            shutil.rmtree(shadow_conv_dir)
+            print(f"  Removed shadow conversations at {shadow_conv_dir}")
+
+        peers_dir = get_peers_dir(my_email)
+        peer_cache_dir = peers_dir / peer_email_sanitized
+        if peer_cache_dir.exists():
+            shutil.rmtree(peer_cache_dir)
+            print(f"  Removed local peer cache at {peer_cache_dir}")
+
+        try:
+            del_resp = httpx.delete(
+                f"{API_BASE_URL}/files/{my_email}/{conv_rel_dir}",
+                headers={"Authorization": f"Bearer {tokens.id_token}"},
+                params={"recursive": "true"},
+                timeout=60,
+            )
+            if del_resp.status_code == 200:
+                deleted = del_resp.json().get("deleted", 0)
+                print(f"  Deleted {deleted} remote conversation file(s)")
+            else:
+                print(f"  Warning: Could not delete remote directory: {del_resp.text}")
+                raise RuntimeError("remote-delete-failed")
+        except Exception:
+            try:
+                response = httpx.get(
+                    f"{API_BASE_URL}/manifest/{my_email}",
+                    headers={"Authorization": f"Bearer {tokens.id_token}"},
+                    timeout=60,
+                )
+                if response.status_code == 200:
+                    manifest = response.json()
+                    paths = [
+                        f["path"] for f in manifest.get("files", [])
+                        if f.get("path", "").startswith(str(conv_rel_dir) + "/")
+                    ]
+                    deleted = 0
+                    for path in paths:
+                        fallback_resp = httpx.delete(
+                            f"{API_BASE_URL}/files/{my_email}/{path}",
+                            headers={"Authorization": f"Bearer {tokens.id_token}"},
+                            timeout=30,
+                        )
+                        if fallback_resp.status_code in (200, 404):
+                            deleted += 1
+                        else:
+                            print(f"  Warning: Could not delete {path}: {fallback_resp.text}")
+                    print(f"  Deleted {deleted} remote conversation file(s)")
+                else:
+                    print(f"  Warning: Could not fetch manifest: {response.text}")
+            except Exception as e:
+                print(f"  Warning: Could not purge remote conversations: {e}")
 
     print(f"\n✓ {peer_email} can no longer access your context.")
     print(f"  Pull their context with: claudeconnect pull {peer_email}")

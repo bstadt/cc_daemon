@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import re
 import struct
 import sys
 from typing import Iterable
@@ -89,6 +90,29 @@ def get_terminal_width(default: int = 80) -> int:
     return shutil.get_terminal_size((default, 24)).columns
 
 
+def get_dashboard_width(default_max: int = 78) -> int:
+    """Return the target dashboard width (matches Claude Code box width)."""
+    override = os.environ.get("CC_DASHBOARD_WIDTH", "").strip()
+    if override.isdigit():
+        return max(40, int(override))
+    terminal_width = get_terminal_width()
+    return max(40, min(default_max, terminal_width - 4))
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text)
+
+
+def _pad_visible(text: str, width: int) -> str:
+    visible = len(_strip_ansi(text))
+    if visible >= width:
+        return text
+    return text + (" " * (width - visible))
+
+
 def should_use_persistent_banner() -> bool:
     """Check if persistent banner rendering is enabled and supported."""
     override = os.environ.get("CC_PERSIST_BANNER", "").lower()
@@ -121,15 +145,42 @@ def get_double_banner_lines(email: str) -> list[str]:
     ]
 
 
+def build_banner_box_lines(email: str, peer_name: str | None, width: int) -> list[str]:
+    """Build the bordered banner box with the double-Claude art."""
+    lines = list(get_double_banner_lines(email))
+    if get_banner_style() == "compact":
+        lines.append(f"{WHITE}{BOLD}Claude Connect{RESET}")
+        lines.append(f"{DIM}{email}{RESET}")
+    if peer_name:
+        lines.append("")
+        lines.append(f"Interactive session with {LIME}{peer_name}{RESET}")
+
+    max_art_width = max(len(_strip_ansi(line)) for line in lines) if lines else 0
+    width = max(width, max_art_width + 4, 40)
+    inner_width = width - 2
+    content_width = inner_width - 2
+
+    boxed = ["┌" + ("─" * inner_width) + "┐"]
+    for line in lines:
+        padded = _pad_visible(line, content_width)
+        boxed.append(f"│ {padded} │")
+    boxed.append("└" + ("─" * inner_width) + "┘")
+    return boxed
+
+
 def get_persistent_banner_lines(
     email: str,
     peer_name: str | None = None,
     extra_lines: Iterable[str] | None = None,
+    header_lines: Iterable[str] | None = None,
 ) -> list[str]:
     """Return banner lines for persistent header mode."""
-    lines = get_double_banner_lines(email)
-    if peer_name:
-        lines.append(f"  {WHITE}{BOLD}Interactive session with {LIME}{peer_name}{RESET}")
+    if header_lines is None:
+        lines = get_double_banner_lines(email)
+        if peer_name:
+            lines.append(f"  {WHITE}{BOLD}Interactive session with {LIME}{peer_name}{RESET}")
+    else:
+        lines = list(header_lines)
     if extra_lines:
         lines.append("")
         lines.extend(extra_lines)
