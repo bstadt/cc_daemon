@@ -66,6 +66,11 @@ def get_friends_dir(email: str) -> Path:
     return get_account_dir(email) / "friends"
 
 
+def get_pending_sessions_dir(email: str) -> Path:
+    """Get pending sessions directory for tracking interactive session UUIDs."""
+    return get_account_dir(email) / "pending-sessions"
+
+
 def get_active_account() -> Optional[str]:
     """Get the currently active account email."""
     if not ACTIVE_ACCOUNT_FILE.exists():

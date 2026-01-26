@@ -974,7 +974,8 @@ def dashboard():
 @click.option("--context-dir", type=click.Path(exists=True, file_okay=False, path_type=Path), default=None,
               help="Override context directory (for interactive sessions)")
 @click.option("--peer", type=str, default=None, help="Peer name for interactive session banner")
-def start(system_prompt: str | None, initial_prompt: str | None, context_dir: Path | None, peer: str | None):
+@click.option("--session-id", type=str, default=None, help="Session ID (UUID) for transcript tracking")
+def start(system_prompt: str | None, initial_prompt: str | None, context_dir: Path | None, peer: str | None, session_id: str | None):
     """Start Claude with sync enabled (default command)."""
     # Check for mock/dev mode
     mock_dir = get_mock_dir()
@@ -1091,7 +1092,8 @@ def start(system_prompt: str | None, initial_prompt: str | None, context_dir: Pa
     # Run async main with HTTP sync
     asyncio.run(run_with_http_sync(
         context_dir, tokens.email, tokens.id_token,
-        system_prompt=system_prompt, initial_prompt=initial_prompt
+        system_prompt=system_prompt, initial_prompt=initial_prompt,
+        session_id=session_id
     ))
 
 
@@ -1102,6 +1104,7 @@ async def run_with_http_sync(
     interval: int = 30,
     system_prompt: str | None = None,
     initial_prompt: str | None = None,
+    session_id: str | None = None,
 ):
     """Run Claude Code with background HTTP sync loop."""
     stop_event = asyncio.Event()
@@ -1133,6 +1136,8 @@ async def run_with_http_sync(
         claude_args = ["claude"]
         if system_prompt:
             claude_args.extend(["--system-prompt", system_prompt])
+        if session_id:
+            claude_args.extend(["--session-id", session_id])
         if initial_prompt:
             claude_args.append(initial_prompt)
 
@@ -1532,7 +1537,6 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
         from .transcripts import (
             discover_new_interactive_transcripts,
             import_transcript,
-            commit_transcript_to_peer,
         )
 
         # Discover new transcripts from Claude Code's storage
@@ -1542,11 +1546,10 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
             # Import to local context (sync_http will upload to our repo automatically)
             transcript_path = import_transcript(jsonl_path, metadata, email, context_dir)
 
-            if transcript_path:
-                # Upload to peer's repo explicitly
-                peer_email = metadata.get("peer_email")
-                if peer_email:
-                    commit_transcript_to_peer(transcript_path, peer_email, email, id_token)
+            if transcript_path is None:
+                continue
+            # Transcript is saved locally; upload occurs on the next sync cycle.
+            # Peers pull from our with-<peer> folder in our repo.
 
     except Exception:
         # Silent failure - don't crash sync loop

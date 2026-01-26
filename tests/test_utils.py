@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Optional
 
 from conf import ALICE_EMAIL, BOB_EMAIL, SERVER, SERVER_URL, API_BASE_URL, SSH_KEY_PATH
+from claudeconnect.config import Tokens
 
 SSH_KEY = Path(SSH_KEY_PATH)
 CC_CONFIG_DIR = Path.home() / ".claude-connect"
@@ -177,6 +178,42 @@ def login(account_name: str, temp_dir: Path):
     """Login to an account."""
     log(f"Logging in as {account_name}...")
     os.chdir(temp_dir)
+    email = ALICE_EMAIL if account_name.lower() == "alice" else BOB_EMAIL
+    tokens_file_env = f"CC_TEST_{account_name.upper()}_TOKENS_FILE"
+    refresh_env = f"CC_TEST_{account_name.upper()}_REFRESH_TOKEN"
+
+    tokens_file = os.environ.get(tokens_file_env)
+    if tokens_file:
+        try:
+            data = json.loads(Path(tokens_file).read_text())
+            id_token = data.get("id_token")
+            refresh_token = data.get("refresh_token", "")
+            token_email = data.get("email", email)
+            if id_token:
+                Tokens(id_token=id_token, refresh_token=refresh_token, email=token_email).save()
+                log(f"  ✓ Loaded tokens from {tokens_file_env}")
+                return
+        except Exception as e:
+            warn(f"Failed to load tokens from {tokens_file_env}: {e}")
+
+    refresh_token = os.environ.get(refresh_env)
+    if refresh_token:
+        try:
+            response = httpx.get(
+                f"{SERVER_URL}/refresh",
+                params={"refresh_token": refresh_token},
+                timeout=30,
+            )
+            response.raise_for_status()
+            data = response.json()
+            id_token = data.get("id_token")
+            if id_token:
+                Tokens(id_token=id_token, refresh_token=refresh_token, email=email).save()
+                log(f"  ✓ Refreshed tokens via {refresh_env}")
+                return
+        except Exception as e:
+            warn(f"Failed to refresh tokens via {refresh_env}: {e}")
+
     wait_for_user(f"Please login with {account_name}")
     claudeconnect("login", cwd=temp_dir)
 

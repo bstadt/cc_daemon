@@ -2,41 +2,44 @@
 
 ## Overview
 
-Interactive sessions allow users to chat directly with a Claude instance that has access to their peer's context in a new Terminal window. Conversations are automatically imported from Claude Code's native transcript storage and synced bidirectionally to both the user's and peer's repositories.
+Interactive sessions allow users to chat directly with a Claude instance that has access to their peer's context in a new Terminal window. Conversations are automatically imported from Claude Code's native transcript storage and synced to the user's repository; peers pull transcripts from the user's `with-<peer>` folder during their normal sync.
 
 ## Architecture
 
 ### Flow
 
 1. User runs `claudeconnect interactive peer@example.com`
-2. System pulls peer's context via HTTP
-3. Opens new Terminal window with Claude running in peer's context directory
-4. User interacts with Claude naturally (no special wrapper commands)
-5. Claude Code saves conversation to `~/.claude/projects/` in JSONL format
-6. Background sync loop discovers new transcripts (every 30 seconds)
-7. Transcripts are imported to local context as Markdown
-8. Transcripts are uploaded to user's repo (automatic via `sync_http()`)
-9. Transcripts are uploaded to peer's repo (explicit API call)
-10. Peer can pull and decrypt transcripts during their sync
+2. System generates a UUID and creates pending session file in `~/.claude-connect/accounts/{email}/pending-sessions/{uuid}.json`
+3. System pulls peer's context via HTTP
+4. Opens new Terminal window with Claude running in peer's context directory, passing `--session-id {uuid}`
+5. User interacts with Claude naturally (no special wrapper commands)
+6. Claude Code saves conversation to `~/.claude/projects/.../{uuid}.jsonl`
+7. Background sync loop discovers new transcripts by matching pending UUIDs (every 30 seconds)
+8. Transcripts are imported to local context as Markdown
+9. Pending session file remains until there are no changes for 24 hours (cleanup)
+10. Transcripts are uploaded to user's repo (automatic via `sync_http()`)
+11. Peer can pull and decrypt transcripts from the user's `with-<peer>` folder during their sync
 
 ### Key Components
 
 **Module: `src/claudeconnect/transcripts.py`**
 
-- `discover_new_interactive_transcripts()` - Finds new JSONL files in `~/.claude/projects/`
-  - Filters by `cwd` field to only import peer context sessions
-  - Ignores user's normal Claude Code usage
-  - Checks file modification time (60s stability threshold)
+- `discover_new_interactive_transcripts()` - Matches pending sessions to JSONL files
+  - Reads pending session files from `~/.claude-connect/accounts/{email}/pending-sessions/`
+  - Searches `~/.claude/projects/**/{uuid}.jsonl` for each pending UUID
+  - Multi-account safe: only imports sessions started by THIS account
+  - Cleans up orphaned pending files after 24 hours of inactivity
 
 - `import_transcript()` - Converts JSONL to Markdown and saves locally
   - Parses Claude Code's JSONL format
   - Extracts session metadata (ID, timestamps, peer email)
   - Generates Markdown with header and formatted conversation
   - Saves to `~/context/claudeconnect/with-{peer}/YYYY-MM-DD-HHMMSS_{uuid}.md`
+  - Updates pending session metadata after import; cleanup happens after inactivity
 
-- `commit_transcript_to_peer()` - Uploads transcript to peer's repository
-  - Encrypts with peer's friend master key
-  - Uploads via HTTP API to peer's repo
+- `cleanup_orphaned_pending_sessions()` - Removes stale pending files
+  - Called automatically during discovery
+  - Removes pending files after 24 hours of inactivity
 
 **Integration: `src/claudeconnect/cli.py:sync_http()`**
 
@@ -46,26 +49,26 @@ Background sync loop (30-second interval) now includes:
 new_transcripts = discover_new_interactive_transcripts(email, context_dir)
 for jsonl_path, metadata in new_transcripts:
     transcript_path = import_transcript(jsonl_path, metadata, email, context_dir)
-    if transcript_path and metadata.get("peer_email"):
-        commit_transcript_to_peer(transcript_path, peer_email, email, id_token)
+    # Saved locally; uploaded on next sync. Peers pull from our with-<peer> folder.
 ```
 
-**Simplified: `src/claudeconnect/session.py:run_interactive_session()`**
+**Module: `src/claudeconnect/session.py:run_interactive_session()`**
 
-Removed ~50 lines of complexity:
-- No longer generates session IDs (Claude Code handles this)
-- No longer uses `script` command to capture terminal I/O
-- No longer creates transcript files upfront
-- Simply opens Terminal and lets Claude Code save naturally
+- Generates UUID for session tracking
+- Creates pending session file with peer_email and timestamp
+- Passes `--session-id {uuid}` to Claude Code via `claudeconnect start`
+- Opens Terminal window with peer context
 
 ## Session Filtering (Critical)
 
-**Problem**: We only want to import interactive sessions, NOT the user's normal Claude Code usage.
+**Problem**: We only want to import interactive sessions, NOT the user's normal Claude Code usage. On shared machines, multiple users may run interactive sessions.
 
-**Solution**: Check `cwd` field in JSONL metadata
-- Interactive sessions have `cwd` pointing to `~/.claude-connect/peers/{peer-name}/`
-- Regular Claude usage has `cwd` pointing to user's project directories
-- Only import transcripts where `cwd` contains `/.claude-connect/peers/`
+**Solution**: Pending session files with UUID matching
+
+1. When starting a session, we generate a UUID and create `pending-sessions/{uuid}.json`
+2. We pass `--session-id {uuid}` to Claude Code so the JSONL is named `{uuid}.jsonl`
+3. On sync, we only look for JSONL files matching our pending UUIDs
+4. This is deterministic and multi-account safe - no path parsing or cwd checking needed
 
 ## File Naming
 
@@ -104,7 +107,7 @@ I'd be happy to help! Looking at the auth.py file in this codebase...
 
 **File**: `tests/test_interactive_sessions.py`
 
-Comprehensive 11-step integration test:
+Comprehensive 10-step integration test:
 1. Setup two test accounts (Alice and Bob)
 2. Complete friend request flow
 3. Alice starts interactive session with Bob
@@ -112,10 +115,9 @@ Comprehensive 11-step integration test:
 5. Wait for transcript auto-discovery
 6. Verify transcript content and format
 7. Verify upload to Alice's server repo
-8. Verify upload to Bob's server repo
-9. Bob syncs to pull transcript
-10. Verify Bob can decrypt and read transcript
-11. Verify bidirectional sync complete
+8. Bob syncs to pull transcript
+9. Verify Bob can decrypt and read transcript
+10. Verify peer pull complete
 
 **Run**: `pytest tests/test_interactive_sessions.py -s -m integration`
 
@@ -148,15 +150,18 @@ Old `.txt` transcripts in `~/.claude-connect/transcripts/` are left untouched. T
 
 1. **User exits immediately**: Empty session still creates JSONL, imports normally
 2. **Multiple concurrent sessions**: Each has unique UUID, all imported separately
-3. **Incomplete conversation**: 60-second stability check prevents importing mid-conversation
+3. **Incomplete conversation**: Re-imports will catch updates as the JSONL grows
 4. **Network failure during upload**: Will retry on next sync cycle
-5. **Missing peer email**: Skips transcript with warning
+5. **Session crashes before Claude starts**: Orphaned pending file cleaned up after inactivity
 6. **Malformed JSONL**: Wrapped in try/except, logs warning, continues
+7. **Multiple accounts on same machine**: Each account has isolated pending-sessions directory
+8. **Pending cleanup**: Pending files are removed after 24 hours of inactivity
 
 ## Performance
 
 - Background sync runs every 30 seconds
-- Discovery only checks peer directories (not entire `~/.claude/projects/`)
+- Discovery only searches for UUIDs from pending sessions (not entire `~/.claude/projects/`)
+- Each pending UUID triggers a targeted `rglob` search for `{uuid}.jsonl`
 - Modification time tracking prevents re-processing unchanged files
-- `.imported` marker files track processed transcripts
-- Minimal overhead (~100ms per sync cycle with no new transcripts)
+- Pending files serve as the "to-import" list - no marker files needed
+- Minimal overhead when no pending sessions exist

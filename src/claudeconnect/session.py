@@ -22,6 +22,7 @@ import httpx
 from .config import (
     get_config, get_tokens, Tokens, get_shadow_dir, get_peers_dir,
     SERVER_URL, API_BASE_URL, email_to_repo_name, get_active_account,
+    get_pending_sessions_dir,
 )
 
 # Encryption imports (optional)
@@ -847,6 +848,17 @@ def run_interactive_session(
 
     our_email = tokens.email
 
+    # Generate session ID and create pending session file
+    session_id = str(uuid4())
+    pending_dir = get_pending_sessions_dir(our_email)
+    pending_dir.mkdir(parents=True, exist_ok=True)
+    pending_file = pending_dir / f"{session_id}.json"
+    pending_data = {
+        "peer_email": peer_email,
+        "created_at": datetime.now().isoformat(),
+    }
+    pending_file.write_text(json.dumps(pending_data))
+
     # Pull peer's context
     print(f"\nPreparing interactive session with {peer_email}...")
     peer_context_dir = pull_peer_context_http(peer_email, tokens.id_token, our_email)
@@ -885,7 +897,7 @@ def run_interactive_session(
         else:
             claudeconnect_path = str(Path(claudeconnect_path).resolve())
 
-    terminal_cmd = f'unset VIRTUAL_ENV CONDA_DEFAULT_ENV; cd {peer_context_dir} && {claudeconnect_path} start --context-dir "{peer_context_dir}" --peer "{peer_display_name}" --system-prompt "$(cat {prompt_file})" --initial-prompt "hi"'
+    terminal_cmd = f'unset VIRTUAL_ENV CONDA_DEFAULT_ENV; cd {peer_context_dir} && {claudeconnect_path} start --context-dir "{peer_context_dir}" --peer "{peer_display_name}" --session-id "{session_id}" --system-prompt "$(cat {prompt_file})" --initial-prompt "hi"'
 
     # Escape for AppleScript: backslash-escape double quotes and backslashes
     escaped_cmd = terminal_cmd.replace("\\", "\\\\").replace('"', '\\"')
