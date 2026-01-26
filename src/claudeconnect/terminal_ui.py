@@ -171,6 +171,7 @@ def build_banner_box_lines(email: str, peer_name: str | None, width: int) -> lis
     dashes = max(0, inner_width - title_len)
     top_line = f"┌{title_text}" + ("─" * dashes) + "┐"
     boxed = [f"{CORAL}{top_line}{RESET}"]
+    boxed.append(f"{CORAL}│{RESET} " + (" " * content_width) + f" {CORAL}│{RESET}")
     for line in lines:
         padded = _pad_visible(line, content_width)
         boxed.append(f"{CORAL}│{RESET} {padded} {CORAL}│{RESET}")
