@@ -1667,6 +1667,44 @@ def sync():
 
 
 @cli.command()
+@click.argument("username")
+@click.option("--max-posts", "-m", default=100, type=int, help="Maximum number of posts to import (default: 100)")
+def import_substack(username: str, max_posts: int | None):
+    """Import all posts from a Substack to your context directory.
+
+    Creates a folder substack_posts_{username} with markdown files for each post.
+    Images remain as remote URLs.
+
+    Examples:
+    claudeconnect import_substack username
+
+    claudeconnect import_substack https://username.substack.com --max-posts 50
+    """
+    from .substack import import_substack_blog
+
+    config = get_config()
+
+    if not config.context_dir:
+        print("No context directory configured. Run `claudeconnect init` first.")
+        sys.exit(1)
+
+    context_dir = Path(config.context_dir)
+
+    if not context_dir.exists():
+        print(f"Context directory not found: {context_dir}")
+        sys.exit(1)
+
+    try:
+        count, output_dir = import_substack_blog(username, context_dir, max_posts=max_posts)
+        print(f"\n✓ Import complete!")
+        print(f"  Imported {count} posts to: {output_dir}")
+        print(f"  Run `claudeconnect sync` to upload these files to the server.")
+    except Exception as e:
+        print(f"\n✗ Import failed: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+@cli.command()
 @click.argument("peer_email")
 @click.option("--topic", "-t", help="Conversation topic")
 @click.option("--single", is_flag=True, help="Use single-instance mode (one Claude simulates both sides)")
