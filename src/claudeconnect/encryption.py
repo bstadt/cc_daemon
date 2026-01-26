@@ -48,7 +48,6 @@ ENCRYPTED_KEY_SIZE = 48  # 32-byte key + 16-byte GCM tag
 # Files that should NOT be encrypted (required plaintext for system)
 PLAINTEXT_FILES = {
     "authz",
-    ".keep",
 }
 
 # DEPRECATED: Previously only .md files were encrypted

@@ -181,7 +181,6 @@ def test_all_file_types_encrypted(temp_dir, ssh_key):
 
     Files that should remain PLAINTEXT:
     - authz (required for access control)
-    - .keep (marker files)
 
     Run with: pytest tests/test_encrypt_all_files.py -s -m integration
     """
@@ -278,8 +277,8 @@ def test_encryption_unit_check():
         assert result is True, f"should_encrypt_file('{filename}') returned False, expected True"
         log(f"  ✓ {filename} -> encrypt")
 
-    # Files that should NOT be encrypted
-    should_not_encrypt = list(PLAINTEXT_FILES)  # authz, .keep
+    # Files that should NOT be encrypted (only authz)
+    should_not_encrypt = list(PLAINTEXT_FILES)  # authz
 
     for filename in should_not_encrypt:
         result = should_encrypt_file(Path(filename))
