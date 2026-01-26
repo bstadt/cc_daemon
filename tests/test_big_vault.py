@@ -30,7 +30,7 @@ import pytest
 from conf import ALICE_EMAIL, BOB_EMAIL
 from test_utils import (
     log, warn, error, timing,
-    clean_server, clean_client, claudeconnect,
+    clean_server, clean_client, claudeconnect, login,
     get_current_email, email_to_repo_name, wait_for_user,
     CC_CONFIG_DIR, get_peers_dir, Colors,
 )
@@ -131,18 +131,9 @@ def create_vault_files(temp_dir: Path, num_files: int = NUM_VAULT_FILES) -> floa
     return elapsed
 
 
-def login(account_name: str, temp_dir: Path):
-    """Login to an account."""
-    log(f"Logging in as {account_name}...")
-    os.chdir(temp_dir)
-    wait_for_user(f"Please login with {account_name}")
-    claudeconnect("login", cwd=temp_dir)
-
-
 def init_account(account_name: str, temp_dir: Path, expected_email: str) -> float:
     """Initialize an account. Returns time_taken."""
     log(f"Initializing {account_name} ({expected_email})...")
-    wait_for_user(f"{account_name} logged in. Ready to init.")
 
     start_time = time.time()
     result = subprocess.run(
