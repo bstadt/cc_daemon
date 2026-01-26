@@ -116,6 +116,7 @@ def test_peer_pull_only_downloads_changes(temp_dirs):
 
     # Second pull
     os.chdir(temp1)
+    login("Alice", temp1)
     pull_peer_context(temp1, bob_email)
 
     # notes should update, tasks should not
