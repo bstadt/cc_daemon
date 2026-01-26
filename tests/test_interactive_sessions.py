@@ -343,30 +343,39 @@ def run_interactive_session_flow(temp1: Path, temp2: Path) -> None:
     log("==========================================")
 
     # Setup
-    log("\n[1/10] Cleaning server and client...")
+    log("\n[1/11] Cleaning server and client...")
     clean_server()
     clean_client()
 
     # Alice setup
-    log("\n[2/10] Setting up Alice's account...")
+    log("\n[2/11] Setting up Alice's account...")
     os.chdir(temp1)
     login("Alice", temp1)
     alice_email = init_account("Alice", temp1)
     verify_init_structure("Alice", temp1)
 
     # Bob setup
-    log("\n[3/10] Setting up Bob's account...")
+    log("\n[3/11] Setting up Bob's account...")
     os.chdir(temp2)
     login("Bob", temp2)
     bob_email = init_account("Bob", temp2)
     verify_init_structure("Bob", temp2)
 
+    # Create unique marker files for context isolation test
+    log("\n[3.5/11] Creating unique marker files for context isolation test...")
+    alice_marker = temp1 / "aliceonly.md"
+    bob_marker = temp2 / "bobonly.md"
+    alice_marker.write_text("# Alice's Private File\n\nThis file should ONLY exist in Alice's context.\n")
+    bob_marker.write_text("# Bob's Private File\n\nThis file should ONLY exist in Bob's context.\n")
+    log(f"  Created {alice_marker}")
+    log(f"  Created {bob_marker}")
+
     # Bob sends friend request
-    log("\n[4/10] Bob sending friend request to Alice...")
+    log("\n[4/11] Bob sending friend request to Alice...")
     send_friend_request(temp2, alice_email)
 
     # Alice receives and accepts
-    log("\n[5/10] Alice accepting friend request from Bob...")
+    log("\n[5/11] Alice accepting friend request from Bob...")
     os.chdir(temp1)
     login("Alice", temp1)
     init_account("Alice", temp1)
@@ -375,7 +384,7 @@ def run_interactive_session_flow(temp1: Path, temp2: Path) -> None:
     accept_friend_request(temp1, bob_email)
 
     # Alice starts interactive session
-    log("\n[6/10] Alice starting interactive session with Bob...")
+    log("\n[6/11] Alice starting interactive session with Bob...")
     log("⚠️  IMPORTANT: This will open a new Terminal window!")
     log("⚠️  macOS only - requires Terminal.app")
 
@@ -404,7 +413,7 @@ def run_interactive_session_flow(temp1: Path, temp2: Path) -> None:
     wait_for_user("\nAfter you've exited the Terminal window, press Enter to continue...")
 
     # Wait for transcript discovery and import
-    log("\n[7/10] Waiting for transcript auto-discovery and import...")
+    log("\n[7/11] Waiting for transcript auto-discovery and import...")
     log("(Background sync not running in test - manually polling)")
 
     # Use temp1 directly as Alice's context directory (no email subdirectory)
@@ -421,7 +430,7 @@ def run_interactive_session_flow(temp1: Path, temp2: Path) -> None:
         raise RuntimeError(f"Pending session {session_uuid} missing after import!")
 
     # Verify transcript content
-    log("\n[8/10] Verifying transcript content...")
+    log("\n[8/11] Verifying transcript content...")
     content_valid = verify_transcript_content(transcript_path, bob_email, alice_email)
     if not content_valid:
         raise RuntimeError("Transcript content validation failed")
@@ -433,14 +442,14 @@ def run_interactive_session_flow(temp1: Path, temp2: Path) -> None:
     sync_files(temp1)
 
     # Verify transcript on Alice's server repo
-    log("\n[9/10] Verifying transcript uploaded to Alice's server repo...")
+    log("\n[9/11] Verifying transcript uploaded to Alice's server repo...")
     alice_server_ok = verify_transcript_on_server(alice_email, bob_email)
     if not alice_server_ok:
         raise RuntimeError("Transcript not found on Alice's server repo")
     log("✓ Transcript found on Alice's server repo")
 
     # Bob pulls and decrypts the transcript
-    log("\n[10/10] Bob pulling transcript and verifying decryption...")
+    log("\n[10/11] Bob pulling transcript and verifying decryption...")
     os.chdir(temp2)
     login("Bob", temp2)
     init_account("Bob", temp2)
@@ -481,6 +490,41 @@ def run_interactive_session_flow(temp1: Path, temp2: Path) -> None:
     log(f"  ✓ Transcript decrypted successfully ({len(bob_content)} bytes)")
     log(f"  ✓ Bob can read the conversation")
 
+    # Verify context isolation (issue #85 fix)
+    log("\n[11/11] Verifying context isolation (no cross-contamination)...")
+    log("  Alice's context directory contents:")
+    for p in sorted(temp1.rglob("*")):
+        if p.is_file():
+            log(f"    {p.relative_to(temp1)}")
+
+    log("  Bob's context directory contents:")
+    for p in sorted(temp2.rglob("*")):
+        if p.is_file():
+            log(f"    {p.relative_to(temp2)}")
+
+    # Check that aliceonly.md does NOT exist in Bob's context
+    bob_has_alice_file = (temp2 / "aliceonly.md").exists()
+    if bob_has_alice_file:
+        raise RuntimeError("CONTEXT ISOLATION FAILURE: aliceonly.md found in Bob's context!")
+    log("  ✓ aliceonly.md does NOT exist in Bob's context")
+
+    # Check that bobonly.md does NOT exist in Alice's context
+    alice_has_bob_file = (temp1 / "bobonly.md").exists()
+    if alice_has_bob_file:
+        raise RuntimeError("CONTEXT ISOLATION FAILURE: bobonly.md found in Alice's context!")
+    log("  ✓ bobonly.md does NOT exist in Alice's context")
+
+    # Verify the marker files still exist in their original locations
+    if not (temp1 / "aliceonly.md").exists():
+        raise RuntimeError("aliceonly.md missing from Alice's context!")
+    log("  ✓ aliceonly.md still exists in Alice's context")
+
+    if not (temp2 / "bobonly.md").exists():
+        raise RuntimeError("bobonly.md missing from Bob's context!")
+    log("  ✓ bobonly.md still exists in Bob's context")
+
+    log("  ✓ Context isolation verified - no cross-contamination!")
+
     # Summary
     log("\n==========================================")
     log("✓ Interactive Session Test Complete!")
@@ -492,6 +536,7 @@ def run_interactive_session_flow(temp1: Path, temp2: Path) -> None:
     log(f"Bob's copy: {len(bob_content)} bytes")
     log("✓ Peer pull verified (from Alice's repo)")
     log("✓ Encryption/decryption verified")
+    log("✓ Context isolation verified (issue #85)")
 
 
 @pytest.mark.integration
