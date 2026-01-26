@@ -44,3 +44,4 @@
 ## Agent‑Specific Notes
 - Follow this guide, update tests/docs with code changes, and keep patches small and focused.
 - When creating issues, format them cleanly with a short summary, bullet points, and a clear goal/outcome.
+- Use `gh` CLI for GitHub issues (ensure you're authenticated before creating).
