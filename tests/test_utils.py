@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Optional
 
 from conf import ALICE_EMAIL, BOB_EMAIL, SERVER, SERVER_URL, API_BASE_URL, SSH_KEY_PATH
+from claudeconnect.config import Tokens
+from claudeconnect.auth import decode_jwt_payload
 
 SSH_KEY = Path(SSH_KEY_PATH)
 CC_CONFIG_DIR = Path.home() / ".claude-connect"
@@ -136,8 +138,23 @@ def clean_server():
 def clean_client():
     """Remove local ~/.claude-connect and ~/.claude/projects test directories."""
     log("Removing local ~/.claude-connect...")
+    preserved_tokens: dict[str, dict] = {}
+    for email in [ALICE_EMAIL, BOB_EMAIL]:
+        tokens_file = ACCOUNTS_DIR / email / "tokens.json"
+        if tokens_file.exists():
+            try:
+                preserved_tokens[email] = json.loads(tokens_file.read_text())
+            except (json.JSONDecodeError, OSError):
+                pass
     if CC_CONFIG_DIR.exists():
         shutil.rmtree(CC_CONFIG_DIR)
+    if preserved_tokens:
+        for email, data in preserved_tokens.items():
+            account_dir = ACCOUNTS_DIR / email
+            account_dir.mkdir(parents=True, exist_ok=True)
+            tokens_file = account_dir / "tokens.json"
+            tokens_file.write_text(json.dumps(data, indent=2))
+            tokens_file.chmod(0o600)
 
     # Also clean up Claude Code projects directories from tests
     # These correspond to peer context directories like:
@@ -177,6 +194,67 @@ def login(account_name: str, temp_dir: Path):
     """Login to an account."""
     log(f"Logging in as {account_name}...")
     os.chdir(temp_dir)
+    email = ALICE_EMAIL if account_name.lower() == "alice" else BOB_EMAIL
+
+    def token_expired(id_token: str) -> bool:
+        payload = decode_jwt_payload(id_token)
+        exp = payload.get("exp", 0)
+        return exp < int(time.time())
+
+    def refresh_with_token(refresh_token: str, label: str) -> bool:
+        try:
+            response = httpx.get(
+                f"{SERVER_URL}/refresh",
+                params={"refresh_token": refresh_token},
+                timeout=30,
+            )
+            response.raise_for_status()
+            data = response.json()
+            id_token = data.get("id_token")
+            if id_token:
+                Tokens(id_token=id_token, refresh_token=refresh_token, email=email).save()
+                log(f"  ✓ Refreshed tokens via {label}")
+                return True
+        except Exception as e:
+            warn(f"Failed to refresh tokens via {label}: {e}")
+        return False
+
+    existing_tokens = Tokens.load(email)
+    if existing_tokens and existing_tokens.id_token:
+        if not token_expired(existing_tokens.id_token):
+            existing_tokens.save()
+            log("  ✓ Using existing tokens from ~/.claude-connect")
+            return
+        if existing_tokens.refresh_token and refresh_with_token(existing_tokens.refresh_token, "stored refresh_token"):
+            return
+    elif existing_tokens:
+        existing_tokens.save()
+        log("  ✓ Using existing tokens from ~/.claude-connect")
+        return
+    tokens_file_env = f"CC_TEST_{account_name.upper()}_TOKENS_FILE"
+    refresh_env = f"CC_TEST_{account_name.upper()}_REFRESH_TOKEN"
+
+    tokens_file = os.environ.get(tokens_file_env)
+    if tokens_file:
+        try:
+            data = json.loads(Path(tokens_file).read_text())
+            id_token = data.get("id_token")
+            refresh_token = data.get("refresh_token", "")
+            token_email = data.get("email", email)
+            if id_token and not token_expired(id_token):
+                Tokens(id_token=id_token, refresh_token=refresh_token, email=token_email).save()
+                log(f"  ✓ Loaded tokens from {tokens_file_env}")
+                return
+            if refresh_token and refresh_with_token(refresh_token, tokens_file_env):
+                return
+        except Exception as e:
+            warn(f"Failed to load tokens from {tokens_file_env}: {e}")
+
+    refresh_token = os.environ.get(refresh_env)
+    if refresh_token:
+        if refresh_with_token(refresh_token, refresh_env):
+            return
+
     wait_for_user(f"Please login with {account_name}")
     claudeconnect("login", cwd=temp_dir)
 
@@ -184,7 +262,6 @@ def login(account_name: str, temp_dir: Path):
 def init_account(account_name: str, temp_dir: Path) -> str:
     """Initialize an account and return email."""
     log(f"Initializing {account_name}...")
-    wait_for_user(f"{account_name} logged in. Ready to init.")
     # Pass "y" to confirm switching context directory if prompted
     claudeconnect("init", cwd=temp_dir, input_text="y\n")
     email = get_current_email()
@@ -195,7 +272,6 @@ def init_account(account_name: str, temp_dir: Path) -> str:
 def init_account_timed(account_name: str, temp_dir: Path) -> tuple[str, float]:
     """Initialize an account. Returns (email, time_taken)."""
     log(f"Initializing {account_name}...")
-    wait_for_user(f"{account_name} logged in. Ready to init.")
     start = time.time()
     claudeconnect("init", cwd=temp_dir, input_text="y\n")
     elapsed = time.time() - start
