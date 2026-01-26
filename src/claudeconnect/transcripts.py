@@ -1,6 +1,6 @@
 """Interactive session transcript management.
 
-Handles discovery, import, and upload of Claude Code interactive session transcripts.
+Handles discovery and import of Claude Code interactive session transcripts.
 """
 
 from __future__ import annotations
@@ -10,23 +10,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-import httpx
-
-from .config import API_BASE_URL, email_to_repo_name, repo_name_to_email, get_peers_dir
-
-
-def context_dir_to_claude_projects_dir(context_dir: Path) -> str:
-    """Convert context directory path to ~/.claude/projects/ directory name.
-
-    Example:
-        /Users/frsc/.claude-connect/accounts/frsc@gmail.com/peers/brandon-calcifercomputing-com
-        → -Users-frsc--claude-connect-accounts-frsc-gmail-com-peers-brandon-calcifercomputing-com
-    """
-    # Replace slashes and dots with hyphens
-    path_str = str(context_dir.resolve())
-    # Replace / and . with -
-    result = path_str.replace("/", "-").replace(".", "-")
-    return result
+from .config import email_to_repo_name, get_pending_sessions_dir
 
 
 def _format_timestamp_for_filename(iso_timestamp: str) -> str:
@@ -64,7 +48,7 @@ def _extract_jsonl_metadata(jsonl_path: Path) -> dict | None:
         }
 
     Note: peer_email is added separately in discover_new_interactive_transcripts()
-    from the directory structure.
+    from the pending session file.
     """
     try:
         with open(jsonl_path) as f:
@@ -169,34 +153,88 @@ def convert_jsonl_to_markdown(jsonl_path: Path, metadata: dict, our_email: str) 
     return header + "\n\n".join(conversation)
 
 
-def check_file_exists_on_server(email: str, path: str, id_token: str) -> bool:
-    """Check if a file exists on the server using HEAD request.
-
-    Args:
-        email: Email of the repo owner
-        path: Relative path of the file in the repo
-        id_token: JWT token for authentication
-
-    Returns:
-        True if file exists, False otherwise
-    """
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
     try:
-        headers = {"Authorization": f"Bearer {id_token}"}
-        response = httpx.head(
-            f"{API_BASE_URL}/file/{email}/{path}",
-            headers=headers,
-            timeout=10,
-        )
-        return response.status_code == 200
-    except Exception:
-        return False
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _find_matching_jsonl(claude_projects: Path, session_id: str) -> Path | None:
+    for jsonl_file in claude_projects.rglob(f"{session_id}.jsonl"):
+        # Skip subagent transcripts (they're in subdirectories named after session ID)
+        if jsonl_file.parent.name == session_id:
+            continue
+        return jsonl_file
+    return None
+
+
+def cleanup_orphaned_pending_sessions(
+    our_email: str,
+    context_dir: Path,
+    max_age_hours: int = 24,
+) -> int:
+    """Remove pending session files after inactivity across session + conversation files."""
+    pending_dir = get_pending_sessions_dir(our_email)
+    if not pending_dir.exists():
+        return 0
+
+    claude_projects = Path.home() / ".claude" / "projects"
+    max_age_seconds = max_age_hours * 3600
+    now = time.time()
+    cleaned = 0
+
+    for pending_file in pending_dir.glob("*.json"):
+        try:
+            pending_data = {}
+            try:
+                pending_data = json.loads(pending_file.read_text())
+            except (json.JSONDecodeError, OSError):
+                pending_data = {}
+
+            last_activity = pending_file.stat().st_mtime
+
+            session_id = pending_file.stem
+            jsonl_path = _find_matching_jsonl(claude_projects, session_id) if claude_projects.exists() else None
+
+            if jsonl_path and jsonl_path.exists():
+                last_activity = max(last_activity, jsonl_path.stat().st_mtime)
+
+            peer_email = pending_data.get("peer_email")
+            transcript_mtime = None
+            if peer_email:
+                conv_dir = context_dir / "claudeconnect" / f"with-{email_to_repo_name(peer_email)}"
+                if conv_dir.exists():
+                    for md_file in conv_dir.glob(f"*_{session_id}.md"):
+                        mtime = md_file.stat().st_mtime
+                        transcript_mtime = mtime if transcript_mtime is None else max(transcript_mtime, mtime)
+            else:
+                conv_root = context_dir / "claudeconnect"
+                if conv_root.exists():
+                    for md_file in conv_root.rglob(f"*_{session_id}.md"):
+                        mtime = md_file.stat().st_mtime
+                        transcript_mtime = mtime if transcript_mtime is None else max(transcript_mtime, mtime)
+
+            if transcript_mtime is not None:
+                last_activity = max(last_activity, transcript_mtime)
+
+            if (now - last_activity) >= max_age_seconds:
+                pending_file.unlink()
+                cleaned += 1
+        except OSError:
+            pass  # Ignore errors
+
+    return cleaned
 
 
 def discover_new_interactive_transcripts(our_email: str, context_dir: Path) -> list[tuple[Path, dict]]:
     """Find new Claude Code transcripts from ClaudeConnect interactive sessions.
 
-    ONLY imports transcripts where cwd points to a peer directory.
-    Does NOT import user's normal Claude Code usage.
+    Uses pending session files to match sessions we started with their transcripts.
+    This is multi-account safe - only imports sessions from pending-sessions/ dir
+    for this specific account.
 
     Args:
         our_email: Our email address
@@ -209,78 +247,62 @@ def discover_new_interactive_transcripts(our_email: str, context_dir: Path) -> l
     if not claude_projects.exists():
         return []
 
-    # Use email-namespaced peers directory
-    peers_dir = get_peers_dir(our_email)
-    if not peers_dir.exists():
+    # Get pending sessions directory for this account
+    pending_dir = get_pending_sessions_dir(our_email)
+    if not pending_dir.exists():
         return []
 
     discovered = []
 
-    # Check each peer's context directory for corresponding project transcripts
-    for peer_dir in peers_dir.iterdir():
-        if not peer_dir.is_dir():
-            continue
+    # Check each pending session file
+    for pending_file in pending_dir.glob("*.json"):
+        session_id = pending_file.stem  # UUID is the filename without extension
 
-        # Extract peer email from directory name (e.g., brandon-gmail-com → brandon@gmail.com)
-        peer_repo_name = peer_dir.name
-        peer_email = repo_name_to_email(peer_repo_name)
-
-        # Skip if peer email matches our email (can't have session with self)
-        if peer_email.lower() == our_email.lower():
-            continue
-
-        # Map to expected ~/.claude/projects/ subdirectory
-        projects_subdir_name = context_dir_to_claude_projects_dir(peer_dir)
-        projects_subdir = claude_projects / projects_subdir_name
-
-        if not projects_subdir.exists():
-            continue
-
-        # Find .jsonl conversation files
-        for jsonl_file in projects_subdir.glob("*.jsonl"):
-            # Skip subagent transcripts (in subdirectories)
-            if jsonl_file.parent != projects_subdir:
+        # Read pending session data
+        try:
+            pending_data = json.loads(pending_file.read_text())
+            peer_email = pending_data.get("peer_email")
+            if not peer_email:
                 continue
+        except (json.JSONDecodeError, OSError):
+            continue
 
-            # Extract metadata
-            metadata = _extract_jsonl_metadata(jsonl_file)
-            if not metadata:
-                continue
+        # Search for matching JSONL file by UUID in ~/.claude/projects/
+        # The JSONL is named {uuid}.jsonl somewhere in the projects tree
+        matching_jsonl = _find_matching_jsonl(claude_projects, session_id)
 
-            # Add peer email to metadata (we know it from directory structure)
-            metadata["peer_email"] = peer_email
+        if not matching_jsonl:
+            continue  # Session hasn't created transcript yet
 
-            # CRITICAL: Verify this is an interactive session by checking cwd
-            # Must be in OUR account's peers directory (email-namespaced)
-            # This ensures Alice can only import transcripts from sessions SHE ran,
-            # not sessions Bob ran, even on a shared machine.
-            cwd = metadata.get("cwd", "")
-            expected_peers_path = f"/.claude-connect/accounts/{our_email}/peers/"
-            if expected_peers_path not in cwd:
-                continue  # Not an interactive session for THIS account, skip
+        mtime = matching_jsonl.stat().st_mtime
 
-            # Check file modification time (only import if stable for 60+ seconds)
-            mtime = jsonl_file.stat().st_mtime
-            age = time.time() - mtime
-            if age < 60:
-                continue  # Still being written
+        # Extract metadata from JSONL
+        metadata = _extract_jsonl_metadata(matching_jsonl)
+        if not metadata:
+            continue
 
-            # Check if already imported by comparing with markdown file mtime
-            # Filename format: YYYY-MM-DD-HHMMSS_{uuid}.md
-            session_id = metadata["session_id"]
-            conv_dir = context_dir / "claudeconnect" / f"with-{peer_repo_name}"
+        # Add peer email from pending file (authoritative source)
+        metadata["peer_email"] = peer_email
+        # Also store pending file path for cleanup after import
+        metadata["pending_file"] = str(pending_file)
 
-            # Search for existing transcript with this UUID (may have different timestamp prefix)
-            existing_transcript = None
-            if conv_dir.exists():
-                for md_file in conv_dir.glob(f"*_{session_id}.md"):
-                    existing_transcript = md_file
-                    break
+        # Check if already imported
+        peer_repo_name = email_to_repo_name(peer_email)
+        conv_dir = context_dir / "claudeconnect" / f"with-{peer_repo_name}"
 
-            if existing_transcript and mtime <= existing_transcript.stat().st_mtime:
-                continue  # Already imported and JSONL hasn't changed
+        existing_transcript = None
+        if conv_dir.exists():
+            for md_file in conv_dir.glob(f"*_{session_id}.md"):
+                existing_transcript = md_file
+                break
 
-            discovered.append((jsonl_file, metadata))
+        if existing_transcript and mtime <= existing_transcript.stat().st_mtime:
+            continue  # Already imported and JSONL hasn't changed
+
+        discovered.append((matching_jsonl, metadata))
+
+    # Clean up orphaned pending sessions (inactive for 24 hours)
+    cleanup_orphaned_pending_sessions(our_email, context_dir)
 
     return discovered
 
@@ -295,7 +317,7 @@ def import_transcript(
 
     Args:
         jsonl_path: Path to the JSONL file
-        metadata: Metadata extracted from JSONL
+        metadata: Metadata extracted from JSONL (may include 'pending_file' path)
         our_email: Our email address
         context_dir: Path to our context directory
 
@@ -323,55 +345,25 @@ def import_transcript(
         # Save transcript
         transcript_path.write_text(markdown_content)
 
+        # Update pending session metadata (don't delete yet; cleanup handles inactivity)
+        pending_file_path = metadata.get("pending_file")
+        if pending_file_path:
+            try:
+                pending_path = Path(pending_file_path)
+                pending_data = {}
+                try:
+                    pending_data = json.loads(pending_path.read_text())
+                except (json.JSONDecodeError, OSError):
+                    pending_data = {}
+                if metadata.get("peer_email"):
+                    pending_data.setdefault("peer_email", metadata.get("peer_email"))
+                pending_data["last_imported_at"] = datetime.now().isoformat()
+                pending_data["last_jsonl_mtime"] = jsonl_path.stat().st_mtime
+                pending_path.write_text(json.dumps(pending_data))
+            except OSError:
+                pass  # Ignore cleanup errors
+
         return transcript_path
     except Exception as e:
         # Silently fail
         return None
-
-
-def commit_transcript_to_peer(
-    transcript_path: Path,
-    peer_email: str,
-    our_email: str,
-    id_token: str,
-) -> bool:
-    """Upload a transcript to peer's repo via HTTP API.
-
-    Note: Upload to our own repo is handled automatically by sync_http().
-    We only need to explicitly upload to the peer's repo.
-
-    Args:
-        transcript_path: Path to the markdown transcript file
-        peer_email: Peer's email (owner of destination repo)
-        our_email: Our email (for conversation folder structure)
-        id_token: JWT token for authentication
-
-    Returns:
-        True if successful, False otherwise
-    """
-    from .session import upload_file_http
-
-    # Read transcript content
-    content = transcript_path.read_bytes()
-    filename = transcript_path.name
-
-    # Determine path in peer's repo
-    our_repo_name = email_to_repo_name(our_email)
-    peer_repo_path = f"claudeconnect/with-{our_repo_name}/{filename}"
-
-    # Check if file already exists on peer's server (avoid re-uploading)
-    if check_file_exists_on_server(peer_email, peer_repo_path, id_token):
-        return True  # Already exists, consider it success
-
-    # Upload to peer's repo
-    success = upload_file_http(
-        email=peer_email,
-        path=peer_repo_path,
-        content=content,
-        id_token=id_token,
-        encrypt_for=peer_email,  # Encrypt with peer's key if enabled
-        use_friend_key=True,
-        our_email=our_email,
-    )
-
-    return success
