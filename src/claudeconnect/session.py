@@ -552,6 +552,23 @@ def generate_instance_prompt(
     return prompt
 
 
+def is_conversation_ending(response: str) -> bool:
+    """Check if a response contains natural ending phrases."""
+    ending_phrases = [
+        "goodbye",
+        "talk soon",
+        "until next time",
+        "take care",
+        "that's all for now",
+        "let's wrap up",
+        "nice chatting",
+        "catch you later",
+        "signing off",
+    ]
+    lower_response = response.lower()
+    return any(phrase in lower_response for phrase in ending_phrases)
+
+
 def run_claude_instance(
     context_dir: Path,
     system_prompt: str,
@@ -684,6 +701,10 @@ async def run_dual_session(
         conversation_history += f"**{our_name}'s Claude**: {our_response}\n\n"
         print(f"\n  **{our_name}'s Claude**:\n  {our_response}\n")
 
+        if is_conversation_ending(our_response):
+            print("  (Natural conversation ending detected)")
+            break
+
         # Peer's Claude's turn
         print(f"  Turn {turn + 1}/{max_turns}: {peer_name}'s Claude thinking...")
 
@@ -701,12 +722,7 @@ async def run_dual_session(
         conversation_history += f"**{peer_name}'s Claude**: {peer_response}\n\n"
         print(f"\n  **{peer_name}'s Claude**:\n  {peer_response}\n")
 
-        # Check for natural ending signals
-        lower_response = peer_response.lower()
-        if any(phrase in lower_response for phrase in [
-            "goodbye", "talk soon", "until next time", "take care",
-            "that's all for now", "let's wrap up"
-        ]):
+        if is_conversation_ending(peer_response):
             print("  (Natural conversation ending detected)")
             break
 
@@ -937,5 +953,4 @@ def run_interactive_session(
     print(f"  within 60-90 seconds after you exit.")
 
     return True, f"Interactive session with {peer_email} started"
-
 
