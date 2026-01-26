@@ -37,13 +37,13 @@ def is_mock_mode() -> bool:
 from .terminal_ui import (
     BOLD,
     CLEAR,
+    CORAL,
     DIM,
     LIME,
     RESET,
     WHITE,
     build_banner_box_lines,
     get_dashboard_width,
-    get_double_banner_lines,
     get_persistent_banner_lines,
     render_persistent_banner,
     reset_persistent_banner,
@@ -108,6 +108,7 @@ def display_startup_banner(context_dir: Path, email: str, clear_screen: bool = T
 
     # For interactive sessions, show simplified banner and skip notifications
     if peer_name:
+        print(RESET, end='', flush=True)
         return
 
     display_notifications(context_dir)
@@ -244,13 +245,13 @@ def build_notifications_lines(context_dir: Path, total_width: int) -> list[str]:
         title_truncated = truncate_with_ellipsis(title, max(1, inner_width - 2))
         title_text = f" {title_truncated} "
         dashes = max(0, inner_width - len(title_text))
-        lines.append(f"┌{title_text}" + "─" * dashes + "┐")
+        lines.append(f"{CORAL}┌{title_text}" + "─" * dashes + f"┐{RESET}")
         max_content_len = max(1, inner_width - 2)
         for item in items:
             content = truncate_with_ellipsis(item, max_content_len)
             padding = max_content_len - len(content)
-            lines.append(f"│ {content}" + " " * padding + " │")
-        lines.append("└" + "─" * inner_width + "┘")
+            lines.append(f"{CORAL}│{RESET} {content}" + " " * padding + f" {CORAL}│{RESET}")
+        lines.append(f"{CORAL}└" + "─" * inner_width + f"┘{RESET}")
         return lines
 
     fr_lines = []

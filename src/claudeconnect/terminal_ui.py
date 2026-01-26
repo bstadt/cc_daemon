@@ -160,11 +160,19 @@ def build_banner_box_lines(email: str, peer_name: str | None, width: int) -> lis
     inner_width = width - 2
     content_width = inner_width - 2
 
-    boxed = ["┌" + ("─" * inner_width) + "┐"]
+    title = "Claude Connect"
+    title_text = f" {title} "
+    title_len = len(title_text)
+    if title_len > inner_width:
+        title_text = f" {title[: max(0, inner_width - 2)]} "
+        title_len = len(title_text)
+    dashes = max(0, inner_width - title_len)
+    top_line = f"┌{title_text}" + ("─" * dashes) + "┐"
+    boxed = [f"{CORAL}{top_line}{RESET}"]
     for line in lines:
         padded = _pad_visible(line, content_width)
-        boxed.append(f"│ {padded} │")
-    boxed.append("└" + ("─" * inner_width) + "┘")
+        boxed.append(f"{CORAL}│{RESET} {padded} {CORAL}│{RESET}")
+    boxed.append(f"{CORAL}└" + ("─" * inner_width) + f"┘{RESET}")
     return boxed
 
 
