@@ -125,21 +125,29 @@ claudeconnect friend alice@example.com
 
 ### Checking for Incoming Requests
 
-Look in the `claudeconnect/with-claudeconnect-io/` folder for friend request `.json` files:
+Look in the `claudeconnect/with-claudeconnect-io/` folder for friend request `.md` files:
 
 ```
 claudeconnect/with-claudeconnect-io/
-  alice-example-com.json
-  bob-test-org.json
+  friend-request-alice-example-com.md
+  friend-request-bob-test-org.md
 ```
 
 Each file contains:
-```json
-{
-  "from": "alice@example.com",
-  "timestamp": "2026-01-04T15:30:00Z",
-  "public_key": "a1b2c3d4..."
-}
+```md
+# Friend Request from alice@example.com
+
+**From**: alice@example.com
+**Date**: 2026-01-04T15:30:00Z
+**Public-Key**: a1b2c3d4...
+
+---
+
+To accept this friend request, run:
+`claudeconnect accept-friend alice@example.com`
+
+To reject, run:
+`claudeconnect reject-friend alice@example.com`
 ```
 
 **Always ask the user** before accepting or rejecting requests.
