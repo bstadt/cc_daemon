@@ -9,6 +9,7 @@ import asyncio
 import datetime
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -651,6 +652,55 @@ def generate_authz_content(
     return "\n".join(lines) + "\n"
 
 
+_AUTHZ_PUBLIC_KEY_PATTERN = re.compile(r"^#\s*Public[-\s]Key:\s*([a-fA-F0-9]{64})\s*$")
+_AUTHZ_SECTION_PATTERN = re.compile(r"^\[([^\]]+)\]$")
+_AUTHZ_PERMISSION_PATTERN = re.compile(r"^([^=]+?)\s*=\s*([rw]*)\s*$")
+
+
+def _read_authz_public_key(authz_path: Path) -> str | None:
+    """Return the public key hex from an authz file, if present."""
+    try:
+        for line in authz_path.read_text().splitlines():
+            value = line.strip()
+            if not value:
+                continue
+            if value.startswith("#"):
+                match = _AUTHZ_PUBLIC_KEY_PATTERN.match(value)
+                if match:
+                    return match.group(1).lower()
+                continue
+            break
+    except OSError:
+        return None
+    return None
+
+
+def _read_authz_owner_email(authz_path: Path) -> str | None:
+    """Return the owner email from the root authz section, if found."""
+    try:
+        current_section = None
+        for line in authz_path.read_text().splitlines():
+            value = line.strip()
+            if not value or value.startswith("#"):
+                continue
+            section_match = _AUTHZ_SECTION_PATTERN.match(value)
+            if section_match:
+                current_section = section_match.group(1)
+                continue
+            if current_section != "/":
+                continue
+            perm_match = _AUTHZ_PERMISSION_PATTERN.match(value)
+            if not perm_match:
+                continue
+            user = perm_match.group(1).strip()
+            perms = perm_match.group(2).lower()
+            if "@" in user and "rw" in perms:
+                return user
+    except OSError:
+        return None
+    return None
+
+
 def upload_authz_http(token: str, email: str, content: str) -> bool:
     """
     Upload authz file to v2s server via HTTP API.
@@ -1231,7 +1281,8 @@ async def run_with_http_sync(
 
 @cli.command()
 @click.option("--no-encrypt", is_flag=True, help="Disable client-side encryption")
-def init(no_encrypt: bool):
+@click.option("--force", is_flag=True, help="Force reinitialize an existing context directory")
+def init(no_encrypt: bool, force: bool):
     """Initialize current directory as context directory.
 
     Encryption is enabled by default (X25519 + AES-256-GCM).
@@ -1261,6 +1312,35 @@ def init(no_encrypt: bool):
 
     config = get_config()
     cwd = Path.cwd()
+
+    if not force:
+        existing_authz = cwd / "authz"
+        if existing_authz.exists():
+            owner_email = _read_authz_owner_email(existing_authz)
+            if owner_email and owner_email != tokens.email:
+                print("Error: This directory already appears to be initialized.")
+                print(f"  Owner in authz: {owner_email}")
+                print(f"  Current account: {tokens.email}")
+                print("  Use `claudeconnect init --force` to override.")
+                sys.exit(1)
+
+            existing_public_key = _read_authz_public_key(existing_authz)
+            if existing_public_key:
+                current_public_key = None
+                if HAS_ENCRYPTION:
+                    try:
+                        current_public_key = load_public_key(tokens.email).hex().lower()
+                    except FileNotFoundError:
+                        current_public_key = None
+                if owner_email is None:
+                    if current_public_key is None:
+                        print("Error: Existing authz has a public key, but no matching local key.")
+                        print("  Use `claudeconnect init --force` to override.")
+                        sys.exit(1)
+                    if current_public_key != existing_public_key:
+                        print("Error: Existing authz public key does not match this account.")
+                        print("  Use `claudeconnect init --force` to override.")
+                        sys.exit(1)
 
     # Validate encryption requirements
     if encrypt and not HAS_ENCRYPTION:
@@ -1379,17 +1459,6 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
     config = get_config(email)
     encryption_enabled = config.encryption_enabled and HAS_ENCRYPTION
 
-    ignore_patterns = load_ignore_patterns(context_dir)
-    ignore_matcher = IgnoreMatcher(context_dir, ignore_patterns)
-    max_upload_mb = os.environ.get("CC_MAX_UPLOAD_MB", "").strip()
-    try:
-        max_upload_mb_value = float(max_upload_mb) if max_upload_mb else 1.0
-    except ValueError:
-        max_upload_mb_value = 1.0
-    max_upload_bytes = int(max_upload_mb_value * 1024 * 1024)
-
-    def is_hidden_path(rel_path: str) -> bool:
-        return any(part.startswith(".") for part in Path(rel_path).parts)
     # Shadow directory stores encrypted files (mirrors server)
     shadow_dir = get_shadow_dir(email)
     shadow_dir.mkdir(parents=True, exist_ok=True)
@@ -1411,16 +1480,7 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
         print(f"  Error getting manifest: {e}")
         return False
 
-    server_files = {}
-    for f in manifest.get("files", []):
-        rel_path = f.get("path")
-        if not rel_path:
-            continue
-        if is_hidden_path(rel_path):
-            continue
-        if ignore_matcher.matches(context_dir / rel_path):
-            continue
-        server_files[rel_path] = f
+    server_files = {f["path"]: f for f in manifest.get("files", [])}
 
     # Step 2: Build shadow directory manifest (encrypted files)
     shadow_files = {}
@@ -1430,8 +1490,6 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
             # Skip hidden files (any path component starting with '.')
             if any(part.startswith('.') for part in Path(rel_path).parts):
                 continue
-            if ignore_matcher.matches(context_dir / rel_path):
-                continue
             shadow_files[rel_path] = {
                 "path": rel_path,
                 "sha256": compute_file_sha256(file_path),
@@ -1440,14 +1498,25 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
 
     # Step 3: Build context directory manifest (plaintext files)
     context_files = {}
+    decrypted_local = 0
     for file_path in context_dir.rglob("*"):
         if file_path.is_file():
             rel_path = str(file_path.relative_to(context_dir))
             # Skip hidden files (any path component starting with '.')
             if any(part.startswith('.') for part in Path(rel_path).parts):
                 continue
-            if ignore_matcher.matches(file_path):
-                continue
+            if HAS_ENCRYPTION and file_path.suffix == ".md":
+                try:
+                    from .encryption import is_encrypted_file, decrypt_file_with_master_key
+                    with open(file_path, "rb") as handle:
+                        head = handle.read(6)
+                    if is_encrypted_file(head):
+                        encrypted_content = file_path.read_bytes()
+                        plaintext = decrypt_file_with_master_key(encrypted_content, email)
+                        file_path.write_bytes(plaintext)
+                        decrypted_local += 1
+                except Exception:
+                    pass
             context_files[rel_path] = {
                 "path": rel_path,
                 "mtime": file_path.stat().st_mtime,
@@ -1499,8 +1568,6 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
     # Step 4: Categorize files into upload/download lists
     to_upload = []  # (path, context_path, shadow_path)
     to_download = []  # (path, shadow_path, context_path, server_info)
-    skipped_large: list[tuple[str, int]] = []
-
     all_paths = set(server_files.keys()) | set(shadow_files.keys()) | set(context_files.keys())
 
     for path in all_paths:
@@ -1521,50 +1588,29 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
                 if shadow_info and context_matches_shadow(path, context_path, shadow_path):
                     to_download.append((path, shadow_path, context_path, server_info))
                 else:
-                    if context_path.exists():
-                        size = context_path.stat().st_size
-                        if size > max_upload_bytes:
-                            skipped_large.append((path, size))
-                        else:
-                            to_upload.append((path, context_path, shadow_path))
+                    to_upload.append((path, context_path, shadow_path))
             else:
                 # Server is newer - download
                 to_download.append((path, shadow_path, context_path, server_info))
 
         # Case 2: File exists locally but not on server - upload
         elif context_info and not server_info:
-            if context_path.exists():
-                size = context_path.stat().st_size
-                if size > max_upload_bytes:
-                    skipped_large.append((path, size))
-                else:
-                    to_upload.append((path, context_path, shadow_path))
+            to_upload.append((path, context_path, shadow_path))
 
         # Case 3: File in shadow matches server
         elif shadow_info and server_info and shadow_info["sha256"] == server_info["sha256"]:
             if context_info and context_info["mtime"] > shadow_info["mtime"]:
                 # Context changed - upload only if content changed
                 if not context_matches_shadow(path, context_path, shadow_path):
-                    if context_path.exists():
-                        size = context_path.stat().st_size
-                        if size > max_upload_bytes:
-                            skipped_large.append((path, size))
-                        else:
-                            to_upload.append((path, context_path, shadow_path))
+                    to_upload.append((path, context_path, shadow_path))
             elif not context_info:
                 # Context missing - decrypt from shadow to context
                 to_download.append((path, shadow_path, context_path, server_info))
 
     total_ops = len(to_upload) + len(to_download)
+    if verbose and decrypted_local:
+        print(f"  Decrypted {decrypted_local} local .md file(s).")
     if total_ops == 0:
-        if verbose and skipped_large:
-            print(f"  {len(skipped_large)} file(s) above size limit ({max_upload_mb_value:g}MB). Skipping upload.")
-            print(f"  Limit: {max_upload_mb_value:g}MB (override with CC_MAX_UPLOAD_MB)")
-            for path, size in skipped_large[:10]:
-                size_mb = size / (1024 * 1024)
-                print(f"    - {path} ({size_mb:.2f} MB)")
-            if len(skipped_large) > 10:
-                print(f"    ... and {len(skipped_large) - 10} more")
         return True
 
     # Progress tracking
@@ -1635,7 +1681,7 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
 
                 # Decrypt and save to context
                 decrypted_content = encrypted_content
-                if encryption_enabled:
+                if HAS_ENCRYPTION:
                     try:
                         from .encryption import is_encrypted_file, decrypt_file_with_master_key
                         if is_encrypted_file(encrypted_content):
@@ -1661,14 +1707,6 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
     # Step 5: Execute uploads and downloads in parallel
     if verbose:
         print(f"  Syncing {len(to_upload)} upload(s), {len(to_download)} download(s)...")
-        if skipped_large:
-            print(f"  {len(skipped_large)} file(s) above size limit ({max_upload_mb_value:g}MB). Skipping upload.")
-            print(f"  Limit: {max_upload_mb_value:g}MB (override with CC_MAX_UPLOAD_MB)")
-            for path, size in skipped_large[:10]:
-                size_mb = size / (1024 * 1024)
-                print(f"    - {path} ({size_mb:.2f} MB)")
-            if len(skipped_large) > 10:
-                print(f"    ... and {len(skipped_large) - 10} more")
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = []
