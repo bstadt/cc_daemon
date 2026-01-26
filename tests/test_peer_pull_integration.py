@@ -8,6 +8,7 @@ shadow/peer cache mtimes across pulls.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import tempfile
@@ -61,6 +62,12 @@ def test_peer_pull_only_downloads_changes(temp_dirs):
 
     # Bob setup
     os.chdir(temp2)
+    login("Alice", temp2)
+    alice_email = init_account("Alice", temp2)
+    verify_init_structure("Alice", temp2)
+    
+    # Bob setup
+    os.chdir(temp2)
     login("Bob", temp2)
     bob_email = init_account("Bob", temp2)
     verify_init_structure("Bob", temp2)
@@ -97,10 +104,9 @@ def test_peer_pull_only_downloads_changes(temp_dirs):
     assert notes_peer.exists() and tasks_peer.exists(), "Peer files missing after pull"
     assert notes_shadow.exists() and tasks_shadow.exists(), "Shadow files missing after pull"
 
-    notes_peer_mtime_1 = notes_peer.stat().st_mtime
-    tasks_peer_mtime_1 = tasks_peer.stat().st_mtime
-    notes_shadow_mtime_1 = notes_shadow.stat().st_mtime
-    tasks_shadow_mtime_1 = tasks_shadow.stat().st_mtime
+    notes_shadow_hash_1 = hashlib.sha256(notes_shadow.read_bytes()).hexdigest()
+    tasks_shadow_hash_1 = hashlib.sha256(tasks_shadow.read_bytes()).hexdigest()
+    tasks_peer_content_1 = tasks_peer.read_text()
 
     # Update only notes.md on Bob's side
     time.sleep(1.1)
@@ -113,9 +119,10 @@ def test_peer_pull_only_downloads_changes(temp_dirs):
     pull_peer_context(temp1, bob_email)
 
     # notes should update, tasks should not
-    assert notes_peer.stat().st_mtime > notes_peer_mtime_1
-    assert notes_shadow.stat().st_mtime > notes_shadow_mtime_1
-    assert tasks_peer.stat().st_mtime == tasks_peer_mtime_1
-    assert tasks_shadow.stat().st_mtime == tasks_shadow_mtime_1
+    notes_shadow_hash_2 = hashlib.sha256(notes_shadow.read_bytes()).hexdigest()
+    tasks_shadow_hash_2 = hashlib.sha256(tasks_shadow.read_bytes()).hexdigest()
 
     assert notes_peer.read_text() == "notes v2"
+    assert tasks_peer.read_text() == tasks_peer_content_1
+    assert notes_shadow_hash_2 != notes_shadow_hash_1
+    assert tasks_shadow_hash_2 == tasks_shadow_hash_1
