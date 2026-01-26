@@ -48,7 +48,9 @@ from .terminal_ui import (
     render_persistent_banner,
     reset_persistent_banner,
     run_claude_with_persistent_banner,
+    run_claude_with_soft_banner,
     should_use_persistent_banner,
+    should_use_soft_banner,
 )
 
 
@@ -60,6 +62,17 @@ from .config import (
     SERVER_URL, API_BASE_URL, email_to_repo_name, get_active_account,
     get_tokens_file, get_config_file, ACTIVE_ACCOUNT_FILE, LEGACY_TOKENS_FILE,
     get_friends_dir, get_peers_dir,
+)
+from .audit import (
+    ensure_privacy_policy,
+    load_ignore_patterns,
+    append_ignore_patterns,
+    IgnoreMatcher,
+    iter_context_files,
+    is_text_file,
+    parse_paths_input,
+    run_llm_scan,
+    write_pending_sensitive,
 )
 from .scanner import scan_directory
 
@@ -112,6 +125,22 @@ def display_startup_banner(context_dir: Path, email: str, clear_screen: bool = T
         return
 
     display_notifications(context_dir)
+
+
+def build_soft_banner_lines(context_dir: Path, email: str, peer_name: str | None = None) -> list[str]:
+    """Build banner lines for soft banner mode."""
+    width = get_dashboard_width()
+    lines: list[str] = [""]
+    lines.extend(build_banner_box_lines(email, peer_name, width))
+    lines.append("")
+    if peer_name:
+        return lines
+
+    notifications = build_notifications_lines(context_dir, width)
+    if notifications:
+        lines.extend(notifications)
+        lines.append("")
+    return lines
 
 
 def build_notifications_lines(context_dir: Path, total_width: int) -> list[str]:
@@ -813,6 +842,173 @@ def init_context_dir(
     return True
 
 
+def update_authz_private_files(authz_path: Path, owner_email: str, private_paths: list[str]) -> bool:
+    """Append private file sections to authz (owner-only access)."""
+    if not private_paths:
+        return False
+    if not authz_path.exists():
+        print("  Error: authz file not found.")
+        return False
+
+    content = authz_path.read_text().splitlines()
+    existing_sections = set()
+    for line in content:
+        line = line.strip()
+        if line.startswith("[") and line.endswith("]"):
+            existing_sections.add(line[1:-1])
+
+    new_sections: list[str] = []
+    for raw_path in private_paths:
+        if "*" in raw_path or "?" in raw_path:
+            print(f"  Skipping glob path for authz (not supported): {raw_path}")
+            continue
+        path = raw_path if raw_path.startswith("/") else "/" + raw_path
+        if path in existing_sections:
+            continue
+        new_sections.append(path)
+
+    if not new_sections:
+        return False
+
+    if content and content[-1].strip():
+        content.append("")
+    content.append("# Private files (added by audit)")
+    for path in new_sections:
+        content.append(f"[{path}]")
+        content.append(f"{owner_email} = rw")
+        content.append("")
+
+    authz_path.write_text("\n".join(content).rstrip() + "\n")
+    return True
+
+
+def prompt_for_paths(prompt: str) -> list[str]:
+    raw = input(prompt).strip()
+    return parse_paths_input(raw)
+
+
+def apply_private_files(authz_path: Path, owner_email: str, token: str, private_paths: list[str]) -> None:
+    if update_authz_private_files(authz_path, owner_email, private_paths):
+        if upload_authz_http(token, owner_email, authz_path.read_text()):
+            print("  Updated authz (private paths uploaded)")
+        else:
+            print("  Warning: Failed to upload updated authz")
+
+
+def run_llm_scan_flow(
+    context_dir: Path,
+    owner_email: str,
+    token: str,
+    ignore_matcher: IgnoreMatcher,
+    max_files: int | None = None,
+) -> None:
+    privacy_path = ensure_privacy_policy(context_dir)
+
+    candidates = [
+        path for path in iter_context_files(context_dir, ignore_matcher)
+        if path.name not in {"privacy.md"} and is_text_file(path)
+    ]
+
+    if not candidates:
+        print("No eligible text files found for LLM scan.")
+        return
+
+    print(f"Running LLM scan on {len(candidates)} files (Haiku subagents)...")
+    try:
+        results = run_llm_scan(context_dir, candidates, privacy_path, max_files=max_files).get("results", [])
+    except FileNotFoundError:
+        print("Error: 'claude' command not found. Install Claude Code CLI first.")
+        return
+    except Exception as e:
+        print(f"LLM scan failed: {e}")
+        return
+
+    if not results:
+        print("No LLM results returned.")
+        return
+
+    pending_dir = write_pending_sensitive(context_dir, owner_email, results)
+
+    flagged = [r for r in results if r.get("sensitive")]
+    print(f"LLM scan complete. Flagged {len(flagged)} file(s).")
+    if flagged:
+        for entry in flagged:
+            reason = entry.get("reason", "").strip()
+            if len(reason) > 120:
+                reason = reason[:117] + "..."
+            print(f"  - {entry.get('path')}: {reason}")
+        print(f"Pending results saved to: {pending_dir}")
+
+        raw_ignore = input("Paths to never upload (.ccignore) [comma-separated or 'all']: ").strip()
+        raw_private = input("Paths to restrict in authz [comma-separated or 'all']: ").strip()
+
+        if raw_ignore.lower() == "all":
+            ignore_paths = [e.get("path") for e in flagged if e.get("path")]
+        else:
+            ignore_paths = parse_paths_input(raw_ignore)
+
+        if raw_private.lower() == "all":
+            private_paths = [e.get("path") for e in flagged if e.get("path")]
+        else:
+            private_paths = parse_paths_input(raw_private)
+
+        if ignore_paths:
+            append_ignore_patterns(context_dir, ignore_paths)
+            print("  Updated .ccignore")
+
+        if private_paths:
+            authz_path = context_dir / "authz"
+            apply_private_files(authz_path, owner_email, token, private_paths)
+    else:
+        print(f"Pending results saved to: {pending_dir}")
+
+
+def run_sensitive_audit(context_dir: Path, owner_email: str, token: str) -> None:
+    print("\nSensitive File Audit")
+    print("-" * 24)
+    print("This flow helps you identify files that should be hidden or restricted.")
+
+    ignore_patterns = load_ignore_patterns(context_dir)
+    ignore_matcher = IgnoreMatcher(context_dir, ignore_patterns)
+
+    hard_exclusions = prompt_for_paths(
+        "Directories/files to NEVER upload (.ccignore) [comma-separated, blank to skip]: "
+    )
+    if hard_exclusions:
+        ignore_patterns = append_ignore_patterns(context_dir, hard_exclusions)
+        ignore_matcher = IgnoreMatcher(context_dir, ignore_patterns)
+        print("  Updated .ccignore with hard exclusions.")
+
+    print("\nRunning local regex scan (conservative)...")
+    report = scan_directory(context_dir, markdown_only=False, ignore_matcher=ignore_matcher)
+    if report.has_issues:
+        print(report.format_report(context_dir))
+        private_paths = prompt_for_paths(
+            "Files to restrict in authz [comma-separated, blank to skip]: "
+        )
+        if private_paths:
+            authz_path = context_dir / "authz"
+            apply_private_files(authz_path, owner_email, token, private_paths)
+
+        ignore_paths = prompt_for_paths(
+            "Files to NEVER upload (.ccignore) [comma-separated, blank to skip]: "
+        )
+        if ignore_paths:
+            ignore_patterns = append_ignore_patterns(context_dir, ignore_paths)
+            ignore_matcher = IgnoreMatcher(context_dir, ignore_patterns)
+            print("  Updated .ccignore")
+    else:
+        print("No regex matches found.")
+
+    privacy_path = ensure_privacy_policy(context_dir)
+    if privacy_path.exists():
+        print(f"Privacy policy: {privacy_path}")
+
+    print("\nOptional: Run an LLM-based scan (sends file contents to the model provider).")
+    if click.confirm("Run LLM scan now?", default=False):
+        run_llm_scan_flow(context_dir, owner_email, token, ignore_matcher)
+
+
 @click.group(invoke_without_command=True)
 @click.pass_context
 def cli(ctx):
@@ -1063,6 +1259,7 @@ def start(system_prompt: str | None, initial_prompt: str | None, context_dir: Pa
 
     # Prepare banner data before launching Claude
     banner_lines = None
+    banner_mode = None
     if should_use_persistent_banner():
         width = get_dashboard_width()
         header_lines = build_banner_box_lines(tokens.email, peer, width)
@@ -1075,14 +1272,18 @@ def start(system_prompt: str | None, initial_prompt: str | None, context_dir: Pa
             extra_lines=extra_lines,
             header_lines=header_lines,
         )
+        banner_mode = "persistent"
+    elif should_use_soft_banner():
+        banner_lines = build_soft_banner_lines(context_dir, tokens.email, peer)
+        banner_mode = "soft"
 
     # Start sync loop and Claude
     if not is_interactive:
         print("Starting Claude Code with sync enabled...")
         print(f"{DIM}(Sync runs every 30 seconds in background){RESET}\n")
 
-    # Render startup banner only in non-persistent mode
-    if not should_use_persistent_banner():
+    # Render startup banner only when soft/persistent mode is disabled
+    if banner_mode is None:
         display_startup_banner(context_dir, tokens.email, peer_name=peer)
 
     # Ensure terminal state is clean before launching Claude
@@ -1096,7 +1297,8 @@ def start(system_prompt: str | None, initial_prompt: str | None, context_dir: Pa
         system_prompt=system_prompt, initial_prompt=initial_prompt,
         session_id=session_id,
         banner_lines=banner_lines,
-        sync_enabled=not is_interactive
+        banner_mode=banner_mode,
+        sync_enabled=not is_interactive,
     ))
 
 
@@ -1109,6 +1311,7 @@ async def run_with_http_sync(
     initial_prompt: str | None = None,
     session_id: str | None = None,
     banner_lines: list[str] | None = None,
+    banner_mode: str | None = None,
     render_initial_banner: bool = True,
     sync_enabled: bool = True,
 ):
@@ -1144,6 +1347,8 @@ async def run_with_http_sync(
     if sync_enabled:
         sync_task = asyncio.create_task(sync_loop())
 
+    use_persistent_banner = False
+    use_soft_banner = False
     try:
         # Build Claude command with optional prompts
         claude_args = ["claude"]
@@ -1154,11 +1359,20 @@ async def run_with_http_sync(
         if initial_prompt:
             claude_args.append(initial_prompt)
 
-        use_persistent_banner = banner_lines is not None and should_use_persistent_banner()
+        use_persistent_banner = banner_mode == "persistent" and banner_lines is not None
+        use_soft_banner = banner_mode == "soft" and banner_lines is not None
 
         if use_persistent_banner:
             await asyncio.to_thread(
                 run_claude_with_persistent_banner,
+                claude_args,
+                context_dir,
+                banner_lines,
+                render_initial_banner,
+            )
+        elif use_soft_banner:
+            await asyncio.to_thread(
+                run_claude_with_soft_banner,
                 claude_args,
                 context_dir,
                 banner_lines,
@@ -1189,7 +1403,7 @@ async def run_with_http_sync(
             print("\nSync stopped. Goodbye!")
         else:
             print("\nGoodbye!")
-        if banner_lines is not None:
+        if use_persistent_banner:
             reset_persistent_banner()
 
 
@@ -1299,6 +1513,14 @@ def init(no_encrypt: bool):
                 print(f"    - {error}")
             print("  You may need to run `claudeconnect init` again or create these manually.")
 
+        privacy_path = cwd / "privacy.md"
+        if not privacy_path.exists():
+            ensure_privacy_policy(cwd)
+            print("  Created privacy.md (soft privacy policy).")
+
+        if click.confirm("\nWould you like to run a Sensitive File Audit now?", default=True):
+            run_sensitive_audit(cwd, tokens.email, tokens.id_token)
+
         print("\n✓ Context directory initialized")
         if encrypt:
             print("  Encryption: ENABLED (zero-trust)")
@@ -1343,6 +1565,9 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
     config = get_config(email)
     encryption_enabled = config.encryption_enabled and HAS_ENCRYPTION
 
+    ignore_patterns = load_ignore_patterns(context_dir)
+    ignore_matcher = IgnoreMatcher(context_dir, ignore_patterns)
+
     # Shadow directory stores encrypted files (mirrors server)
     shadow_dir = get_shadow_dir(email)
     shadow_dir.mkdir(parents=True, exist_ok=True)
@@ -1364,7 +1589,14 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
         print(f"  Error getting manifest: {e}")
         return False
 
-    server_files = {f["path"]: f for f in manifest.get("files", [])}
+    server_files = {}
+    for f in manifest.get("files", []):
+        rel_path = f.get("path")
+        if not rel_path:
+            continue
+        if ignore_matcher.matches(context_dir / rel_path):
+            continue
+        server_files[rel_path] = f
 
     # Step 2: Build shadow directory manifest (encrypted files)
     shadow_files = {}
@@ -1373,6 +1605,8 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
             rel_path = str(file_path.relative_to(shadow_dir))
             # Skip hidden files (any path component starting with '.')
             if any(part.startswith('.') for part in Path(rel_path).parts):
+                continue
+            if ignore_matcher.matches(context_dir / rel_path):
                 continue
             shadow_files[rel_path] = {
                 "path": rel_path,
@@ -1387,6 +1621,8 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
             rel_path = str(file_path.relative_to(context_dir))
             # Skip hidden files (any path component starting with '.')
             if any(part.startswith('.') for part in Path(rel_path).parts):
+                continue
+            if ignore_matcher.matches(file_path):
                 continue
             context_files[rel_path] = {
                 "path": rel_path,
@@ -1665,6 +1901,36 @@ def sync():
     else:
         sys.exit(1)
 
+
+@cli.command()
+@click.option("--llm", "llm_scan", is_flag=True, help="Run LLM-based scan (Haiku subagents)")
+@click.option("--max-files", type=int, default=None, help="Limit number of files for LLM scan")
+def scan(llm_scan: bool, max_files: int | None):
+    """Run a sensitive file audit (local regex or LLM-based)."""
+    tokens = get_valid_token()
+    config = get_config()
+
+    if not tokens:
+        print("Not logged in or token expired. Run `claudeconnect login` first.")
+        sys.exit(1)
+
+    if not config.context_dir:
+        print("No context directory configured. Run `claudeconnect init` first.")
+        sys.exit(1)
+
+    context_dir = Path(config.context_dir)
+    ignore_patterns = load_ignore_patterns(context_dir)
+    ignore_matcher = IgnoreMatcher(context_dir, ignore_patterns)
+
+    if llm_scan:
+        print("LLM scan requested. This will send file contents to the model provider.")
+        if click.confirm("Continue?", default=False):
+            run_llm_scan_flow(context_dir, tokens.email, tokens.id_token, ignore_matcher, max_files=max_files)
+        else:
+            print("LLM scan cancelled.")
+        return
+
+    run_sensitive_audit(context_dir, tokens.email, tokens.id_token)
 
 @cli.command()
 @click.argument("peer_email")

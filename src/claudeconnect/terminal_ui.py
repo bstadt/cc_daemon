@@ -41,6 +41,8 @@ CLEAR = '\033[2J\033[H'       # Clear screen and move cursor to top
 ORIGIN_MODE_ON = '\033[?6h'   # Origin mode: cursor positions relative to scroll region
 ORIGIN_MODE_OFF = '\033[?6l'
 RESET_SCROLL_REGION = '\033[r'
+SAVE_CURSOR = '\0337'
+RESTORE_CURSOR = '\0338'
 
 
 def get_cell_aspect_ratio() -> float | None:
@@ -116,8 +118,22 @@ def _pad_visible(text: str, width: int) -> str:
 
 
 def should_use_persistent_banner() -> bool:
-    """Check if persistent banner rendering is enabled and supported."""
+    """Check if persistent banner rendering is explicitly enabled and supported."""
     override = os.environ.get("CC_PERSIST_BANNER", "").lower()
+    if override in ("0", "false", "no"):
+        return False
+    if not HAS_PTY or not sys.stdin.isatty() or not sys.stdout.isatty():
+        return False
+    if os.environ.get("TERM", "") == "dumb":
+        return False
+    if override in ("1", "true", "yes"):
+        return True
+    return False
+
+
+def should_use_soft_banner() -> bool:
+    """Check if soft banner rendering should be used."""
+    override = os.environ.get("CC_SOFT_BANNER", "").lower()
     if override in ("0", "false", "no"):
         return False
     if not HAS_PTY or not sys.stdin.isatty() or not sys.stdout.isatty():
@@ -215,6 +231,19 @@ def _build_persistent_banner_bytes(banner_lines: list[str]) -> bytes:
     return f"\033[H{header}{RESET}{scroll_seq}{origin_seq}{cursor_seq}".encode()
 
 
+def _build_soft_banner_bytes(banner_lines: list[str], preserve_cursor: bool = True) -> bytes:
+    header = "\n".join(banner_lines)
+    if header and not header.endswith("\n"):
+        header += "\n"
+    if preserve_cursor:
+        prefix = f"{SAVE_CURSOR}\033[H"
+        suffix = RESTORE_CURSOR
+    else:
+        prefix = "\033[H"
+        suffix = ""
+    return f"{prefix}{header}{RESET}{suffix}".encode()
+
+
 def _write_stdout_bytes(data: bytes) -> None:
     try:
         os.write(sys.stdout.fileno(), data)
@@ -227,6 +256,13 @@ def render_persistent_banner(banner_lines: list[str]) -> None:
     """Render banner and set scroll region/origin mode for persistent header."""
     _write_stdout_bytes(b"\033[2J")
     _write_stdout_bytes(_build_persistent_banner_bytes(banner_lines))
+
+
+def render_soft_banner(banner_lines: list[str], clear_screen: bool = False) -> None:
+    """Render banner without altering the scroll region."""
+    if clear_screen:
+        _write_stdout_bytes(b"\033[2J")
+    _write_stdout_bytes(_build_soft_banner_bytes(banner_lines, preserve_cursor=not clear_screen))
 
 
 def reset_persistent_banner() -> None:
@@ -268,6 +304,40 @@ class PersistentBannerFilter:
         return bytes(out)
 
 
+class SoftBannerFilter:
+    """Filter terminal output to re-render a soft banner on clear-screen redraws."""
+
+    def __init__(self, banner_lines: list[str]) -> None:
+        self.banner_lines = banner_lines
+        self._pending = b""
+
+    def filter_output(self, data: bytes) -> bytes:
+        if not data:
+            return data
+        data = self._pending + data
+        self._pending = b""
+
+        pending = b""
+        for suffix in (b"\x1b[2", b"\x1b[", b"\x1b"):
+            if data.endswith(suffix):
+                pending = suffix
+                data = data[:-len(suffix)]
+                break
+        self._pending = pending
+
+        out = bytearray()
+        i = 0
+        while i < len(data):
+            if data.startswith(b"\x1b[2J", i):
+                out.extend(b"\x1b[2J")
+                out.extend(_build_soft_banner_bytes(self.banner_lines, preserve_cursor=True))
+                i += 4
+                continue
+            out.append(data[i])
+            i += 1
+        return bytes(out)
+
+
 def run_claude_with_persistent_banner(
     claude_args: list[str],
     context_dir: os.PathLike[str] | str,
@@ -280,6 +350,33 @@ def run_claude_with_persistent_banner(
     banner_filter = PersistentBannerFilter(banner_lines)
     if render_initial:
         render_persistent_banner(banner_lines)
+
+    def master_read(fd: int) -> bytes:
+        data = os.read(fd, 1024)
+        if not data:
+            return data
+        return banner_filter.filter_output(data)
+
+    cwd = os.getcwd()
+    try:
+        os.chdir(str(context_dir))
+        pty.spawn(claude_args, master_read)
+    finally:
+        os.chdir(cwd)
+
+
+def run_claude_with_soft_banner(
+    claude_args: list[str],
+    context_dir: os.PathLike[str] | str,
+    banner_lines: list[str],
+    render_initial: bool = False,
+) -> None:
+    """Run Claude in a PTY and re-render a soft banner after clear-screen redraws."""
+    if not HAS_PTY:
+        raise RuntimeError("PTY support is unavailable on this platform.")
+    banner_filter = SoftBannerFilter(banner_lines)
+    if render_initial:
+        render_soft_banner(banner_lines, clear_screen=True)
 
     def master_read(fd: int) -> bytes:
         data = os.read(fd, 1024)

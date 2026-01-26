@@ -13,3 +13,5 @@ temp/
 .svn/
 .claude/
 docs/ai-situational-awareness/
+.env
+tests/.env
