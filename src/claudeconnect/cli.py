@@ -1054,13 +1054,12 @@ def start(system_prompt: str | None, initial_prompt: str | None, context_dir: Pa
     if not is_interactive:
         print(f"Connecting as {tokens.email}...")
 
-    # Initial sync using HTTP
+    # Initial sync using HTTP (skip for interactive sessions to avoid syncing peer context)
     if not is_interactive:
         print("\nSyncing...")
-    if not sync_http(context_dir, tokens.email, tokens.id_token, verbose=not is_interactive):
-        if not is_interactive:
+        if not sync_http(context_dir, tokens.email, tokens.id_token, verbose=True):
             print("  Sync failed")
-        sys.exit(1)
+            sys.exit(1)
 
     # Prepare banner data before launching Claude
     banner_lines = None
@@ -1091,12 +1090,13 @@ def start(system_prompt: str | None, initial_prompt: str | None, context_dir: Pa
     print(RESET, end='', flush=True)
     sys.stdout.flush()
 
-    # Run async main with HTTP sync
+    # Run async main (with sync disabled for interactive sessions to avoid syncing peer context)
     asyncio.run(run_with_http_sync(
         context_dir, tokens.email, tokens.id_token,
         system_prompt=system_prompt, initial_prompt=initial_prompt,
         session_id=session_id,
         banner_lines=banner_lines,
+        sync_enabled=not is_interactive
     ))
 
 
@@ -1110,9 +1110,16 @@ async def run_with_http_sync(
     session_id: str | None = None,
     banner_lines: list[str] | None = None,
     render_initial_banner: bool = True,
+    sync_enabled: bool = True,
 ):
-    """Run Claude Code with background HTTP sync loop."""
+    """Run Claude Code with optional background HTTP sync loop.
+
+    Args:
+        sync_enabled: If False, skip background sync (used for interactive sessions
+                      with peer context to avoid syncing peer files to our repo).
+    """
     stop_event = asyncio.Event()
+    sync_task = None
 
     async def sync_loop():
         """Background sync loop using HTTP."""
@@ -1133,8 +1140,9 @@ async def run_with_http_sync(
                 # Log but don't crash the sync loop
                 pass
 
-    # Start sync loop task
-    sync_task = asyncio.create_task(sync_loop())
+    # Start sync loop task only if sync is enabled
+    if sync_enabled:
+        sync_task = asyncio.create_task(sync_loop())
 
     try:
         # Build Claude command with optional prompts
@@ -1174,12 +1182,15 @@ async def run_with_http_sync(
     except KeyboardInterrupt:
         pass
     finally:
-        # Stop sync loop
+        # Stop sync loop if it was started
         stop_event.set()
-        await sync_task
+        if sync_task:
+            await sync_task
+            print("\nSync stopped. Goodbye!")
+        else:
+            print("\nGoodbye!")
         if banner_lines is not None:
             reset_persistent_banner()
-        print("\nSync stopped. Goodbye!")
 
 
 @cli.command()
