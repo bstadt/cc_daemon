@@ -10,7 +10,7 @@ Architecture:
 - Adding a friend = adding another encrypted AES key blob (no re-encryption of content)
 
 Encryption rules:
-- All .md files are encrypted before upload
+- All files are encrypted before upload (Issue #98)
 - authz files remain plaintext (required for access control)
 - Friends gain access when you encrypt your AES key with their public key
 """
@@ -51,7 +51,9 @@ PLAINTEXT_FILES = {
     ".keep",
 }
 
-# File extensions to encrypt
+# DEPRECATED: Previously only .md files were encrypted
+# Now ALL files are encrypted except PLAINTEXT_FILES
+# Kept for backwards compatibility if needed
 ENCRYPTED_EXTENSIONS = {".md"}
 
 # Import account-scoped directory helpers from config
@@ -1182,7 +1184,7 @@ def should_encrypt_file(file_path: Path) -> bool:
 
     Rules:
     - Files in PLAINTEXT_FILES (authz, .keep) are never encrypted
-    - Only files with extensions in ENCRYPTED_EXTENSIONS (.md) are encrypted
+    - ALL other files are encrypted (Issue #98)
 
     Args:
         file_path: Path to the file (can be relative or absolute, or string)
@@ -1200,8 +1202,8 @@ def should_encrypt_file(file_path: Path) -> bool:
     if name in PLAINTEXT_FILES:
         return False
 
-    # Only encrypt markdown files
-    return file_path.suffix in ENCRYPTED_EXTENSIONS
+    # Encrypt everything else (Issue #98)
+    return True
 
 
 def is_encrypted_file(data: bytes) -> bool:
