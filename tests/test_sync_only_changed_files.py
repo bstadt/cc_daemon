@@ -87,6 +87,7 @@ def temp_dir():
 # ===========================================
 
 def test_peer_pull_plan_detects_changes():
+    log("Peer pull plan: detects changed and removed files based on hashes.")
     server_files = {
         "notes.md": {"path": "notes.md", "sha256": "aaa", "size": 10, "mtime": 1.0},
         "tasks.md": {"path": "tasks.md", "sha256": "bbb", "size": 20, "mtime": 2.0},
@@ -105,6 +106,7 @@ def test_peer_pull_plan_detects_changes():
 
 
 def test_peer_pull_plan_falls_back_to_mtime_size():
+    log("Peer pull plan: falls back to mtime/size when hashes are missing.")
     server_files = {
         "misc.md": {"path": "misc.md", "size": 12, "mtime": 3.0},
     }
@@ -125,6 +127,7 @@ def test_peer_pull_plan_falls_back_to_mtime_size():
 @pytest.mark.integration
 def test_peer_pull_only_downloads_changes(temp_dirs):
     """Ensure peer pulls only download changed files."""
+    log("Peer pull integration: only changed files are re-downloaded.")
     temp1, temp2 = temp_dirs
 
     clean_server()
@@ -205,6 +208,7 @@ def test_peer_pull_only_downloads_changes(temp_dirs):
 # ===========================================
 
 def test_sync_http_skips_upload_when_content_unchanged(monkeypatch, tmp_path):
+    log("Upload unit: mtime-only changes do not trigger uploads.")
     context_dir = tmp_path / "context"
     shadow_dir = tmp_path / "shadow"
     context_dir.mkdir()
@@ -272,6 +276,7 @@ def test_sync_http_skips_upload_when_content_unchanged(monkeypatch, tmp_path):
 
 @pytest.mark.integration
 def test_sync_skips_upload_when_only_one_file_changes(temp_dir: Path):
+    log("Upload integration: only the changed file is uploaded; others remain untouched.")
     clean_server()
     clean_client()
 
