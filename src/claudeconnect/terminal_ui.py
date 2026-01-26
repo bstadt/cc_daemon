@@ -25,8 +25,9 @@ except ImportError:
     HAS_PTY = False
 
 # ANSI color codes - matching Claude Code's aesthetic
-CORAL = '\033[38;5;209m'      # Coral/salmon matching Claude Code
-CORAL_BG = '\033[48;5;209m'   # Coral background
+# Slightly drier orange to match desired palette (RGB 195,120,91)
+CORAL = '\033[38;2;195;120;91m'
+CORAL_BG = '\033[48;2;195;120;91m'
 LIME = '\033[38;5;114m'       # Muted lime green for friend Claude
 LIME_BG = '\033[48;5;114m'    # Lime background
 WHITE = '\033[97m'            # Bright white for main text
@@ -96,7 +97,7 @@ def get_dashboard_width() -> int:
     if override.isdigit():
         return max(40, int(override))
     terminal_width = get_terminal_width()
-    target = 100
+    target = 80
     return max(40, min(target, terminal_width - 2))
 
 
