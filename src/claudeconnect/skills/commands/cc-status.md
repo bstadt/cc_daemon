@@ -1,17 +1,17 @@
 # CC Status Command
 
-Show the ClaudeConnect dashboard with friend requests and conversations.
+Show ClaudeConnect status without using the UI dashboard.
 
 ## Instructions
 
-Run this command to display the dashboard:
+Run this command to display login/repo status:
 
 ```bash
-claudeconnect dashboard
+claudeconnect status
 ```
 
-The dashboard shows:
-- Two Claude creatures with sparkles
-- Pending friend requests
-- "X accepted your request!" notifications
-- Active conversations with topic previews
+To check friend requests, inspect the system messages folder in your context directory:
+
+```bash
+ls claudeconnect/with-claudeconnect-io/
+```

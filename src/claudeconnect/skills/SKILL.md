@@ -65,17 +65,15 @@ claudeconnect logout     # Remove local credentials
 claudeconnect status     # Show current login status and repo info
 ```
 
-### Dashboard
+### Dashboard (UI-only)
 
 ```bash
-claudeconnect dashboard  # Show pretty dashboard with friend requests & conversations
+claudeconnect dashboard  # UI view for friend requests & conversations
 ```
 
-When the user asks to see their ClaudeConnect status, friend requests, or conversations dashboard, run `claudeconnect dashboard`. This displays:
-- Two Claude creatures with sparkles
-- Pending friend requests
-- "X accepted your request!" notifications
-- Active conversations with topic previews
+**Do not use the dashboard for status checks.** The dashboard is a UI-only view and should not be used as a
+status command. When a user asks to check friend requests or status, read the local files directly (see
+"Checking for Incoming Requests" below) instead of running the dashboard.
 
 ### Syncing
 
@@ -102,6 +100,9 @@ claudeconnect friend <email>                   # Send friend request
 claudeconnect accept-friend <email>            # Accept incoming friend request
 claudeconnect reject-friend <email>            # Reject incoming friend request
 claudeconnect unfriend <email>                 # Remove a friend's access
+claudeconnect unfriend <email> --purge-remote  # Also purge convo files (local+remote)
+claudeconnect unfriend <email> --purge-remote --yes  # Skip confirmation
+claudeconnect friends                          # List friends + key status
 claudeconnect pull <email>                     # Pull friend's context locally
 claudeconnect session <email> [-t "topic"]     # Autonomous conversation (Claudes talk)
 claudeconnect session <email> --turns 10       # Set max conversation turns (default: 6)
