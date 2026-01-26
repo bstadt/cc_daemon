@@ -24,6 +24,13 @@ try:
 except ImportError:
     HAS_TERMINAL_DETECTION = False
 
+# PTY support (for persistent banner rendering)
+try:
+    import pty
+    HAS_PTY = True
+except ImportError:
+    HAS_PTY = False
+
 import click
 import httpx
 
@@ -55,6 +62,9 @@ BLACK_BG = '\033[40m'         # Black background for transparency
 YELLOW = '\033[38;5;228m'     # Soft yellow for sparkles
 RESET = '\033[0m'
 CLEAR = '\033[2J\033[H'       # Clear screen and move cursor to top
+ORIGIN_MODE_ON = '\033[?6h'   # Origin mode: cursor positions relative to scroll region
+ORIGIN_MODE_OFF = '\033[?6l'
+RESET_SCROLL_REGION = '\033[r'
 
 
 def get_cell_aspect_ratio() -> float | None:
@@ -120,6 +130,142 @@ def get_banner_style() -> str:
     return "compact"
 
 
+def should_use_persistent_banner() -> bool:
+    """Check if persistent banner rendering is enabled and supported."""
+    override = os.environ.get("CC_PERSIST_BANNER", "").lower()
+    if override in ("0", "false", "no"):
+        return False
+    if not HAS_PTY or not sys.stdin.isatty() or not sys.stdout.isatty():
+        return False
+    if os.environ.get("TERM", "") == "dumb":
+        return False
+    if override in ("1", "true", "yes"):
+        return True
+    return True
+
+
+def get_double_banner_lines(email: str) -> list[str]:
+    """Return the double-Claude banner lines without surrounding spacing."""
+    style = get_banner_style()
+    if style == "compact":
+        double_creature = f"""
+{CORAL}▗{CORAL_BG} {RESET}{CORAL_BG}{BLACK}▗{RESET}{CORAL_BG}   {RESET}{CORAL_BG}{BLACK}▖{RESET}{CORAL_BG} {RESET}{CORAL}▖{RESET} {YELLOW}✱{RESET} {LIME}▗{LIME_BG} {RESET}{LIME_BG}{BLACK}▗{RESET}{LIME_BG}   {RESET}{LIME_BG}{BLACK}▖{RESET}{LIME_BG} {RESET}{LIME}▖{RESET}
+ {CORAL_BG}       {RESET}     {LIME_BG}       {RESET}
+{CORAL}  ▘▘ ▝▝    {RESET} {LIME}  ▘▘ ▝▝    {RESET}
+"""
+        return double_creature.strip("\n").splitlines()
+
+    return [
+        f" {CORAL}▐{BLACK_BG}▛███▜▌{RESET} {YELLOW}✱{RESET} {LIME}▐{BLACK_BG}▛███▜{RESET}{LIME}▌{RESET}   {WHITE}{BOLD}Claude Connect{RESET}",
+        f"{CORAL}▝▜█████▛▘{RESET} {LIME}▝▜█████▛▘{RESET}  {DIM}{email}{RESET}",
+        f"  {CORAL}▘▘ ▝▝{RESET}     {LIME}▘▘ ▝▝{RESET}",
+    ]
+
+
+def get_persistent_banner_lines(email: str, peer_name: str | None = None) -> list[str]:
+    """Return banner lines for persistent header mode."""
+    lines = get_double_banner_lines(email)
+    if peer_name:
+        lines.append(f"  {WHITE}{BOLD}Interactive session with {LIME}{peer_name}{RESET}")
+    # Spacer line to separate banner from content
+    lines.append("")
+    return lines
+
+
+def _build_persistent_banner_bytes(banner_lines: list[str]) -> bytes:
+    rows = shutil.get_terminal_size((80, 24)).lines
+    top = len(banner_lines) + 1
+    header = "\n".join(banner_lines)
+    if header and not header.endswith("\n"):
+        header += "\n"
+    scroll_seq = ""
+    origin_seq = ""
+    cursor_seq = ""
+    if rows > top:
+        scroll_seq = f"\033[{top};{rows}r"
+        origin_seq = ORIGIN_MODE_ON
+        cursor_seq = "\033[H"
+    return f"\033[H{header}{RESET}{scroll_seq}{origin_seq}{cursor_seq}".encode()
+
+
+def _write_stdout_bytes(data: bytes) -> None:
+    try:
+        os.write(sys.stdout.fileno(), data)
+    except OSError:
+        sys.stdout.write(data.decode(errors="ignore"))
+        sys.stdout.flush()
+
+
+def render_persistent_banner(banner_lines: list[str]) -> None:
+    """Render banner and set scroll region/origin mode for persistent header."""
+    _write_stdout_bytes(b"\033[2J")
+    _write_stdout_bytes(_build_persistent_banner_bytes(banner_lines))
+
+
+def reset_persistent_banner() -> None:
+    """Reset terminal scroll region/origin mode after persistent header."""
+    _write_stdout_bytes(f"{ORIGIN_MODE_OFF}{RESET_SCROLL_REGION}{RESET}".encode())
+
+
+class PersistentBannerFilter:
+    """Filter terminal output to re-render a persistent banner on clear-screen redraws."""
+
+    def __init__(self, banner_lines: list[str]) -> None:
+        self.banner_lines = banner_lines
+        self._pending = b""
+
+    def filter_output(self, data: bytes) -> bytes:
+        if not data:
+            return data
+        data = self._pending + data
+        self._pending = b""
+
+        pending = b""
+        for suffix in (b"\x1b[2", b"\x1b[", b"\x1b"):
+            if data.endswith(suffix):
+                pending = suffix
+                data = data[:-len(suffix)]
+                break
+        self._pending = pending
+
+        out = bytearray()
+        i = 0
+        while i < len(data):
+            if data.startswith(b"\x1b[2J", i):
+                out.extend(b"\x1b[2J")
+                out.extend(_build_persistent_banner_bytes(self.banner_lines))
+                i += 4
+                continue
+            out.append(data[i])
+            i += 1
+        return bytes(out)
+
+
+def run_claude_with_persistent_banner(
+    claude_args: list[str],
+    context_dir: Path,
+    banner_lines: list[str],
+    render_initial: bool = False,
+) -> None:
+    """Run Claude in a PTY and keep a persistent banner pinned to the top."""
+    banner_filter = PersistentBannerFilter(banner_lines)
+    if render_initial:
+        render_persistent_banner(banner_lines)
+
+    def master_read(fd: int) -> bytes:
+        data = os.read(fd, 1024)
+        if not data:
+            return data
+        return banner_filter.filter_output(data)
+
+    cwd = os.getcwd()
+    try:
+        os.chdir(str(context_dir))
+        pty.spawn(claude_args, master_read)
+    finally:
+        os.chdir(cwd)
+
+
 from .auth import login as do_login, ensure_valid_token, decode_jwt_payload, refresh_token
 from .config import (
     get_config, get_tokens, Config, Tokens, is_logged_in, get_email,
@@ -163,24 +309,9 @@ def display_startup_banner(context_dir: Path, email: str, clear_screen: bool = T
     if clear_screen:
         print(CLEAR, end='')
 
-    style = get_banner_style()
     print()
-
-    if style == "compact":
-        # Compact style - Claude Code inspired, with colored background fill
-        # Two creatures side by side
-        double_creature = f"""
-{CORAL}▗{CORAL_BG} {RESET}{CORAL_BG}{BLACK}▗{RESET}{CORAL_BG}   {RESET}{CORAL_BG}{BLACK}▖{RESET}{CORAL_BG} {RESET}{CORAL}▖{RESET} {YELLOW}✱{RESET} {LIME}▗{LIME_BG} {RESET}{LIME_BG}{BLACK}▗{RESET}{LIME_BG}   {RESET}{LIME_BG}{BLACK}▖{RESET}{LIME_BG} {RESET}{LIME}▖{RESET}
- {CORAL_BG}       {RESET}     {LIME_BG}       {RESET}
-{CORAL}  ▘▘ ▝▝    {RESET} {LIME}  ▘▘ ▝▝    {RESET}
-"""
-        print(double_creature)
-
-    else:
-        # Standard style - original design
-        print(f" {CORAL}▐{BLACK_BG}▛███▜▌{RESET} {YELLOW}✱{RESET} {LIME}▐{BLACK_BG}▛███▜{RESET}{LIME}▌{RESET}   {WHITE}{BOLD}Claude Connect{RESET}")
-        print(f"{CORAL}▝▜█████▛▘{RESET} {LIME}▝▜█████▛▘{RESET}  {DIM}{email}{RESET}")
-        print(f"  {CORAL}▘▘ ▝▝{RESET}     {LIME}▘▘ ▝▝{RESET}")
+    for line in get_double_banner_lines(email):
+        print(line)
 
     print()
 
@@ -192,6 +323,11 @@ def display_startup_banner(context_dir: Path, email: str, clear_screen: bool = T
         print(RESET, end='', flush=True)
         return
 
+    display_notifications(context_dir)
+
+
+def display_notifications(context_dir: Path) -> None:
+    """Display friend request and conversation notifications."""
     # Check for friend requests and conversations
     # New structure per system2.md:
     # - Friend requests: claudeconnect/with-claudeconnect-io/
@@ -1120,7 +1256,14 @@ def start(system_prompt: str | None, initial_prompt: str | None, context_dir: Pa
         sys.exit(1)
 
     # Display startup banner with friend requests and conversations
-    display_startup_banner(context_dir, tokens.email, peer_name=peer)
+    banner_lines = None
+    if should_use_persistent_banner():
+        banner_lines = get_persistent_banner_lines(tokens.email, peer)
+        render_persistent_banner(banner_lines)
+        if not is_interactive:
+            display_notifications(context_dir)
+    else:
+        display_startup_banner(context_dir, tokens.email, peer_name=peer)
 
     # Start sync loop and Claude
     if not is_interactive:
@@ -1136,7 +1279,9 @@ def start(system_prompt: str | None, initial_prompt: str | None, context_dir: Pa
     asyncio.run(run_with_http_sync(
         context_dir, tokens.email, tokens.id_token,
         system_prompt=system_prompt, initial_prompt=initial_prompt,
-        session_id=session_id
+        session_id=session_id,
+        banner_lines=banner_lines,
+        render_initial_banner=False,
     ))
 
 
@@ -1148,6 +1293,8 @@ async def run_with_http_sync(
     system_prompt: str | None = None,
     initial_prompt: str | None = None,
     session_id: str | None = None,
+    banner_lines: list[str] | None = None,
+    render_initial_banner: bool = True,
 ):
     """Run Claude Code with background HTTP sync loop."""
     stop_event = asyncio.Event()
@@ -1184,16 +1331,27 @@ async def run_with_http_sync(
         if initial_prompt:
             claude_args.append(initial_prompt)
 
-        # Run Claude Code
-        process = await asyncio.create_subprocess_exec(
-            *claude_args,
-            stdin=None,  # Inherit stdin
-            stdout=None,  # Inherit stdout
-            stderr=None,  # Inherit stderr
-            cwd=context_dir,
-        )
+        use_persistent_banner = banner_lines is not None and should_use_persistent_banner()
 
-        await process.wait()
+        if use_persistent_banner:
+            await asyncio.to_thread(
+                run_claude_with_persistent_banner,
+                claude_args,
+                context_dir,
+                banner_lines,
+                render_initial_banner,
+            )
+        else:
+            # Run Claude Code
+            process = await asyncio.create_subprocess_exec(
+                *claude_args,
+                stdin=None,  # Inherit stdin
+                stdout=None,  # Inherit stdout
+                stderr=None,  # Inherit stderr
+                cwd=context_dir,
+            )
+
+            await process.wait()
 
     except FileNotFoundError:
         print("Error: 'claude' command not found.")
@@ -1204,6 +1362,8 @@ async def run_with_http_sync(
         # Stop sync loop
         stop_event.set()
         await sync_task
+        if banner_lines is not None:
+            reset_persistent_banner()
         print("\nSync stopped. Goodbye!")
 
 
