@@ -6,6 +6,7 @@ import os
 import shutil
 import struct
 import sys
+from typing import Iterable
 
 # Terminal detection - Unix only
 try:
@@ -83,6 +84,11 @@ def get_banner_style() -> str:
     return "compact"
 
 
+def get_terminal_width(default: int = 80) -> int:
+    """Return the current terminal width in columns."""
+    return shutil.get_terminal_size((default, 24)).columns
+
+
 def should_use_persistent_banner() -> bool:
     """Check if persistent banner rendering is enabled and supported."""
     override = os.environ.get("CC_PERSIST_BANNER", "").lower()
@@ -115,11 +121,18 @@ def get_double_banner_lines(email: str) -> list[str]:
     ]
 
 
-def get_persistent_banner_lines(email: str, peer_name: str | None = None) -> list[str]:
+def get_persistent_banner_lines(
+    email: str,
+    peer_name: str | None = None,
+    extra_lines: Iterable[str] | None = None,
+) -> list[str]:
     """Return banner lines for persistent header mode."""
     lines = get_double_banner_lines(email)
     if peer_name:
         lines.append(f"  {WHITE}{BOLD}Interactive session with {LIME}{peer_name}{RESET}")
+    if extra_lines:
+        lines.append("")
+        lines.extend(extra_lines)
     lines.append("")
     return lines
 

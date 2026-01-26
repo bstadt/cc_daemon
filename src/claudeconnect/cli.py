@@ -42,6 +42,7 @@ from .terminal_ui import (
     RESET,
     WHITE,
     get_double_banner_lines,
+    get_terminal_width,
     get_persistent_banner_lines,
     render_persistent_banner,
     reset_persistent_banner,
@@ -57,6 +58,7 @@ from .config import (
     TestUserCredentials, TEST_USERS_DIR, get_shadow_dir, sanitize_email,
     SERVER_URL, API_BASE_URL, email_to_repo_name, get_active_account,
     get_tokens_file, get_config_file, ACTIVE_ACCOUNT_FILE, LEGACY_TOKENS_FILE,
+    get_friends_dir,
 )
 from .scanner import scan_directory
 
@@ -71,6 +73,9 @@ try:
         get_key_fingerprint,
         save_friend_public_key,
         load_friend_public_key,
+        has_friend_public_key,
+        delete_friend_public_key,
+        delete_friend_master_key,
         encrypt_master_key_for_recipient,
         decrypt_received_master_key,
         save_friend_master_key,
@@ -110,8 +115,8 @@ def display_startup_banner(context_dir: Path, email: str, clear_screen: bool = T
     display_notifications(context_dir)
 
 
-def display_notifications(context_dir: Path) -> None:
-    """Display friend request and conversation notifications."""
+def build_notifications_lines(context_dir: Path, total_width: int) -> list[str]:
+    """Build notification boxes sized to the given width."""
     # Check for friend requests and conversations
     # New structure per system2.md:
     # - Friend requests: claudeconnect/with-claudeconnect-io/
@@ -223,66 +228,85 @@ def display_notifications(context_dir: Path) -> None:
         recent_convos.sort(key=lambda x: x[2], reverse=True)
         recent_convos = recent_convos[:5]  # Limit to 5
 
-    # Display boxes side by side if there's activity
-    if friend_notifications or recent_convos:
-        W = 34  # Total box width
+    if not friend_notifications and not recent_convos:
+        return []
 
-        def truncate_with_ellipsis(text: str, max_len: int) -> str:
-            """Truncate text with ellipsis if it exceeds max_len."""
-            if len(text) <= max_len:
-                return text
-            return text[:max_len - 3] + "..."
+    total_width = max(40, total_width)
 
-        def make_box(title: str, items: list[str]) -> list[str]:
-            """Create a box with title and items, exactly W chars wide."""
-            lines = []
-            # Header: ┌─ TITLE ───────┐
-            title_truncated = truncate_with_ellipsis(title, W - 6)
-            dashes = W - 5 - len(title_truncated)
-            lines.append(f"┌─ {title_truncated} " + "─" * dashes + "┐")
-            # Items: │ content      │
-            max_content_len = W - 4  # 2 for "│ " and 2 for " │"
-            for item in items:
-                content = truncate_with_ellipsis(item, max_content_len)
-                padding = max_content_len - len(content)
-                lines.append(f"│ {content}" + " " * padding + " │")
-            # Footer
-            lines.append("└" + "─" * (W - 2) + "┘")
-            return lines
+    def truncate_with_ellipsis(text: str, max_len: int) -> str:
+        """Truncate text with ellipsis if it exceeds max_len."""
+        if len(text) <= max_len:
+            return text
+        return text[:max_len - 3] + "..."
 
-        fr_lines = []
-        if friend_notifications:
-            items = [f"∙ {notif[0]}" for notif in friend_notifications[:5]]
-            total = len(friend_notifications)
-            fr_lines = make_box(f"FRIEND REQUESTS ({total})", items)
+    def make_box(title: str, items: list[str], width: int) -> list[str]:
+        """Create a box with title and items, exactly width chars wide."""
+        lines = []
+        inner_width = width - 2
+        title_truncated = truncate_with_ellipsis(title, max(1, inner_width - 2))
+        title_text = f" {title_truncated} "
+        dashes = max(0, inner_width - len(title_text))
+        lines.append(f"┌{title_text}" + "─" * dashes + "┐")
+        max_content_len = max(1, inner_width - 2)
+        for item in items:
+            content = truncate_with_ellipsis(item, max_content_len)
+            padding = max_content_len - len(content)
+            lines.append(f"│ {content}" + " " * padding + " │")
+        lines.append("└" + "─" * inner_width + "┘")
+        return lines
 
-        conv_lines = []
-        if recent_convos:
-            items = []
-            for peer_email, topic, _ in recent_convos:
-                # Show email + topic preview
-                username = peer_email.split("@")[0] if "@" in peer_email else peer_email
-                if topic:
-                    items.append(f"∙ {username}: {topic}")
-                else:
-                    items.append(f"∙ {username}")
-            conv_lines = make_box("CONVERSATIONS", items)
+    fr_lines = []
+    if friend_notifications:
+        items = [f"∙ {notif[0]}" for notif in friend_notifications[:5]]
+        total = len(friend_notifications)
+        fr_lines = make_box(f"FRIEND REQUESTS ({total})", items, total_width)
 
-        # Print side by side or single
-        if fr_lines and conv_lines:
-            max_lines = max(len(fr_lines), len(conv_lines))
-            empty_space = " " * W
-            for i in range(max_lines):
-                left = fr_lines[i] if i < len(fr_lines) else empty_space
-                right = conv_lines[i] if i < len(conv_lines) else empty_space
-                print(f" {left}  {right}")
-        elif fr_lines:
-            for line in fr_lines:
-                print(f" {line}")
-        elif conv_lines:
-            for line in conv_lines:
-                print(f" {line}")
+    conv_lines = []
+    if recent_convos:
+        items = []
+        for peer_email, topic, _ in recent_convos:
+            username = peer_email.split("@")[0] if "@" in peer_email else peer_email
+            if topic:
+                items.append(f"∙ {username}: {topic}")
+            else:
+                items.append(f"∙ {username}")
+        conv_lines = make_box("CONVERSATIONS", items, total_width)
 
+    if fr_lines and conv_lines:
+        gap = 2
+        left_width = (total_width - gap) // 2
+        right_width = total_width - gap - left_width
+        if left_width < 20 or right_width < 20:
+            return fr_lines + [""] + conv_lines
+        fr_items = [f"∙ {notif[0]}" for notif in friend_notifications[:5]]
+        fr_lines = make_box(f"FRIEND REQUESTS ({len(friend_notifications)})", fr_items, left_width)
+        conv_items = []
+        for peer_email, topic, _ in recent_convos:
+            username = peer_email.split("@")[0] if "@" in peer_email else peer_email
+            if topic:
+                conv_items.append(f"∙ {username}: {topic}")
+            else:
+                conv_items.append(f"∙ {username}")
+        conv_lines = make_box("CONVERSATIONS", conv_items, right_width)
+        max_lines = max(len(fr_lines), len(conv_lines))
+        empty_left = " " * left_width
+        empty_right = " " * right_width
+        combined = []
+        for i in range(max_lines):
+            left = fr_lines[i] if i < len(fr_lines) else empty_left
+            right = conv_lines[i] if i < len(conv_lines) else empty_right
+            combined.append(left + " " * gap + right)
+        return combined
+
+    return fr_lines or conv_lines
+
+
+def display_notifications(context_dir: Path) -> None:
+    """Display friend request and conversation notifications."""
+    lines = build_notifications_lines(context_dir, get_terminal_width())
+    if lines:
+        for line in lines:
+            print(line)
         print()
 
     # Ensure terminal attributes are reset at end of banner
@@ -1042,10 +1066,11 @@ def start(system_prompt: str | None, initial_prompt: str | None, context_dir: Pa
     # Display startup banner with friend requests and conversations
     banner_lines = None
     if should_use_persistent_banner():
-        banner_lines = get_persistent_banner_lines(tokens.email, peer)
-        render_persistent_banner(banner_lines)
+        extra_lines = None
         if not is_interactive:
-            display_notifications(context_dir)
+            extra_lines = build_notifications_lines(context_dir, get_terminal_width())
+        banner_lines = get_persistent_banner_lines(tokens.email, peer, extra_lines=extra_lines)
+        render_persistent_banner(banner_lines)
     else:
         display_startup_banner(context_dir, tokens.email, peer_name=peer)
 
@@ -1823,6 +1848,49 @@ def remove_friend_from_authz(authz_path: Path, peer_email: str) -> bool:
     return changes_made
 
 
+def parse_friends_from_authz(authz_content: str, owner_email: str | None = None) -> list[str]:
+    """
+    Extract friend emails from the [/] section of an authz file.
+
+    Args:
+        authz_content: Raw authz file contents
+        owner_email: If provided, exclude this email from results
+
+    Returns:
+        Ordered list of friend emails with read access
+    """
+    friends: list[str] = []
+    seen: set[str] = set()
+    current_section = None
+
+    for line in authz_content.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("["):
+            current_section = stripped
+            continue
+        if current_section != "[/]":
+            continue
+        if "=" not in stripped:
+            continue
+
+        left, right = stripped.split("=", 1)
+        email = left.strip()
+        perms = right.strip()
+        if "@" not in email:
+            continue
+        if "r" not in perms:
+            continue
+        if owner_email and email == owner_email:
+            continue
+        if email not in seen:
+            friends.append(email)
+            seen.add(email)
+
+    return friends
+
+
 def fetch_peer_public_key(peer_email: str) -> bytes | None:
     """
     Fetch a peer's public key from the server API.
@@ -2171,18 +2239,87 @@ def unfriend(peer_email: str):
         print("Error: authz file not found. Run `claudeconnect init` first.")
         sys.exit(1)
 
-    if not remove_friend_from_authz(authz_path, peer_email):
-        print("  No changes needed.")
-        return
+    authz_changed = remove_friend_from_authz(authz_path, peer_email)
+    if authz_changed:
+        print("  Uploading authz changes...")
+        authz_content = authz_path.read_text()
+        if not upload_authz_http(tokens.id_token, my_email, authz_content):
+            print("Failed to upload authz")
+            sys.exit(1)
+    else:
+        print("  No authz changes needed.")
 
-    print("  Uploading authz changes...")
-    authz_content = authz_path.read_text()
-    if not upload_authz_http(tokens.id_token, my_email, authz_content):
-        print("Failed to upload authz")
-        sys.exit(1)
+    removed_public = delete_friend_public_key(peer_email, my_email)
+    removed_master = delete_friend_master_key(peer_email, my_email)
+    if removed_public or removed_master:
+        removed_parts = []
+        if removed_public:
+            removed_parts.append("public key")
+        if removed_master:
+            removed_parts.append("master key")
+        print(f"  Removed local {peer_email} {' and '.join(removed_parts)}")
 
     print(f"\n✓ {peer_email} can no longer access your context.")
     print(f"  Pull their context with: claudeconnect pull {peer_email}")
+
+
+@cli.command()
+def friends():
+    """List friends who have access and key status."""
+    config = get_config()
+    if not config.context_dir:
+        print("No context directory configured. Run `claudeconnect init` first.")
+        sys.exit(1)
+
+    context_dir = Path(config.context_dir)
+    authz_path = context_dir / "authz"
+    if not authz_path.exists():
+        print("Error: authz file not found. Run `claudeconnect init` first.")
+        sys.exit(1)
+
+    tokens = get_tokens()
+    owner_email = None
+    if tokens and tokens.email:
+        owner_email = tokens.email
+    elif config.email:
+        owner_email = config.email
+    else:
+        owner_email = get_email()
+
+    authz_content = authz_path.read_text()
+    friends_list = parse_friends_from_authz(authz_content, owner_email)
+
+    if not friends_list:
+        print("No friends found in authz.")
+        return
+
+    print("Friends (from authz):")
+    if owner_email:
+        for friend in friends_list:
+            pub_status = "pub" if has_friend_public_key(friend, owner_email) else "no-pub"
+            master_status = "master" if has_friend_master_key(friend, owner_email) else "no-master"
+            print(f"  - {friend} [{pub_status}, {master_status}]")
+
+        friends_dir = get_friends_dir(owner_email)
+        if friends_dir.exists():
+            sanitized_authz = {email_to_repo_name(friend) for friend in friends_list}
+            stale_pub = sorted(
+                {path.stem for path in friends_dir.glob("*.pub")} - sanitized_authz
+            )
+            stale_master = sorted(
+                {path.stem for path in friends_dir.glob("*.master")} - sanitized_authz
+            )
+            if stale_pub or stale_master:
+                print()
+                print("Stale keys (sanitized emails not in authz):")
+                if stale_pub:
+                    print(f"  - public: {', '.join(stale_pub)}")
+                if stale_master:
+                    print(f"  - master: {', '.join(stale_master)}")
+    else:
+        for friend in friends_list:
+            print(f"  - {friend}")
+        print("  (No active account email; skipping key status)")
 
 
 def auto_accept_reciprocal_requests(
