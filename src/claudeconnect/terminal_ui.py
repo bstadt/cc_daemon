@@ -96,7 +96,8 @@ def get_dashboard_width() -> int:
     if override.isdigit():
         return max(40, int(override))
     terminal_width = get_terminal_width()
-    return max(40, terminal_width - 2)
+    target = 80
+    return max(40, min(target, terminal_width - 2))
 
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
