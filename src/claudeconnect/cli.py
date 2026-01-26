@@ -125,7 +125,8 @@ from .config import (
     get_config, get_tokens, Config, Tokens, is_logged_in, get_email,
     get_test_user_email, get_test_user_credentials, list_test_users,
     TestUserCredentials, TEST_USERS_DIR, get_shadow_dir, sanitize_email,
-    SERVER_URL, API_BASE_URL, email_to_repo_name,
+    SERVER_URL, API_BASE_URL, email_to_repo_name, get_active_account,
+    get_tokens_file, get_config_file, ACTIVE_ACCOUNT_FILE, LEGACY_TOKENS_FILE,
 )
 from .scanner import scan_directory
 
@@ -895,6 +896,48 @@ def login():
     else:
         print(f"\n✗ Login failed: {result.error}")
         sys.exit(1)
+
+
+@cli.command()
+@click.option("--full", is_flag=True, help="Also remove local config for this account.")
+def logout(full: bool):
+    """Logout of Claude Connect and remove local credentials."""
+    active_email = get_active_account()
+    tokens = get_tokens()
+    if not active_email and tokens:
+        active_email = tokens.email
+    if not active_email and not LEGACY_TOKENS_FILE.exists():
+        print("Not logged in.")
+        return
+
+    print("Logging out of ClaudeConnect...")
+
+    if active_email:
+        tokens_file = get_tokens_file(active_email)
+        if tokens_file.exists():
+            tokens_file.unlink()
+            print(f"  Removed tokens for {active_email}")
+        else:
+            print(f"  No tokens found for {active_email}")
+        if full:
+            config_file = get_config_file(active_email)
+            if config_file.exists():
+                config_file.unlink()
+                print("  Removed config.json")
+            else:
+                print("  No config.json found")
+
+    if LEGACY_TOKENS_FILE.exists():
+        LEGACY_TOKENS_FILE.unlink()
+        print("  Removed legacy tokens.json")
+
+    if ACTIVE_ACCOUNT_FILE.exists():
+        ACTIVE_ACCOUNT_FILE.unlink()
+
+    if full:
+        print("\n✓ Logged out and cleared local configuration.")
+    else:
+        print("\n✓ Logged out. Run `claudeconnect login` to sign in again.")
 
 
 @cli.command()
@@ -1781,6 +1824,61 @@ def add_friend_to_authz(authz_path: Path, my_email: str, peer_email: str) -> boo
     return changes_made
 
 
+def remove_friend_from_authz(authz_path: Path, peer_email: str) -> bool:
+    """
+    Remove a friend's access from the authz file.
+
+    Removes:
+    - Read access from [/] section
+    - Write access from [/claudeconnect/with-{peer}] section
+    - Legacy write access from [/claudeconnect/conversations] if present
+
+    Args:
+        authz_path: Path to authz file
+        peer_email: Friend's email to remove
+
+    Returns:
+        True if changes were made, False otherwise.
+    """
+    authz_content = authz_path.read_text()
+    lines = authz_content.split('\n')
+    new_lines = []
+    changes_made = False
+
+    peer_email_repo_name = email_to_repo_name(peer_email)
+    peer_with_section = f"[/claudeconnect/with-{peer_email_repo_name}]"
+    legacy_section = "[/claudeconnect/conversations]"
+
+    current_section = None
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith('['):
+            current_section = stripped
+
+        if current_section in ('[/]', peer_with_section, legacy_section):
+            if '=' in stripped:
+                left = stripped.split('=', 1)[0].strip()
+                if left == peer_email:
+                    if current_section == '[/]':
+                        print(f"  Removed {peer_email} read access from [/]")
+                    elif current_section == peer_with_section:
+                        print(f"  Removed {peer_email} write access from {peer_with_section}")
+                    else:
+                        print(f"  Removed {peer_email} write access from {legacy_section}")
+                    changes_made = True
+                    continue
+
+        new_lines.append(line)
+
+    if changes_made:
+        authz_path.write_text('\n'.join(new_lines))
+    else:
+        print(f"  {peer_email} not found in your authz")
+
+    return changes_made
+
+
 def fetch_peer_public_key(peer_email: str) -> bytes | None:
     """
     Fetch a peer's public key from the server API.
@@ -2099,6 +2197,47 @@ def accept_friend(peer_email: str):
 
     print(f"\n✓ Friend request accepted!")
     print(f"  {peer_email} can now read your context and send you conversations.")
+
+
+@cli.command()
+@click.argument("peer_email")
+def unfriend(peer_email: str):
+    """Remove a friend's access from your authz and sync the change."""
+    tokens = get_valid_token()
+    if not tokens:
+        print("Not logged in or token expired. Run `claudeconnect login` first.")
+        sys.exit(1)
+
+    config = get_config()
+    if not config.context_dir:
+        print("No context directory configured. Run `claudeconnect init` first.")
+        sys.exit(1)
+
+    peer_email = peer_email.strip().lower()
+    my_email = tokens.email
+
+    if peer_email == my_email:
+        print("Cannot unfriend yourself.")
+        sys.exit(1)
+
+    print(f"Removing {peer_email} from your friends...")
+
+    authz_path = Path(config.context_dir) / "authz"
+    if not authz_path.exists():
+        print("Error: authz file not found. Run `claudeconnect init` first.")
+        sys.exit(1)
+
+    if not remove_friend_from_authz(authz_path, peer_email):
+        print("  No changes needed.")
+        return
+
+    print("  Uploading authz changes...")
+    authz_content = authz_path.read_text()
+    if not upload_authz_http(tokens.id_token, my_email, authz_content):
+        print("Failed to upload authz")
+        sys.exit(1)
+
+    print(f"\n✓ {peer_email} can no longer access your context.")
     print(f"  Pull their context with: claudeconnect pull {peer_email}")
 
 

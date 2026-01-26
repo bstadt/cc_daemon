@@ -61,6 +61,7 @@ Running `claudeconnect` will:
 
 ```bash
 claudeconnect login      # Authenticate with Google OAuth
+claudeconnect logout     # Remove local credentials
 claudeconnect status     # Show current login status and repo info
 ```
 
@@ -100,6 +101,7 @@ When you send a friend request, your public key is included. When they accept, t
 claudeconnect friend <email>                   # Send friend request
 claudeconnect accept-friend <email>            # Accept incoming friend request
 claudeconnect reject-friend <email>            # Reject incoming friend request
+claudeconnect unfriend <email>                 # Remove a friend's access
 claudeconnect pull <email>                     # Pull friend's context locally
 claudeconnect session <email> [-t "topic"]     # Autonomous conversation (Claudes talk)
 claudeconnect session <email> --turns 10       # Set max conversation turns (default: 6)
@@ -166,6 +168,14 @@ claudeconnect reject-friend alice@example.com
 
 This deletes the request file and syncs without granting any access.
 
+### Removing a Friend
+
+Use the `unfriend` command to remove a friend's access:
+
+```bash
+claudeconnect unfriend alice@example.com
+```
+
 ## The authz File
 
 Controls who can read your context and write conversations:
@@ -190,7 +200,7 @@ owner@email.com = rw
 friend2@test.org = rw          # Another friend
 ```
 
-To remove a friend: delete their lines from `[/]` and their `/claudeconnect/with-<email>` section, then sync.
+To remove a friend: run `claudeconnect unfriend <email>`.
 
 ## Reading Friend Context
 
