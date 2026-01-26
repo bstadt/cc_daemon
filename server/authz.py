@@ -47,56 +47,85 @@ class Authz:
     public_key: str
     rules: list[AuthzRule] = field(default_factory=list)
 
+    def _path_matches(self, rule_path: str, target_path: str) -> bool:
+        """Check if a rule path covers the target path."""
+        return (
+            target_path == rule_path or
+            target_path.startswith(rule_path.rstrip("/") + "/") or
+            rule_path == "/"
+        )
+
+    def _find_most_specific_section(self, path: str) -> Optional[str]:
+        """Find the most specific section path that covers the given path.
+
+        This considers ALL rules, not just rules for a specific user,
+        to determine which section governs access to this path.
+        """
+        best_section: Optional[str] = None
+        best_section_len = -1
+
+        # Get unique section paths
+        seen_sections = set()
+        for rule in self.rules:
+            if rule.path in seen_sections:
+                continue
+            seen_sections.add(rule.path)
+
+            if self._path_matches(rule.path, path):
+                if len(rule.path) > best_section_len:
+                    best_section = rule.path
+                    best_section_len = len(rule.path)
+
+        return best_section
+
     def can_read(self, user_email: str, path: str) -> bool:
-        """Check if user can read the given path."""
+        """Check if user can read the given path.
+
+        Permission is determined by finding the most specific section that
+        covers the path, then checking if the user has read access in that
+        section. If a section exists but doesn't include the user, access
+        is denied (implicit deny).
+        """
         # Normalize path to start with /
         if not path.startswith("/"):
             path = "/" + path
 
-        # Find the most specific matching rule
-        best_match: Optional[AuthzRule] = None
-        best_match_len = -1
+        # Find the most specific section that covers this path
+        most_specific_section = self._find_most_specific_section(path)
+        if most_specific_section is None:
+            return False
 
+        # Look for a rule for this user in that specific section
         for rule in self.rules:
-            if rule.user != user_email:
-                continue
+            if rule.path == most_specific_section and rule.user == user_email:
+                return rule.can_read
 
-            # Check if rule path matches (path starts with rule.path)
-            if path == rule.path or path.startswith(rule.path.rstrip("/") + "/") or rule.path == "/":
-                rule_len = len(rule.path)
-                if rule_len > best_match_len:
-                    best_match = rule
-                    best_match_len = rule_len
-
-        if best_match:
-            return best_match.can_read
-
+        # No rule for this user in the most specific section = implicit deny
         return False
 
     def can_write(self, user_email: str, path: str) -> bool:
-        """Check if user can write to the given path."""
+        """Check if user can write to the given path.
+
+        Permission is determined by finding the most specific section that
+        covers the path, then checking if the user has write access in that
+        section. If a section exists but doesn't include the user, access
+        is denied (implicit deny).
+        """
         # Normalize path to start with /
         if not path.startswith("/"):
             path = "/" + path
 
-        # Find the most specific matching rule
-        best_match: Optional[AuthzRule] = None
-        best_match_len = -1
+        # Find the most specific section that covers this path
+        most_specific_section = self._find_most_specific_section(path)
+        if most_specific_section is None:
+            return False
 
+        # Look for a rule for this user in that specific section
         for rule in self.rules:
-            if rule.user != user_email:
-                continue
+            if rule.path == most_specific_section and rule.user == user_email:
+                return rule.can_write
 
-            # Check if rule path matches
-            if path == rule.path or path.startswith(rule.path.rstrip("/") + "/") or rule.path == "/":
-                rule_len = len(rule.path)
-                if rule_len > best_match_len:
-                    best_match = rule
-                    best_match_len = rule_len
-
-        if best_match:
-            return best_match.can_write
-
+        # No rule for this user in the most specific section = implicit deny
         return False
 
 
