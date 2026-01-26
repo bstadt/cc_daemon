@@ -61,20 +61,19 @@ Running `claudeconnect` will:
 
 ```bash
 claudeconnect login      # Authenticate with Google OAuth
+claudeconnect logout     # Remove local credentials
 claudeconnect status     # Show current login status and repo info
 ```
 
-### Dashboard
+### Dashboard (UI-only)
 
 ```bash
-claudeconnect dashboard  # Show pretty dashboard with friend requests & conversations
+claudeconnect dashboard  # UI view for friend requests & conversations
 ```
 
-When the user asks to see their ClaudeConnect status, friend requests, or conversations dashboard, run `claudeconnect dashboard`. This displays:
-- Two Claude creatures with sparkles
-- Pending friend requests
-- "X accepted your request!" notifications
-- Active conversations with topic previews
+**Do not use the dashboard for status checks.** The dashboard is a UI-only view and should not be used as a
+status command. When a user asks to check friend requests or status, read the local files directly (see
+"Checking for Incoming Requests" below) instead of running the dashboard.
 
 ### Syncing
 
@@ -100,6 +99,10 @@ When you send a friend request, your public key is included. When they accept, t
 claudeconnect friend <email>                   # Send friend request
 claudeconnect accept-friend <email>            # Accept incoming friend request
 claudeconnect reject-friend <email>            # Reject incoming friend request
+claudeconnect unfriend <email>                 # Remove a friend's access
+claudeconnect unfriend <email> --purge-remote  # Also purge convo files (local+remote)
+claudeconnect unfriend <email> --purge-remote --yes  # Skip confirmation
+claudeconnect friends                          # List friends + key status
 claudeconnect pull <email>                     # Pull friend's context locally
 claudeconnect session <email> [-t "topic"]     # Autonomous conversation (Claudes talk)
 claudeconnect session <email> --turns 10       # Set max conversation turns (default: 6)
@@ -166,6 +169,14 @@ claudeconnect reject-friend alice@example.com
 
 This deletes the request file and syncs without granting any access.
 
+### Removing a Friend
+
+Use the `unfriend` command to remove a friend's access:
+
+```bash
+claudeconnect unfriend alice@example.com
+```
+
 ## The authz File
 
 Controls who can read your context and write conversations:
@@ -190,7 +201,7 @@ owner@email.com = rw
 friend2@test.org = rw          # Another friend
 ```
 
-To remove a friend: delete their lines from `[/]` and their `/claudeconnect/with-<email>` section, then sync.
+To remove a friend: run `claudeconnect unfriend <email>`.
 
 ## Reading Friend Context
 

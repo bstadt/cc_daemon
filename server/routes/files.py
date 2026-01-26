@@ -3,6 +3,7 @@
 from fastapi import APIRouter, HTTPException, Depends, Response, Request
 from fastapi.responses import StreamingResponse
 import logging
+import shutil
 
 from ..dependencies import get_current_user
 from ..auth import TokenPayload
@@ -24,8 +25,8 @@ async def download_file(
 
     Returns raw file bytes. Returns 403 if not authorized, 404 if not found.
     """
-    # Sanitize path - no directory traversal
-    if ".." in path:
+    # Sanitize path - no directory traversal or empty path
+    if not path or ".." in path:
         raise HTTPException(status_code=400, detail="Invalid path")
 
     # Check read permission
@@ -79,8 +80,8 @@ async def upload_file(
     Requires write permission via authz. Owner can always write.
     If uploading 'authz', validates the syntax before saving (owner only).
     """
-    # Sanitize path - no directory traversal
-    if ".." in path:
+    # Sanitize path - no directory traversal or empty path
+    if not path or ".." in path:
         raise HTTPException(status_code=400, detail="Invalid path")
 
     # Special handling for authz file - only owner can modify their own authz
@@ -142,11 +143,12 @@ async def delete_file(
     user_email: str,
     path: str,
     current_user: TokenPayload = Depends(get_current_user),
+    recursive: bool = False,
 ):
     """
-    Delete a file from user_email's storage.
+    Delete a file or directory from user_email's storage.
 
-    Requires write permission via authz. Owner can always delete.
+    Owner-only operation. Idempotent - returns success even if already gone.
     Idempotent - returns success even if already gone.
     """
     # Sanitize path - no directory traversal
@@ -157,7 +159,11 @@ async def delete_file(
     if path == "authz":
         raise HTTPException(status_code=400, detail="Cannot delete authz file")
 
-    # Check write permission (write permission implies delete permission)
+    # Only owners can delete files/directories
+    if user_email != current_user.email:
+        raise HTTPException(status_code=403, detail="Only owner can delete files")
+
+    # Check write permission (owner always has write)
     if not check_write_permission(user_email, current_user.email, "/" + path):
         raise HTTPException(status_code=403, detail="Not authorized to delete this file")
 
@@ -171,14 +177,25 @@ async def delete_file(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid path")
 
-    # Delete file if exists (idempotent)
+    # Delete file or directory if exists (idempotent)
     existed = False
+    deleted_count = 0
     if file_path.exists():
+        existed = True
         if file_path.is_file():
             file_path.unlink()
-            existed = True
+            deleted_count = 1
             logger.info(f"Deleted {path} from {user_email} by {current_user.email}")
+        elif file_path.is_dir():
+            if not recursive:
+                raise HTTPException(status_code=400, detail="Path is a directory; use recursive delete")
+            # Count files for reporting before delete
+            deleted_count = sum(1 for _ in file_path.rglob("*") if _.is_file())
+            shutil.rmtree(file_path)
+            logger.info(
+                f"Deleted directory {path} ({deleted_count} files) from {user_email} by {current_user.email}"
+            )
         else:
-            raise HTTPException(status_code=400, detail="Path is not a file")
+            raise HTTPException(status_code=400, detail="Path is not a file or directory")
 
-    return {"status": "ok", "path": path, "existed": existed}
+    return {"status": "ok", "path": path, "existed": existed, "deleted": deleted_count}

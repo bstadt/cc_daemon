@@ -10,19 +10,10 @@ import datetime
 import json
 import os
 import shutil
-import struct
 import subprocess
 import sys
 import time
 from pathlib import Path
-
-# Terminal detection - Unix only
-try:
-    import fcntl
-    import termios
-    HAS_TERMINAL_DETECTION = True
-except ImportError:
-    HAS_TERMINAL_DETECTION = False
 
 import click
 import httpx
@@ -42,82 +33,23 @@ def is_mock_mode() -> bool:
     """Check if running in mock/dev mode."""
     return os.environ.get("CC_MOCK_DIR") is not None
 
-# ANSI color codes - matching Claude Code's aesthetic
-CORAL = '\033[38;5;209m'      # Coral/salmon matching Claude Code
-CORAL_BG = '\033[48;5;209m'   # Coral background
-LIME = '\033[38;5;114m'       # Muted lime green for friend Claude
-LIME_BG = '\033[48;5;114m'    # Lime background
-WHITE = '\033[97m'            # Bright white for main text
-BOLD = '\033[1m'              # Bold text
-DIM = '\033[2m'               # Dim for secondary text
-BLACK = '\033[30m'            # Black for eyes
-BLACK_BG = '\033[40m'         # Black background for transparency
-YELLOW = '\033[38;5;228m'     # Soft yellow for sparkles
-RESET = '\033[0m'
-CLEAR = '\033[2J\033[H'       # Clear screen and move cursor to top
 
-
-def get_cell_aspect_ratio() -> float | None:
-    """Get the height/width ratio of a terminal cell.
-
-    Returns the aspect ratio (height/width) of terminal cells, or None if
-    detection is unavailable (e.g., Windows, some SSH sessions).
-
-    Standard terminal fonts have ratio ~2.0 (cells twice as tall as wide).
-    Squarer fonts have ratio ~1.5-1.8.
-    """
-    if not HAS_TERMINAL_DETECTION:
-        return None
-
-    try:
-        with open(os.ctermid(), 'r') as fd:
-            packed = fcntl.ioctl(fd, termios.TIOCGWINSZ, struct.pack('HHHH', 0, 0, 0, 0))
-            rows, cols, h_pixels, v_pixels = struct.unpack('HHHH', packed)
-
-            if h_pixels == 0 or v_pixels == 0 or rows == 0 or cols == 0:
-                return None  # Pixel dimensions not supported
-
-            cell_width = h_pixels / cols
-            cell_height = v_pixels / rows
-            return cell_height / cell_width
-    except (OSError, IOError):
-        return None
-
-
-def get_banner_style() -> str:
-    """Determine which banner style to use.
-
-    Returns "standard" or "compact" based on:
-    1. CC_BANNER env var override
-    2. Terminal program detection
-    3. Cell aspect ratio detection
-    4. Default to compact (safest)
-    """
-    # 1. Manual override via env var
-    banner_override = os.environ.get("CC_BANNER", "").lower()
-    if banner_override in ("compact", "standard"):
-        return banner_override
-
-    # 2. Detect terminal program
-    term_program = os.environ.get("TERM_PROGRAM", "").lower()
-
-    # Terminals known to render block chars correctly
-    good_terminals = ["ghostty", "iterm.app", "alacritty", "kitty", "wezterm", "hyper"]
-    if any(t in term_program for t in good_terminals):
-        return "standard"
-
-    # Terminals known to have issues (e.g., Apple Terminal reports 2.0 ratio but renders poorly)
-    problematic_terminals = ["apple_terminal"]
-    if any(t in term_program for t in problematic_terminals):
-        return "compact"
-
-    # 3. Fall back to aspect ratio detection
-    ratio = get_cell_aspect_ratio()
-    if ratio is not None and ratio >= 1.8:
-        return "standard"
-
-    # 4. Default to compact (safer for unknown terminals)
-    return "compact"
+from .terminal_ui import (
+    BOLD,
+    CLEAR,
+    CORAL,
+    DIM,
+    LIME,
+    RESET,
+    WHITE,
+    build_banner_box_lines,
+    get_dashboard_width,
+    get_persistent_banner_lines,
+    render_persistent_banner,
+    reset_persistent_banner,
+    run_claude_with_persistent_banner,
+    should_use_persistent_banner,
+)
 
 
 from .auth import login as do_login, ensure_valid_token, decode_jwt_payload, refresh_token
@@ -125,7 +57,9 @@ from .config import (
     get_config, get_tokens, Config, Tokens, is_logged_in, get_email,
     get_test_user_email, get_test_user_credentials, list_test_users,
     TestUserCredentials, TEST_USERS_DIR, get_shadow_dir, sanitize_email,
-    SERVER_URL, API_BASE_URL, email_to_repo_name,
+    SERVER_URL, API_BASE_URL, email_to_repo_name, get_active_account,
+    get_tokens_file, get_config_file, ACTIVE_ACCOUNT_FILE, LEGACY_TOKENS_FILE,
+    get_friends_dir, get_peers_dir,
 )
 from .scanner import scan_directory
 
@@ -140,6 +74,9 @@ try:
         get_key_fingerprint,
         save_friend_public_key,
         load_friend_public_key,
+        has_friend_public_key,
+        delete_friend_public_key,
+        delete_friend_master_key,
         encrypt_master_key_for_recipient,
         decrypt_received_master_key,
         save_friend_master_key,
@@ -162,35 +99,23 @@ def display_startup_banner(context_dir: Path, email: str, clear_screen: bool = T
     if clear_screen:
         print(CLEAR, end='')
 
-    style = get_banner_style()
     print()
-
-    if style == "compact":
-        # Compact style - Claude Code inspired, with colored background fill
-        # Two creatures side by side
-        double_creature = f"""
-{CORAL}▗{CORAL_BG} {RESET}{CORAL_BG}{BLACK}▗{RESET}{CORAL_BG}   {RESET}{CORAL_BG}{BLACK}▖{RESET}{CORAL_BG} {RESET}{CORAL}▖{RESET} {YELLOW}✱{RESET} {LIME}▗{LIME_BG} {RESET}{LIME_BG}{BLACK}▗{RESET}{LIME_BG}   {RESET}{LIME_BG}{BLACK}▖{RESET}{LIME_BG} {RESET}{LIME}▖{RESET}
- {CORAL_BG}       {RESET}     {LIME_BG}       {RESET}
-{CORAL}  ▘▘ ▝▝    {RESET} {LIME}  ▘▘ ▝▝    {RESET}
-"""
-        print(double_creature)
-
-    else:
-        # Standard style - original design
-        print(f" {CORAL}▐{BLACK_BG}▛███▜▌{RESET} {YELLOW}✱{RESET} {LIME}▐{BLACK_BG}▛███▜{RESET}{LIME}▌{RESET}   {WHITE}{BOLD}Claude Connect{RESET}")
-        print(f"{CORAL}▝▜█████▛▘{RESET} {LIME}▝▜█████▛▘{RESET}  {DIM}{email}{RESET}")
-        print(f"  {CORAL}▘▘ ▝▝{RESET}     {LIME}▘▘ ▝▝{RESET}")
+    width = get_dashboard_width()
+    for line in build_banner_box_lines(email, peer_name, width):
+        print(line)
 
     print()
 
     # For interactive sessions, show simplified banner and skip notifications
     if peer_name:
-        print(f"  {WHITE}{BOLD}Interactive session with {LIME}{peer_name}{RESET}")
-        print()
-        # Ensure terminal attributes are reset
         print(RESET, end='', flush=True)
         return
 
+    display_notifications(context_dir)
+
+
+def build_notifications_lines(context_dir: Path, total_width: int) -> list[str]:
+    """Build notification boxes sized to the given width."""
     # Check for friend requests and conversations
     # New structure per system2.md:
     # - Friend requests: claudeconnect/with-claudeconnect-io/
@@ -302,66 +227,85 @@ def display_startup_banner(context_dir: Path, email: str, clear_screen: bool = T
         recent_convos.sort(key=lambda x: x[2], reverse=True)
         recent_convos = recent_convos[:5]  # Limit to 5
 
-    # Display boxes side by side if there's activity
-    if friend_notifications or recent_convos:
-        W = 34  # Total box width
+    if not friend_notifications and not recent_convos:
+        return []
 
-        def truncate_with_ellipsis(text: str, max_len: int) -> str:
-            """Truncate text with ellipsis if it exceeds max_len."""
-            if len(text) <= max_len:
-                return text
-            return text[:max_len - 3] + "..."
+    total_width = max(40, total_width)
 
-        def make_box(title: str, items: list[str]) -> list[str]:
-            """Create a box with title and items, exactly W chars wide."""
-            lines = []
-            # Header: ┌─ TITLE ───────┐
-            title_truncated = truncate_with_ellipsis(title, W - 6)
-            dashes = W - 5 - len(title_truncated)
-            lines.append(f"┌─ {title_truncated} " + "─" * dashes + "┐")
-            # Items: │ content      │
-            max_content_len = W - 4  # 2 for "│ " and 2 for " │"
-            for item in items:
-                content = truncate_with_ellipsis(item, max_content_len)
-                padding = max_content_len - len(content)
-                lines.append(f"│ {content}" + " " * padding + " │")
-            # Footer
-            lines.append("└" + "─" * (W - 2) + "┘")
-            return lines
+    def truncate_with_ellipsis(text: str, max_len: int) -> str:
+        """Truncate text with ellipsis if it exceeds max_len."""
+        if len(text) <= max_len:
+            return text
+        return text[:max_len - 3] + "..."
 
-        fr_lines = []
-        if friend_notifications:
-            items = [f"∙ {notif[0]}" for notif in friend_notifications[:5]]
-            total = len(friend_notifications)
-            fr_lines = make_box(f"FRIEND REQUESTS ({total})", items)
+    def make_box(title: str, items: list[str], width: int) -> list[str]:
+        """Create a box with title and items, exactly width chars wide."""
+        lines = []
+        inner_width = width - 2
+        title_truncated = truncate_with_ellipsis(title, max(1, inner_width - 2))
+        title_text = f" {title_truncated} "
+        dashes = max(0, inner_width - len(title_text))
+        lines.append(f"{CORAL}┌{title_text}" + "─" * dashes + f"┐{RESET}")
+        max_content_len = max(1, inner_width - 2)
+        for item in items:
+            content = truncate_with_ellipsis(item, max_content_len)
+            padding = max_content_len - len(content)
+            lines.append(f"{CORAL}│{RESET} {content}" + " " * padding + f" {CORAL}│{RESET}")
+        lines.append(f"{CORAL}└" + "─" * inner_width + f"┘{RESET}")
+        return lines
 
-        conv_lines = []
-        if recent_convos:
-            items = []
-            for peer_email, topic, _ in recent_convos:
-                # Show email + topic preview
-                username = peer_email.split("@")[0] if "@" in peer_email else peer_email
-                if topic:
-                    items.append(f"∙ {username}: {topic}")
-                else:
-                    items.append(f"∙ {username}")
-            conv_lines = make_box("CONVERSATIONS", items)
+    fr_lines = []
+    if friend_notifications:
+        items = [f"∙ {notif[0]}" for notif in friend_notifications[:5]]
+        total = len(friend_notifications)
+        fr_lines = make_box(f"FRIEND REQUESTS ({total})", items, total_width)
 
-        # Print side by side or single
-        if fr_lines and conv_lines:
-            max_lines = max(len(fr_lines), len(conv_lines))
-            empty_space = " " * W
-            for i in range(max_lines):
-                left = fr_lines[i] if i < len(fr_lines) else empty_space
-                right = conv_lines[i] if i < len(conv_lines) else empty_space
-                print(f" {left}  {right}")
-        elif fr_lines:
-            for line in fr_lines:
-                print(f" {line}")
-        elif conv_lines:
-            for line in conv_lines:
-                print(f" {line}")
+    conv_lines = []
+    if recent_convos:
+        items = []
+        for peer_email, topic, _ in recent_convos:
+            username = peer_email.split("@")[0] if "@" in peer_email else peer_email
+            if topic:
+                items.append(f"∙ {username}: {topic}")
+            else:
+                items.append(f"∙ {username}")
+        conv_lines = make_box("CONVERSATIONS", items, total_width)
 
+    if fr_lines and conv_lines:
+        gap = 2
+        left_width = (total_width - gap) // 2
+        right_width = total_width - gap - left_width
+        if left_width < 20 or right_width < 20:
+            return fr_lines + [""] + conv_lines
+        fr_items = [f"∙ {notif[0]}" for notif in friend_notifications[:5]]
+        fr_lines = make_box(f"FRIEND REQUESTS ({len(friend_notifications)})", fr_items, left_width)
+        conv_items = []
+        for peer_email, topic, _ in recent_convos:
+            username = peer_email.split("@")[0] if "@" in peer_email else peer_email
+            if topic:
+                conv_items.append(f"∙ {username}: {topic}")
+            else:
+                conv_items.append(f"∙ {username}")
+        conv_lines = make_box("CONVERSATIONS", conv_items, right_width)
+        max_lines = max(len(fr_lines), len(conv_lines))
+        empty_left = " " * left_width
+        empty_right = " " * right_width
+        combined = []
+        for i in range(max_lines):
+            left = fr_lines[i] if i < len(fr_lines) else empty_left
+            right = conv_lines[i] if i < len(conv_lines) else empty_right
+            combined.append(left + " " * gap + right)
+        return combined
+
+    return fr_lines or conv_lines
+
+
+def display_notifications(context_dir: Path) -> None:
+    """Display friend request and conversation notifications."""
+    lines = build_notifications_lines(context_dir, get_dashboard_width())
+    if lines:
+        for line in lines:
+            print(line)
         print()
 
     # Ensure terminal attributes are reset at end of banner
@@ -898,6 +842,48 @@ def login():
 
 
 @cli.command()
+@click.option("--full", is_flag=True, help="Also remove local config for this account.")
+def logout(full: bool):
+    """Logout of Claude Connect and remove local credentials."""
+    active_email = get_active_account()
+    tokens = get_tokens()
+    if not active_email and tokens:
+        active_email = tokens.email
+    if not active_email and not LEGACY_TOKENS_FILE.exists():
+        print("Not logged in.")
+        return
+
+    print("Logging out of ClaudeConnect...")
+
+    if active_email:
+        tokens_file = get_tokens_file(active_email)
+        if tokens_file.exists():
+            tokens_file.unlink()
+            print(f"  Removed tokens for {active_email}")
+        else:
+            print(f"  No tokens found for {active_email}")
+        if full:
+            config_file = get_config_file(active_email)
+            if config_file.exists():
+                config_file.unlink()
+                print("  Removed config.json")
+            else:
+                print("  No config.json found")
+
+    if LEGACY_TOKENS_FILE.exists():
+        LEGACY_TOKENS_FILE.unlink()
+        print("  Removed legacy tokens.json")
+
+    if ACTIVE_ACCOUNT_FILE.exists():
+        ACTIVE_ACCOUNT_FILE.unlink()
+
+    if full:
+        print("\n✓ Logged out and cleared local configuration.")
+    else:
+        print("\n✓ Logged out. Run `claudeconnect login` to sign in again.")
+
+
+@cli.command()
 def status():
     """Show current status."""
     tokens = get_valid_token()
@@ -1076,13 +1062,29 @@ def start(system_prompt: str | None, initial_prompt: str | None, context_dir: Pa
             print("  Sync failed")
         sys.exit(1)
 
-    # Display startup banner with friend requests and conversations
-    display_startup_banner(context_dir, tokens.email, peer_name=peer)
+    # Prepare banner data before launching Claude
+    banner_lines = None
+    if should_use_persistent_banner():
+        width = get_dashboard_width()
+        header_lines = build_banner_box_lines(tokens.email, peer, width)
+        extra_lines = None
+        if not is_interactive:
+            extra_lines = build_notifications_lines(context_dir, width)
+        banner_lines = get_persistent_banner_lines(
+            tokens.email,
+            peer,
+            extra_lines=extra_lines,
+            header_lines=header_lines,
+        )
 
     # Start sync loop and Claude
     if not is_interactive:
         print("Starting Claude Code with sync enabled...")
         print(f"{DIM}(Sync runs every 30 seconds in background){RESET}\n")
+
+    # Render startup banner only in non-persistent mode
+    if not should_use_persistent_banner():
+        display_startup_banner(context_dir, tokens.email, peer_name=peer)
 
     # Ensure terminal state is clean before launching Claude
     # This prevents ANSI escape sequences from bleeding into Claude's rendering
@@ -1093,7 +1095,8 @@ def start(system_prompt: str | None, initial_prompt: str | None, context_dir: Pa
     asyncio.run(run_with_http_sync(
         context_dir, tokens.email, tokens.id_token,
         system_prompt=system_prompt, initial_prompt=initial_prompt,
-        session_id=session_id
+        session_id=session_id,
+        banner_lines=banner_lines,
     ))
 
 
@@ -1105,6 +1108,8 @@ async def run_with_http_sync(
     system_prompt: str | None = None,
     initial_prompt: str | None = None,
     session_id: str | None = None,
+    banner_lines: list[str] | None = None,
+    render_initial_banner: bool = True,
 ):
     """Run Claude Code with background HTTP sync loop."""
     stop_event = asyncio.Event()
@@ -1141,16 +1146,27 @@ async def run_with_http_sync(
         if initial_prompt:
             claude_args.append(initial_prompt)
 
-        # Run Claude Code
-        process = await asyncio.create_subprocess_exec(
-            *claude_args,
-            stdin=None,  # Inherit stdin
-            stdout=None,  # Inherit stdout
-            stderr=None,  # Inherit stderr
-            cwd=context_dir,
-        )
+        use_persistent_banner = banner_lines is not None and should_use_persistent_banner()
 
-        await process.wait()
+        if use_persistent_banner:
+            await asyncio.to_thread(
+                run_claude_with_persistent_banner,
+                claude_args,
+                context_dir,
+                banner_lines,
+                render_initial_banner,
+            )
+        else:
+            # Run Claude Code
+            process = await asyncio.create_subprocess_exec(
+                *claude_args,
+                stdin=None,  # Inherit stdin
+                stdout=None,  # Inherit stdout
+                stderr=None,  # Inherit stderr
+                cwd=context_dir,
+            )
+
+            await process.wait()
 
     except FileNotFoundError:
         print("Error: 'claude' command not found.")
@@ -1161,6 +1177,8 @@ async def run_with_http_sync(
         # Stop sync loop
         stop_event.set()
         await sync_task
+        if banner_lines is not None:
+            reset_persistent_banner()
         print("\nSync stopped. Goodbye!")
 
 
@@ -1781,6 +1799,104 @@ def add_friend_to_authz(authz_path: Path, my_email: str, peer_email: str) -> boo
     return changes_made
 
 
+def remove_friend_from_authz(authz_path: Path, peer_email: str) -> bool:
+    """
+    Remove a friend's access from the authz file.
+
+    Removes:
+    - Read access from [/] section
+    - Write access from [/claudeconnect/with-{peer}] section
+    - Legacy write access from [/claudeconnect/conversations] if present
+
+    Args:
+        authz_path: Path to authz file
+        peer_email: Friend's email to remove
+
+    Returns:
+        True if changes were made, False otherwise.
+    """
+    authz_content = authz_path.read_text()
+    lines = authz_content.split('\n')
+    new_lines = []
+    changes_made = False
+
+    peer_email_repo_name = email_to_repo_name(peer_email)
+    peer_with_section = f"[/claudeconnect/with-{peer_email_repo_name}]"
+    legacy_section = "[/claudeconnect/conversations]"
+
+    current_section = None
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith('['):
+            current_section = stripped
+
+        if current_section in ('[/]', peer_with_section, legacy_section):
+            if '=' in stripped:
+                left = stripped.split('=', 1)[0].strip()
+                if left == peer_email:
+                    if current_section == '[/]':
+                        print(f"  Removed {peer_email} read access from [/]")
+                    elif current_section == peer_with_section:
+                        print(f"  Removed {peer_email} write access from {peer_with_section}")
+                    else:
+                        print(f"  Removed {peer_email} write access from {legacy_section}")
+                    changes_made = True
+                    continue
+
+        new_lines.append(line)
+
+    if changes_made:
+        authz_path.write_text('\n'.join(new_lines))
+    else:
+        print(f"  {peer_email} not found in your authz")
+
+    return changes_made
+
+
+def parse_friends_from_authz(authz_content: str, owner_email: str | None = None) -> list[str]:
+    """
+    Extract friend emails from the [/] section of an authz file.
+
+    Args:
+        authz_content: Raw authz file contents
+        owner_email: If provided, exclude this email from results
+
+    Returns:
+        Ordered list of friend emails with read access
+    """
+    friends: list[str] = []
+    seen: set[str] = set()
+    current_section = None
+
+    for line in authz_content.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("["):
+            current_section = stripped
+            continue
+        if current_section != "[/]":
+            continue
+        if "=" not in stripped:
+            continue
+
+        left, right = stripped.split("=", 1)
+        email = left.strip()
+        perms = right.strip()
+        if "@" not in email:
+            continue
+        if "r" not in perms:
+            continue
+        if owner_email and email == owner_email:
+            continue
+        if email not in seen:
+            friends.append(email)
+            seen.add(email)
+
+    return friends
+
+
 def fetch_peer_public_key(peer_email: str) -> bytes | None:
     """
     Fetch a peer's public key from the server API.
@@ -2099,7 +2215,201 @@ def accept_friend(peer_email: str):
 
     print(f"\n✓ Friend request accepted!")
     print(f"  {peer_email} can now read your context and send you conversations.")
+
+
+@cli.command()
+@click.argument("peer_email")
+@click.option(
+    "--purge-remote",
+    is_flag=True,
+    help="Delete conversation files with this friend from server and local cache.",
+)
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    help="Skip confirmation prompt for --purge-remote.",
+)
+def unfriend(peer_email: str, purge_remote: bool, yes: bool):
+    """Remove a friend's access from your authz and sync the change."""
+    tokens = get_valid_token()
+    if not tokens:
+        print("Not logged in or token expired. Run `claudeconnect login` first.")
+        sys.exit(1)
+
+    config = get_config()
+    if not config.context_dir:
+        print("No context directory configured. Run `claudeconnect init` first.")
+        sys.exit(1)
+
+    peer_email = peer_email.strip().lower()
+    my_email = tokens.email
+    peer_email_sanitized = email_to_repo_name(peer_email)
+
+    if peer_email == my_email:
+        print("Cannot unfriend yourself.")
+        sys.exit(1)
+
+    print(f"Removing {peer_email} from your friends...")
+
+    authz_path = Path(config.context_dir) / "authz"
+    if not authz_path.exists():
+        print("Error: authz file not found. Run `claudeconnect init` first.")
+        sys.exit(1)
+
+    authz_changed = remove_friend_from_authz(authz_path, peer_email)
+    if authz_changed:
+        print("  Uploading authz changes...")
+        authz_content = authz_path.read_text()
+        if not upload_authz_http(tokens.id_token, my_email, authz_content):
+            print("Failed to upload authz")
+            sys.exit(1)
+    else:
+        print("  No authz changes needed.")
+
+    removed_public = delete_friend_public_key(peer_email, my_email)
+    removed_master = delete_friend_master_key(peer_email, my_email)
+    if removed_public or removed_master:
+        removed_parts = []
+        if removed_public:
+            removed_parts.append("public key")
+        if removed_master:
+            removed_parts.append("master key")
+        print(f"  Removed local {peer_email} {' and '.join(removed_parts)}")
+
+    if purge_remote and not yes:
+        if not click.confirm(
+            "Are you sure? This will delete peer context and conversations peer had with your Claude.",
+            default=False,
+        ):
+            print("  Purge cancelled.")
+            purge_remote = False
+
+    if purge_remote:
+        print("  Purging conversation files...")
+        context_dir = Path(config.context_dir)
+        conv_rel_dir = Path("claudeconnect") / f"with-{peer_email_sanitized}"
+        conv_dir = context_dir / conv_rel_dir
+        if conv_dir.exists():
+            shutil.rmtree(conv_dir)
+            print(f"  Removed local conversations at {conv_rel_dir}")
+
+        shadow_dir = get_shadow_dir(my_email)
+        shadow_conv_dir = shadow_dir / conv_rel_dir
+        if shadow_conv_dir.exists():
+            shutil.rmtree(shadow_conv_dir)
+            print(f"  Removed shadow conversations at {shadow_conv_dir}")
+
+        peers_dir = get_peers_dir(my_email)
+        peer_cache_dir = peers_dir / peer_email_sanitized
+        if peer_cache_dir.exists():
+            shutil.rmtree(peer_cache_dir)
+            print(f"  Removed local peer cache at {peer_cache_dir}")
+
+        try:
+            del_resp = httpx.delete(
+                f"{API_BASE_URL}/files/{my_email}/{conv_rel_dir}",
+                headers={"Authorization": f"Bearer {tokens.id_token}"},
+                params={"recursive": "true"},
+                timeout=60,
+            )
+            if del_resp.status_code == 200:
+                deleted = del_resp.json().get("deleted", 0)
+                print(f"  Deleted {deleted} remote conversation file(s)")
+            else:
+                print(f"  Warning: Could not delete remote directory: {del_resp.text}")
+                raise RuntimeError("remote-delete-failed")
+        except Exception:
+            try:
+                response = httpx.get(
+                    f"{API_BASE_URL}/manifest/{my_email}",
+                    headers={"Authorization": f"Bearer {tokens.id_token}"},
+                    timeout=60,
+                )
+                if response.status_code == 200:
+                    manifest = response.json()
+                    paths = [
+                        f["path"] for f in manifest.get("files", [])
+                        if f.get("path", "").startswith(str(conv_rel_dir) + "/")
+                    ]
+                    deleted = 0
+                    for path in paths:
+                        fallback_resp = httpx.delete(
+                            f"{API_BASE_URL}/files/{my_email}/{path}",
+                            headers={"Authorization": f"Bearer {tokens.id_token}"},
+                            timeout=30,
+                        )
+                        if fallback_resp.status_code in (200, 404):
+                            deleted += 1
+                        else:
+                            print(f"  Warning: Could not delete {path}: {fallback_resp.text}")
+                    print(f"  Deleted {deleted} remote conversation file(s)")
+                else:
+                    print(f"  Warning: Could not fetch manifest: {response.text}")
+            except Exception as e:
+                print(f"  Warning: Could not purge remote conversations: {e}")
+
+    print(f"\n✓ {peer_email} can no longer access your context.")
     print(f"  Pull their context with: claudeconnect pull {peer_email}")
+
+
+@cli.command()
+def friends():
+    """List friends who have access and key status."""
+    config = get_config()
+    if not config.context_dir:
+        print("No context directory configured. Run `claudeconnect init` first.")
+        sys.exit(1)
+
+    context_dir = Path(config.context_dir)
+    authz_path = context_dir / "authz"
+    if not authz_path.exists():
+        print("Error: authz file not found. Run `claudeconnect init` first.")
+        sys.exit(1)
+
+    tokens = get_tokens()
+    owner_email = None
+    if tokens and tokens.email:
+        owner_email = tokens.email
+    elif config.email:
+        owner_email = config.email
+    else:
+        owner_email = get_email()
+
+    authz_content = authz_path.read_text()
+    friends_list = parse_friends_from_authz(authz_content, owner_email)
+
+    if not friends_list:
+        print("No friends found in authz.")
+        return
+
+    print("Friends (from authz):")
+    if owner_email:
+        for friend in friends_list:
+            pub_status = "pub" if has_friend_public_key(friend, owner_email) else "no-pub"
+            master_status = "master" if has_friend_master_key(friend, owner_email) else "no-master"
+            print(f"  - {friend} [{pub_status}, {master_status}]")
+
+        friends_dir = get_friends_dir(owner_email)
+        if friends_dir.exists():
+            sanitized_authz = {email_to_repo_name(friend) for friend in friends_list}
+            stale_pub = sorted(
+                {path.stem for path in friends_dir.glob("*.pub")} - sanitized_authz
+            )
+            stale_master = sorted(
+                {path.stem for path in friends_dir.glob("*.master")} - sanitized_authz
+            )
+            if stale_pub or stale_master:
+                print()
+                print("Stale keys (sanitized emails not in authz):")
+                if stale_pub:
+                    print(f"  - public: {', '.join(stale_pub)}")
+                if stale_master:
+                    print(f"  - master: {', '.join(stale_master)}")
+    else:
+        for friend in friends_list:
+            print(f"  - {friend}")
+        print("  (No active account email; skipping key status)")
 
 
 def auto_accept_reciprocal_requests(

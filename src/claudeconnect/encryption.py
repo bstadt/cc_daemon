@@ -429,6 +429,33 @@ def has_friend_master_key(
     return key_path.exists()
 
 
+def delete_friend_master_key(
+    friend_email: str,
+    our_email: str,
+    friends_dir: Optional[Path] = None,
+) -> bool:
+    """
+    Delete a friend's master key.
+
+    Args:
+        friend_email: Friend's email address
+        our_email: Our email address (for account-scoped storage)
+        friends_dir: Directory containing friend keys (override)
+
+    Returns:
+        True if key was deleted, False if it didn't exist
+    """
+    friends_dir = friends_dir or get_friends_dir(our_email)
+
+    safe_email = email_to_repo_name(friend_email)
+    key_path = friends_dir / f"{safe_email}.master"
+
+    if key_path.exists():
+        key_path.unlink()
+        return True
+    return False
+
+
 # =============================================================================
 # Friend Key Management
 # =============================================================================
@@ -490,6 +517,30 @@ def load_friend_public_key(
         raise FileNotFoundError(f"Public key for {friend_email} not found at {key_path}")
 
     return key_path.read_bytes()
+
+
+def has_friend_public_key(
+    friend_email: str,
+    our_email: str,
+    friends_dir: Optional[Path] = None,
+) -> bool:
+    """
+    Check if we have a friend's public key.
+
+    Args:
+        friend_email: Friend's email address
+        our_email: Our email address (for account-scoped storage)
+        friends_dir: Directory containing friend keys (override)
+
+    Returns:
+        True if we have their public key
+    """
+    friends_dir = friends_dir or get_friends_dir(our_email)
+
+    safe_email = email_to_repo_name(friend_email)
+    key_path = friends_dir / f"{safe_email}.pub"
+
+    return key_path.exists()
 
 
 def list_friends(our_email: str, friends_dir: Optional[Path] = None) -> list[str]:
