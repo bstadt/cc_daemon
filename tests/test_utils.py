@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Optional
 
 from conf import ALICE_EMAIL, BOB_EMAIL, SERVER, SERVER_URL, API_BASE_URL, SSH_KEY_PATH
-from claudeconnect.config import Tokens
+from claudeconnect.config import Tokens, get_config
 from claudeconnect.auth import decode_jwt_payload
 
 SSH_KEY = Path(SSH_KEY_PATH)
@@ -367,18 +367,16 @@ def create_philosophy_file(temp_dir: Path):
 
 
 def upload_file_to_server(owner_email: str, path: str, content: bytes):
-    """Upload a file to the server."""
-    token = get_id_token()
-    response = httpx.put(
-        f"{API_BASE_URL}/files/{owner_email}/{path}",
-        content=content,
-        headers={"Authorization": f"Bearer {token}"},
-        timeout=30,
-    )
-    if response.status_code == 200:
-        log(f"  Uploaded {path} to server")
-    else:
-        raise RuntimeError(f"Failed to upload {path}: {response.text}")
+    """Upload a file to the server via normal sync flow."""
+    config = get_config()
+    if not config.context_dir:
+        raise RuntimeError("No context dir configured - run claudeconnect init first")
+    context_dir = Path(config.context_dir)
+    target_path = context_dir / path
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_bytes(content)
+    sync_files(context_dir)
+    log(f"  Uploaded {path} to server")
 
 
 # ===========================================
@@ -414,18 +412,9 @@ def update_authz_restrict_secret(temp_dir: Path, owner_email: str, friend_email:
     authz_file.write_text(updated_content)
     log("  Updated local authz")
 
-    # Upload updated authz to server
-    token = get_id_token()
-    response = httpx.put(
-        f"{API_BASE_URL}/files/{owner_email}/authz",
-        content=updated_content.encode(),
-        headers={"Authorization": f"Bearer {token}"},
-        timeout=30,
-    )
-    if response.status_code == 200:
-        log("  Uploaded authz to server")
-    else:
-        raise RuntimeError(f"Failed to upload authz: {response.text}")
+    # Upload updated authz to server via normal sync flow
+    sync_files(temp_dir)
+    log("  Uploaded authz to server")
 
 
 def update_authz_add_philosophy(temp_dir: Path, owner_email: str, friend_email: str):

@@ -1750,7 +1750,13 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
 
         for jsonl_path, metadata in new_transcripts:
             # Import to local context (sync_http will upload to our repo automatically)
-            transcript_path = import_transcript(jsonl_path, metadata, email, context_dir)
+            transcript_path = import_transcript(
+                jsonl_path,
+                metadata,
+                email,
+                context_dir,
+                id_token,
+            )
 
             if transcript_path is None:
                 continue

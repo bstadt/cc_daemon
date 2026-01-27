@@ -285,7 +285,7 @@ def upload_file_http(email: str, path: str, content: bytes, id_token: str, encry
         content: File content (plaintext)
         id_token: JWT for authentication
         encrypt_for: If set, encrypt content using this user's master key
-        use_friend_key: If True, encrypt using friend's master key (for transcript delivery to peer's repo)
+        use_friend_key: If True, encrypt using friend's master key (for friend delivery)
         our_email: Our email (required when use_friend_key=True, for account-scoped key lookup)
     """
     encrypted_content = content
@@ -591,12 +591,19 @@ async def run_session(
     print(f"\nUploading to {peer_email}'s repo...")
     if tokens:
         peer_transcript_rel_path = f"claudeconnect/with-{email_to_repo_name(our_email)}/{transcript_filename}"
-        if upload_file_http(peer_email, peer_transcript_rel_path, transcript.encode(), tokens.id_token, encrypt_for=peer_email, use_friend_key=True, our_email=our_email):
+        if upload_file_http(
+            peer_email,
+            peer_transcript_rel_path,
+            transcript.encode(),
+            tokens.id_token,
+            encrypt_for=peer_email,
+            use_friend_key=True,
+            our_email=our_email,
+        ):
             print(f"  Uploaded to {peer_email}'s repo")
         else:
             print(f"  Warning: Failed to upload to peer's repo")
             print(f"  (This is expected if you don't have write access to their with-{email_to_repo_name(our_email)} folder)")
-        print(f"  (This is expected if you don't have write access to their with-{email_to_repo_name(our_email)} folder)")
 
     return True, str(our_transcript_path)
 
@@ -855,7 +862,15 @@ async def run_dual_session(
     print(f"\nUploading to {peer_email}'s repo...")
     if tokens:
         peer_transcript_rel_path = f"claudeconnect/with-{email_to_repo_name(our_email)}/{transcript_filename}"
-        if upload_file_http(peer_email, peer_transcript_rel_path, transcript.encode(), tokens.id_token, encrypt_for=peer_email, use_friend_key=True, our_email=our_email):
+        if upload_file_http(
+            peer_email,
+            peer_transcript_rel_path,
+            transcript.encode(),
+            tokens.id_token,
+            encrypt_for=peer_email,
+            use_friend_key=True,
+            our_email=our_email,
+        ):
             print(f"  Uploaded to {peer_email}'s repo")
         else:
             print(f"  Warning: Failed to upload to peer's repo")
