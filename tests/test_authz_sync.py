@@ -27,6 +27,7 @@ import pytest
 import httpx
 
 from conf import ALICE_EMAIL, BOB_EMAIL, SERVER, SERVER_URL, SSH_KEY_PATH
+from test_utils import login as login_user
 
 SSH_KEY = Path(SSH_KEY_PATH)
 CC_CONFIG_DIR = Path.home() / ".claude-connect"
@@ -127,8 +128,23 @@ def clean_server():
 def clean_client():
     """Remove local ~/.claude-connect."""
     log("Removing local ~/.claude-connect...")
+    preserved_tokens: dict[str, dict] = {}
+    for email in TEST_ACCOUNTS:
+        tokens_file = ACCOUNTS_DIR / email / "tokens.json"
+        if tokens_file.exists():
+            try:
+                preserved_tokens[email] = json.loads(tokens_file.read_text())
+            except (json.JSONDecodeError, OSError):
+                pass
     if CC_CONFIG_DIR.exists():
         shutil.rmtree(CC_CONFIG_DIR)
+    if preserved_tokens:
+        for email, data in preserved_tokens.items():
+            account_dir = ACCOUNTS_DIR / email
+            account_dir.mkdir(parents=True, exist_ok=True)
+            tokens_file = account_dir / "tokens.json"
+            tokens_file.write_text(json.dumps(data, indent=2))
+            tokens_file.chmod(0o600)
     log("Local config removed.")
 
 
@@ -183,13 +199,11 @@ def test_authz_sync(temp_dir):
     log("Step 2: Login and init")
     log("=" * 50)
     os.chdir(temp_dir)
-    wait_for_user("Please login with a test account")
-    claudeconnect("login", cwd=temp_dir)
+    login_user("Alice", temp_dir)
 
     email = get_current_email()
     log(f"Logged in as: {email}")
 
-    wait_for_user("Ready to init")
     claudeconnect("init", cwd=temp_dir, input_text="y\n")
 
     # Verify authz was created locally
