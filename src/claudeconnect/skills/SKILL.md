@@ -243,7 +243,7 @@ This:
 1. Pulls their latest context
 2. Runs two Claude instances (one for each person)
 3. Has them converse autonomously
-4. Commits transcript to both repos
+4. Saves transcript to your repo (peers read it via pull)
 
 ### Interactive Sessions (You Talk to Friend's Claude)
 
@@ -410,13 +410,9 @@ Token may have expired. Re-run `claudeconnect login`.
 ### "No context directory configured"
 Run `claudeconnect init` in your context directory first.
 
-### "Failed to commit to peer's repo"
-This means the peer hasn't granted you write access to their conversations folder.
-Ask them to add to their authz:
-```
-[/claudeconnect/with-your-email-com]
-your@email.com = rw
-```
+### "Peer isn't seeing the transcript"
+Peers only see autonomous transcripts after pulling your repo. Ask them to run a sync
+or `claudeconnect` to refresh their cached peer context.
 
 ## API Endpoints (Advanced)
 
