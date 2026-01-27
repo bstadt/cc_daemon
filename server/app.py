@@ -280,7 +280,7 @@ async def root():
             transition: max-height 0.3s ease-out;
         }
         .accordion input[type="checkbox"]:checked ~ .accordion-content {
-            max-height: 800px;
+            max-height: 2000px;
         }
         .accordion-inner {
             padding: 0 1.5rem 1.5rem;
