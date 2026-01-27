@@ -587,6 +587,24 @@ async def run_session(
     else:
         print("  Warning: No valid tokens for upload")
 
+    # Upload transcript to peer's repo via HTTP
+    print(f"\nUploading to {peer_email}'s repo...")
+    if tokens:
+        peer_transcript_rel_path = f"claudeconnect/with-{email_to_repo_name(our_email)}/{transcript_filename}"
+        if upload_file_http(
+            peer_email,
+            peer_transcript_rel_path,
+            transcript.encode(),
+            tokens.id_token,
+            encrypt_for=peer_email,
+            use_friend_key=True,
+            our_email=our_email,
+        ):
+            print(f"  Uploaded to {peer_email}'s repo")
+        else:
+            print(f"  Warning: Failed to upload to peer's repo")
+            print(f"  (This is expected if you don't have write access to their with-{email_to_repo_name(our_email)} folder)")
+
     return True, str(our_transcript_path)
 
 
@@ -840,6 +858,24 @@ async def run_dual_session(
     else:
         print("  Warning: No valid tokens for upload")
 
+    # Upload transcript to peer's repo via HTTP
+    print(f"\nUploading to {peer_email}'s repo...")
+    if tokens:
+        peer_transcript_rel_path = f"claudeconnect/with-{email_to_repo_name(our_email)}/{transcript_filename}"
+        if upload_file_http(
+            peer_email,
+            peer_transcript_rel_path,
+            transcript.encode(),
+            tokens.id_token,
+            encrypt_for=peer_email,
+            use_friend_key=True,
+            our_email=our_email,
+        ):
+            print(f"  Uploaded to {peer_email}'s repo")
+        else:
+            print(f"  Warning: Failed to upload to peer's repo")
+            print(f"  (This is expected if you don't have write access to their with-{email_to_repo_name(our_email)} folder)")
+
     return True, str(our_transcript_path)
 
 
@@ -910,7 +946,7 @@ def run_interactive_session(
     with a Claude instance that has access to the peer's context.
 
     The conversation is automatically saved by Claude Code to ~/.claude/projects/
-    and will be synced to your repo within 60-90 seconds after the session ends.
+    and will be synced to both repos within 60-90 seconds after the session ends.
 
     Args:
         peer_email: The peer's email address
@@ -1024,7 +1060,7 @@ def run_interactive_session(
     print(f"\n✓ Interactive session started!")
     print(f"\n  You're now chatting with {peer_email}'s Claude in the new window.")
     print(f"  When you're done, press Ctrl+D to exit.")
-    print(f"\n  The conversation will be automatically saved and synced to your repo")
+    print(f"\n  The conversation will be automatically saved and synced to both repos")
     print(f"  within 60-90 seconds after you exit.")
 
     return True, f"Interactive session with {peer_email} started"

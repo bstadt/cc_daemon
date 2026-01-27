@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .config import email_to_repo_name, get_pending_sessions_dir
+from .session import upload_file_http
 
 
 def _format_timestamp_for_filename(iso_timestamp: str) -> str:
@@ -312,6 +313,7 @@ def import_transcript(
     metadata: dict,
     our_email: str,
     context_dir: Path,
+    id_token: str | None = None,
 ) -> Path | None:
     """Import a single transcript to local context.
 
@@ -344,6 +346,24 @@ def import_transcript(
 
         # Save transcript
         transcript_path.write_text(markdown_content)
+
+        # Upload transcript to peer's repo if token available
+        if id_token:
+            peer_transcript_rel_path = (
+                f"claudeconnect/with-{email_to_repo_name(our_email)}/{filename}"
+            )
+            try:
+                upload_file_http(
+                    peer_email,
+                    peer_transcript_rel_path,
+                    markdown_content.encode(),
+                    id_token,
+                    encrypt_for=peer_email,
+                    use_friend_key=True,
+                    our_email=our_email,
+                )
+            except Exception:
+                pass
 
         # Update pending session metadata (don't delete yet; cleanup handles inactivity)
         pending_file_path = metadata.get("pending_file")
