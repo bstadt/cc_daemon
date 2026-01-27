@@ -5,6 +5,7 @@ Fetches posts from a Substack blog and converts them to markdown files.
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 import time
@@ -200,19 +201,66 @@ def extract_post_metadata(soup: BeautifulSoup, url: str) -> dict:
     subtitle_elem = soup.find('h3', class_='subtitle') or soup.find('p', class_='subtitle')
     data['subtitle'] = subtitle_elem.get_text(strip=True) if subtitle_elem else ""
 
-    # Extract date from meta or URL
+    # Extract date - try multiple sources
+    data['date'] = None
+
+    # 1. Try article:published_time meta tag
     date_meta = soup.find('meta', property='article:published_time')
     if date_meta and date_meta.get('content'):
         date_str = date_meta['content'][:10]  # YYYY-MM-DD
         data['date'] = datetime.strptime(date_str, '%Y-%m-%d')
-    else:
-        # Try to find date in the page
+
+    # 2. Try JSON-LD structured data (common in Substack)
+    if not data['date']:
+        for script in soup.find_all('script', type='application/ld+json'):
+            try:
+                ld_data = json.loads(script.string)
+                # Handle both single object and array of objects
+                if isinstance(ld_data, list):
+                    for item in ld_data:
+                        if item.get('datePublished'):
+                            date_str = item['datePublished'][:10]
+                            data['date'] = datetime.strptime(date_str, '%Y-%m-%d')
+                            break
+                elif ld_data.get('datePublished'):
+                    date_str = ld_data['datePublished'][:10]
+                    data['date'] = datetime.strptime(date_str, '%Y-%m-%d')
+                if data['date']:
+                    break
+            except (json.JSONDecodeError, ValueError, KeyError, TypeError):
+                continue
+
+    # 3. Try time element with datetime attribute
+    if not data['date']:
         time_elem = soup.find('time')
         if time_elem and time_elem.get('datetime'):
             date_str = time_elem['datetime'][:10]
             data['date'] = datetime.strptime(date_str, '%Y-%m-%d')
-        else:
-            data['date'] = datetime.now()
+
+    # 4. Try og:article:published_time meta tag
+    if not data['date']:
+        og_meta = soup.find('meta', property='og:article:published_time')
+        if og_meta and og_meta.get('content'):
+            date_str = og_meta['content'][:10]
+            data['date'] = datetime.strptime(date_str, '%Y-%m-%d')
+
+    # 5. Look for date in post header/info sections
+    if not data['date']:
+        # Substack often has date in a specific class
+        date_elem = soup.find(class_='post-date') or soup.find(class_='pencraft')
+        if date_elem:
+            # Try to parse common date formats like "Jan 15, 2024"
+            date_text = date_elem.get_text(strip=True)
+            for fmt in ['%b %d, %Y', '%B %d, %Y', '%Y-%m-%d', '%d %b %Y']:
+                try:
+                    data['date'] = datetime.strptime(date_text, fmt)
+                    break
+                except ValueError:
+                    continue
+
+    # Warn if no date found
+    if not data['date']:
+        print(f"Warning: Could not extract date from post: {url}", file=sys.stderr)
 
     # Generate slug
     data['slug'] = slugify(data['title'])
@@ -328,10 +376,15 @@ def import_substack_blog(username: str, context_dir: Path, delay: float = 0.01, 
     print(f"\nImporting {len(all_urls)} posts...")
 
     imported_count = 0
+    total = len(all_urls)
 
     for i, url in enumerate(all_urls, 1):
         try:
-            print(f"  [{i}/{len(all_urls)}] {url}")
+            # Show progress on a single updating line
+            # Truncate URL if too long to fit nicely
+            max_url_len = 100
+            display_url = url if len(url) <= max_url_len else url[:max_url_len-3] + "..."
+            print(f"\r  [{i}/{total}] {display_url:<{max_url_len}}", end="", flush=True)
 
             # Fetch and parse post
             soup = fetch_substack_post(url)
@@ -341,7 +394,7 @@ def import_substack_blog(username: str, context_dir: Path, delay: float = 0.01, 
             content = convert_to_markdown(metadata['body'])
 
             # Create markdown file
-            date_str = metadata['date'].strftime('%Y-%m-%d')
+            date_str = metadata['date'].strftime('%Y-%m-%d') if metadata['date'] else "unknown-date"
             filename = f"{date_str}-{metadata['slug']}.md"
             filepath = output_dir / filename
 
@@ -366,7 +419,11 @@ def import_substack_blog(username: str, context_dir: Path, delay: float = 0.01, 
                 time.sleep(delay)
 
         except Exception as e:
-            print(f"  Error importing {url}: {e}", file=sys.stderr)
+            # Print error on new line, then continue progress line
+            print(f"\n  Error importing {url}: {e}", file=sys.stderr)
             continue
+
+    # Move to new line after progress is complete
+    print()
 
     return imported_count, output_dir
