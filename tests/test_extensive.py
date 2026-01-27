@@ -422,18 +422,12 @@ def main():
         log("--- Verifying state after pull ---")
         assert verify_state(state, alice_email, bob_email, "alice"), "State verification failed"
 
-        # Bob verifies transcript and accepts Alice's reciprocal friend request
+        # Bob verifies transcript (sync auto-accepts Alice's reciprocal friend request)
         os.chdir(temp2)
         login("Bob", temp2)
         init_account("Bob", temp2)
-        sync_files(temp2)
+        sync_files(temp2)  # Auto-accepts reciprocal request from Alice
         assert verify_transcript("Bob", temp2, alice_email), "Bob transcript not found"
-
-        # Bob needs to accept Alice's reciprocal friend request to get her master key
-        # (Alice sent this when she accepted Bob's original request)
-        log("Bob accepting Alice's reciprocal friend request...")
-        check_friend_request(temp2, alice_email)
-        accept_friend_request(temp2, alice_email)
 
         log("")
         log("PHASE 1 COMPLETE")
