@@ -549,6 +549,8 @@ def test_interactive_session_flow(temp_dirs):
 
     Run with: pytest tests/test_interactive_sessions.py -s -m integration
     """
+    if os.environ.get("CC_INTERACTIVE_TEST") != "1":
+        pytest.skip("Interactive test requires manual Terminal session. Set CC_INTERACTIVE_TEST=1 to run.")
     temp1, temp2 = temp_dirs
     run_interactive_session_flow(temp1, temp2)
 

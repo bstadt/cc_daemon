@@ -133,11 +133,11 @@ def test_peer_pull_only_downloads_changes(temp_dirs):
     clean_server()
     clean_client()
 
-    # Bob setup
-    os.chdir(temp2)
-    login("Alice", temp2)
-    alice_email = init_account("Alice", temp2)
-    verify_init_structure("Alice", temp2)
+    # Alice setup
+    os.chdir(temp1)
+    login("Alice", temp1)
+    alice_email = init_account("Alice", temp1)
+    verify_init_structure("Alice", temp1)
 
     # Bob setup
     os.chdir(temp2)
