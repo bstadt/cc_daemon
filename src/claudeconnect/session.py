@@ -1060,7 +1060,53 @@ def run_interactive_session(
     print(f"\n✓ Interactive session started!")
     print(f"\n  You're now chatting with {peer_email}'s Claude in the new window.")
     print(f"  When you're done, press Ctrl+D to exit.")
-    print(f"\n  The conversation will be automatically saved and synced to both repos")
-    print(f"  within 60-90 seconds after you exit.")
+    print(f"\n  After the session ends, this command will wait to import the transcript.")
+    print(f"  (Press Ctrl+C here to skip waiting and import manually later with `claudeconnect sync`)")
 
-    return True, f"Interactive session with {peer_email} started"
+    # Wait for transcript to appear and import it
+    from .transcripts import discover_new_interactive_transcripts, import_transcript
+
+    print(f"\n  Waiting for transcript...")
+
+    # Poll for transcript (check every 10 seconds for up to 5 minutes)
+    max_attempts = 30
+    our_context_dir = Path(config.context_dir)
+
+    for attempt in range(max_attempts):
+        time.sleep(10)
+
+        try:
+            # Check if transcript exists
+            new_transcripts = discover_new_interactive_transcripts(our_email, our_context_dir)
+
+            for jsonl_path, metadata in new_transcripts:
+                # Check if this is our session
+                if metadata.get("session_id") == session_id:
+                    print(f"\n✓ Transcript found! Importing...")
+                    transcript_path = import_transcript(
+                        jsonl_path,
+                        metadata,
+                        our_email,
+                        our_context_dir,
+                        tokens.id_token,
+                    )
+                    if transcript_path:
+                        print(f"  Saved to: {transcript_path}")
+                        print(f"\n  The transcript has been uploaded to both your repo and {peer_email}'s repo.")
+                        print(f"  Run `claudeconnect sync` to upload any other changes.")
+                        return True, f"Transcript saved to {transcript_path}"
+                    else:
+                        print(f"  Warning: Failed to import transcript")
+                        return True, "Session complete but transcript import failed"
+        except KeyboardInterrupt:
+            print(f"\n\n  Skipping transcript import. Run `claudeconnect sync` later to import it.")
+            return True, "Session started (import skipped)"
+        except Exception as e:
+            pass  # Continue polling
+
+    # Timeout
+    print(f"\n  Transcript not found after 5 minutes.")
+    print(f"  The session may still be running, or Claude Code may not have saved it yet.")
+    print(f"  Run `claudeconnect sync` later to import the transcript.")
+
+    return True, f"Interactive session with {peer_email} started (import timeout)"
