@@ -147,6 +147,10 @@ def manually_import_transcripts(context_dir: Path, our_email: str):
     """
     log("Manually triggering transcript discovery and import...")
 
+    # Get token for uploading to peer's repo
+    tokens = get_valid_token()
+    id_token = tokens.id_token if tokens else None
+
     # Discover new transcripts
     new_transcripts = discover_new_interactive_transcripts(our_email, context_dir)
 
@@ -162,8 +166,8 @@ def manually_import_transcripts(context_dir: Path, our_email: str):
     for jsonl_path, metadata in new_transcripts:
         log(f"  Importing {jsonl_path.name}...")
 
-        # Import to local context
-        transcript_path = import_transcript(jsonl_path, metadata, our_email, context_dir)
+        # Import to local context (and upload to peer's repo if token available)
+        transcript_path = import_transcript(jsonl_path, metadata, our_email, context_dir, id_token)
 
         if transcript_path:
             log(f"    → Saved to {transcript_path}")
@@ -456,30 +460,38 @@ def run_interactive_session_flow(temp1: Path, temp2: Path) -> None:
     login("Bob", temp2)
     init_account("Bob", temp2)
 
-    # Wait for Bob's transcript to be auto-discovered and imported
-    log("  Waiting for Bob's transcript auto-discovery...")
+    # Bob gets the transcript via normal sync (Alice uploaded it to Bob's repo)
+    log("  Syncing Bob's context to pull transcript from server...")
     alice_repo_name = email_to_repo_name(alice_email)
     bob_repo_name = email_to_repo_name(bob_email)
 
-    bob_transcript_path = wait_for_transcript_discovery(temp2, alice_email, bob_email, timeout_seconds=120)
-
-    if bob_transcript_path is None:
-        raise RuntimeError("Bob's transcript was not discovered/imported within timeout")
-    log(f"  ✓ Bob's transcript imported: {bob_transcript_path}")
-
-    # Verify Bob's transcript content
-    log("  Verifying Bob's transcript content...")
-    bob_content_valid = verify_transcript_content(bob_transcript_path, alice_email, bob_email)
-    if not bob_content_valid:
-        raise RuntimeError("Bob's transcript content validation failed")
-    log("  ✓ Bob's transcript content looks good")
-
-    # Sync Bob's transcript to his server
-    log("  Syncing Bob's transcript to server...")
     sync_files(temp2)
 
-    # Verify transcript on Bob's server repo
-    log("  Verifying transcript uploaded to Bob's server repo...")
+    # Check for transcript in Bob's local context
+    bob_conv_dir = temp2 / "claudeconnect" / f"with-{alice_repo_name}"
+    log(f"  Checking for transcript in {bob_conv_dir}...")
+
+    if not bob_conv_dir.exists():
+        raise RuntimeError(f"Bob's conversation directory doesn't exist: {bob_conv_dir}")
+
+    bob_transcripts = [p for p in bob_conv_dir.glob("*.md") if p.name != "README.md"]
+    if len(bob_transcripts) == 0:
+        raise RuntimeError("No transcripts found in Bob's context after sync")
+
+    bob_transcript_path = max(bob_transcripts, key=lambda p: p.stat().st_mtime)
+    log(f"  ✓ Bob's transcript synced: {bob_transcript_path}")
+
+    # Verify Bob can read the transcript
+    log("  Verifying Bob's transcript content...")
+    bob_content = bob_transcript_path.read_text()
+    if len(bob_content) <= 100:
+        raise RuntimeError("Bob's transcript appears empty or too short")
+    if "# Interactive Session:" not in bob_content:
+        raise RuntimeError("Bob's transcript missing header")
+    log("  ✓ Bob's transcript content looks good")
+
+    # Verify transcript is on Bob's server repo (Alice uploaded it during import)
+    log("  Verifying transcript on Bob's server repo...")
     bob_server_ok = verify_transcript_on_server(bob_email, alice_email)
     if not bob_server_ok:
         raise RuntimeError("Transcript not found on Bob's server repo")
@@ -540,8 +552,6 @@ def run_interactive_session_flow(temp1: Path, temp2: Path) -> None:
         raise RuntimeError("Bob's peer cache transcript missing header")
 
     log(f"  ✓ Both transcripts accessible via peer pull")
-
-    bob_content = bob_transcript_path.read_text()
 
     # Verify context isolation (issue #85 fix)
     log("\n[12/12] Verifying context isolation (no cross-contamination)...")
