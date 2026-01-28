@@ -1517,9 +1517,11 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
                         decrypted_local += 1
                 except Exception:
                     pass
+            stat = file_path.stat()
             context_files[rel_path] = {
                 "path": rel_path,
-                "mtime": file_path.stat().st_mtime,
+                "mtime": stat.st_mtime,
+                "size": stat.st_size,
             }
 
     context_hash_cache: dict[str, str | None] = {}
@@ -1569,6 +1571,20 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
     to_upload = []  # (path, context_path, shadow_path)
     to_download = []  # (path, shadow_path, context_path, server_info)
     all_paths = set(server_files.keys()) | set(shadow_files.keys()) | set(context_files.keys())
+    max_upload_bytes = 1_000_000
+    skipped_large: list[str] = []
+
+    def queue_upload(path: str, context_info: dict, context_path: Path, shadow_path: Path) -> None:
+        size = context_info.get("size") if context_info else None
+        if size is None:
+            try:
+                size = context_path.stat().st_size
+            except OSError:
+                size = None
+        if size is not None and size > max_upload_bytes:
+            skipped_large.append(path)
+            return
+        to_upload.append((path, context_path, shadow_path))
 
     for path in all_paths:
         server_info = server_files.get(path)
@@ -1588,21 +1604,21 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
                 if shadow_info and context_matches_shadow(path, context_path, shadow_path):
                     to_download.append((path, shadow_path, context_path, server_info))
                 else:
-                    to_upload.append((path, context_path, shadow_path))
+                    queue_upload(path, context_info, context_path, shadow_path)
             else:
                 # Server is newer - download
                 to_download.append((path, shadow_path, context_path, server_info))
 
         # Case 2: File exists locally but not on server - upload
         elif context_info and not server_info:
-            to_upload.append((path, context_path, shadow_path))
+            queue_upload(path, context_info, context_path, shadow_path)
 
         # Case 3: File in shadow matches server
         elif shadow_info and server_info and shadow_info["sha256"] == server_info["sha256"]:
             if context_info and context_info["mtime"] > shadow_info["mtime"]:
                 # Context changed - upload only if content changed
                 if not context_matches_shadow(path, context_path, shadow_path):
-                    to_upload.append((path, context_path, shadow_path))
+                    queue_upload(path, context_info, context_path, shadow_path)
             elif not context_info:
                 # Context missing - decrypt from shadow to context
                 to_download.append((path, shadow_path, context_path, server_info))
@@ -1611,6 +1627,10 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
     if verbose and decrypted_local:
         print(f"  Decrypted {decrypted_local} local .md file(s).")
     if total_ops == 0:
+        if skipped_large and verbose:
+            print(
+                f"  {len(skipped_large)} file(s) not uploaded because they're too big (>1MB)."
+            )
         return True
 
     # Progress tracking
@@ -1730,6 +1750,8 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
     # Clear progress line and print summary
     if verbose:
         print(f"\r  Downloaded {downloaded} file(s), uploaded {uploaded} file(s)" + " " * 40)
+        if skipped_large:
+            print(f"  {len(skipped_large)} file(s) not uploaded because they're too big (>1MB).")
 
         if errors:
             print(f"  Warnings ({len(errors)}):")
