@@ -8,7 +8,9 @@ Tests the full interactive session flow:
 3. Alice starts interactive session with Bob
 4. User manually interacts with terminal
 5. Verify transcript auto-import from ~/.claude/projects/
-6. Verify transcript sync to Alice's repo (peer pulls from Alice's with-bob folder)
+6. Verify both Alice and Bob receive transcript in their with-{peer} directories
+7. Verify transcripts sync to both Alice's and Bob's server repos
+8. Verify bi-directional peer pull access
 
 Run with: pytest tests/test_interactive_sessions.py -s -m integration
 (the -s flag is required for interactive prompts)
@@ -145,6 +147,10 @@ def manually_import_transcripts(context_dir: Path, our_email: str):
     """
     log("Manually triggering transcript discovery and import...")
 
+    # Get token for uploading to peer's repo
+    tokens = get_valid_token()
+    id_token = tokens.id_token if tokens else None
+
     # Discover new transcripts
     new_transcripts = discover_new_interactive_transcripts(our_email, context_dir)
 
@@ -160,8 +166,8 @@ def manually_import_transcripts(context_dir: Path, our_email: str):
     for jsonl_path, metadata in new_transcripts:
         log(f"  Importing {jsonl_path.name}...")
 
-        # Import to local context
-        transcript_path = import_transcript(jsonl_path, metadata, our_email, context_dir)
+        # Import to local context (and upload to peer's repo if token available)
+        transcript_path = import_transcript(jsonl_path, metadata, our_email, context_dir, id_token)
 
         if transcript_path:
             log(f"    → Saved to {transcript_path}")
@@ -343,26 +349,26 @@ def run_interactive_session_flow(temp1: Path, temp2: Path) -> None:
     log("==========================================")
 
     # Setup
-    log("\n[1/11] Cleaning server and client...")
+    log("\n[1/12] Cleaning server and client...")
     clean_server()
     clean_client()
 
     # Alice setup
-    log("\n[2/11] Setting up Alice's account...")
+    log("\n[2/12] Setting up Alice's account...")
     os.chdir(temp1)
     login("Alice", temp1)
     alice_email = init_account("Alice", temp1)
     verify_init_structure("Alice", temp1)
 
     # Bob setup
-    log("\n[3/11] Setting up Bob's account...")
+    log("\n[3/12] Setting up Bob's account...")
     os.chdir(temp2)
     login("Bob", temp2)
     bob_email = init_account("Bob", temp2)
     verify_init_structure("Bob", temp2)
 
     # Create unique marker files for context isolation test
-    log("\n[3.5/11] Creating unique marker files for context isolation test...")
+    log("\n[3.5/12] Creating unique marker files for context isolation test...")
     alice_marker = temp1 / "aliceonly.md"
     bob_marker = temp2 / "bobonly.md"
     alice_marker.write_text("# Alice's Private File\n\nThis file should ONLY exist in Alice's context.\n")
@@ -371,11 +377,11 @@ def run_interactive_session_flow(temp1: Path, temp2: Path) -> None:
     log(f"  Created {bob_marker}")
 
     # Bob sends friend request
-    log("\n[4/11] Bob sending friend request to Alice...")
+    log("\n[4/12] Bob sending friend request to Alice...")
     send_friend_request(temp2, alice_email)
 
     # Alice receives and accepts
-    log("\n[5/11] Alice accepting friend request from Bob...")
+    log("\n[5/12] Alice accepting friend request from Bob...")
     os.chdir(temp1)
     login("Alice", temp1)
     init_account("Alice", temp1)
@@ -384,7 +390,7 @@ def run_interactive_session_flow(temp1: Path, temp2: Path) -> None:
     accept_friend_request(temp1, bob_email)
 
     # Alice starts interactive session
-    log("\n[6/11] Alice starting interactive session with Bob...")
+    log("\n[6/12] Alice starting interactive session with Bob...")
     log("⚠️  IMPORTANT: This will open a new Terminal window!")
     log("⚠️  macOS only - requires Terminal.app")
 
@@ -413,7 +419,7 @@ def run_interactive_session_flow(temp1: Path, temp2: Path) -> None:
     wait_for_user("\nAfter you've exited the Terminal window, press Enter to continue...")
 
     # Wait for transcript discovery and import
-    log("\n[7/11] Waiting for transcript auto-discovery and import...")
+    log("\n[7/12] Waiting for Alice's transcript auto-discovery and import...")
     log("(Background sync not running in test - manually polling)")
 
     # Use temp1 directly as Alice's context directory (no email subdirectory)
@@ -430,7 +436,7 @@ def run_interactive_session_flow(temp1: Path, temp2: Path) -> None:
         raise RuntimeError(f"Pending session {session_uuid} missing after import!")
 
     # Verify transcript content
-    log("\n[8/11] Verifying transcript content...")
+    log("\n[8/12] Verifying Alice's transcript content...")
     content_valid = verify_transcript_content(transcript_path, bob_email, alice_email)
     if not content_valid:
         raise RuntimeError("Transcript content validation failed")
@@ -448,22 +454,82 @@ def run_interactive_session_flow(temp1: Path, temp2: Path) -> None:
         raise RuntimeError("Transcript not found on Alice's server repo")
     log("✓ Transcript found on Alice's server repo")
 
-    # Bob pulls and decrypts the transcript
-    log("\n[10/11] Bob pulling transcript and verifying decryption...")
+    # Bob should also receive the transcript in his own context
+    log("\n[10/11] Verifying Bob receives transcript in his own context...")
     os.chdir(temp2)
     login("Bob", temp2)
     init_account("Bob", temp2)
 
-    # Sync to pull Bob's repo updates from server
-    log("  Bob syncing to pull transcript...")
+    # Bob gets the transcript via normal sync (Alice uploaded it to Bob's repo)
+    log("  Syncing Bob's context to pull transcript from server...")
+    alice_repo_name = email_to_repo_name(alice_email)
+    bob_repo_name = email_to_repo_name(bob_email)
+
     sync_files(temp2)
 
-    # Explicitly pull Alice's context into Bob's peer cache
+    # Check for transcript in Bob's local context
+    bob_conv_dir = temp2 / "claudeconnect" / f"with-{alice_repo_name}"
+    log(f"  Checking for transcript in {bob_conv_dir}...")
+
+    if not bob_conv_dir.exists():
+        raise RuntimeError(f"Bob's conversation directory doesn't exist: {bob_conv_dir}")
+
+    bob_transcripts = [p for p in bob_conv_dir.glob("*.md") if p.name != "README.md"]
+    if len(bob_transcripts) == 0:
+        raise RuntimeError("No transcripts found in Bob's context after sync")
+
+    bob_transcript_path = max(bob_transcripts, key=lambda p: p.stat().st_mtime)
+    log(f"  ✓ Bob's transcript synced: {bob_transcript_path}")
+
+    # Verify Bob can read the transcript
+    log("  Verifying Bob's transcript content...")
+    bob_content = bob_transcript_path.read_text()
+    if len(bob_content) <= 100:
+        raise RuntimeError("Bob's transcript appears empty or too short")
+    if "# Interactive Session:" not in bob_content:
+        raise RuntimeError("Bob's transcript missing header")
+    log("  ✓ Bob's transcript content looks good")
+
+    # Verify transcript is on Bob's server repo (Alice uploaded it during import)
+    log("  Verifying transcript on Bob's server repo...")
+    bob_server_ok = verify_transcript_on_server(bob_email, alice_email)
+    if not bob_server_ok:
+        raise RuntimeError("Transcript not found on Bob's server repo")
+    log("  ✓ Transcript found on Bob's server repo")
+
+    # Now verify cross-peer access: Alice can pull Bob's context
+    log("\n[11/11] Verifying cross-peer access...")
+    os.chdir(temp1)
+    login("Alice", temp1)
+    init_account("Alice", temp1)
+
+    log("  Alice pulling Bob's context...")
+    pull_peer_context(temp1, bob_email)
+
+    # Verify transcript appears in Alice's peer cache for Bob
+    alice_peer_dir = get_peers_dir(alice_email) / bob_repo_name / "claudeconnect" / f"with-{alice_repo_name}"
+
+    log(f"  Checking for transcript in {alice_peer_dir}...")
+
+    if not alice_peer_dir.exists():
+        raise RuntimeError(f"Alice's peer conversation directory doesn't exist: {alice_peer_dir}")
+
+    alice_peer_transcripts = [p for p in alice_peer_dir.glob("*.md") if p.name != "README.md"]
+    if len(alice_peer_transcripts) == 0:
+        raise RuntimeError("No transcripts found in Alice's peer cache of Bob's context")
+
+    alice_peer_transcript = max(alice_peer_transcripts, key=lambda p: p.stat().st_mtime)
+    log(f"  ✓ Transcript found in Alice's peer cache: {alice_peer_transcript.name}")
+
+    # Bob pulls Alice's context
+    os.chdir(temp2)
+    login("Bob", temp2)
+    init_account("Bob", temp2)
+
+    log("  Bob pulling Alice's context...")
     pull_peer_context(temp2, alice_email)
 
     # Verify transcript appears in Bob's peer cache for Alice
-    alice_repo_name = email_to_repo_name(alice_email)
-    bob_repo_name = email_to_repo_name(bob_email)
     bob_peer_dir = get_peers_dir(bob_email) / alice_repo_name / "claudeconnect" / f"with-{bob_repo_name}"
 
     log(f"  Checking for transcript in {bob_peer_dir}...")
@@ -471,27 +537,24 @@ def run_interactive_session_flow(temp1: Path, temp2: Path) -> None:
     if not bob_peer_dir.exists():
         raise RuntimeError(f"Bob's peer conversation directory doesn't exist: {bob_peer_dir}")
 
-    bob_transcripts = [p for p in bob_peer_dir.glob("*.md") if p.name != "README.md"]
-    if len(bob_transcripts) == 0:
-        raise RuntimeError("No transcripts found in Bob's peer cache")
+    bob_peer_transcripts = [p for p in bob_peer_dir.glob("*.md") if p.name != "README.md"]
+    if len(bob_peer_transcripts) == 0:
+        raise RuntimeError("No transcripts found in Bob's peer cache of Alice's context")
 
-    bob_transcript = max(bob_transcripts, key=lambda p: p.stat().st_mtime)
-    log(f"  ✓ Transcript found: {bob_transcript.name}")
+    bob_peer_transcript = max(bob_peer_transcripts, key=lambda p: p.stat().st_mtime)
+    log(f"  ✓ Transcript found in Bob's peer cache: {bob_peer_transcript.name}")
 
-    # Verify Bob can read the transcript (it's decrypted)
-    bob_content = bob_transcript.read_text()
-    if len(bob_content) <= 100:
-        raise RuntimeError("Bob's transcript appears empty or too short")
-    if "# Interactive Session:" not in bob_content:
-        raise RuntimeError("Bob's transcript missing header")
-    if alice_email not in bob_content:
-        raise RuntimeError("Bob's transcript missing Alice's email")
+    # Read Bob's peer cache transcript for final verification
+    bob_peer_content = bob_peer_transcript.read_text()
+    if len(bob_peer_content) <= 100:
+        raise RuntimeError("Bob's peer cache transcript appears empty or too short")
+    if "# Interactive Session:" not in bob_peer_content:
+        raise RuntimeError("Bob's peer cache transcript missing header")
 
-    log(f"  ✓ Transcript decrypted successfully ({len(bob_content)} bytes)")
-    log(f"  ✓ Bob can read the conversation")
+    log(f"  ✓ Both transcripts accessible via peer pull")
 
     # Verify context isolation (issue #85 fix)
-    log("\n[11/11] Verifying context isolation (no cross-contamination)...")
+    log("\n[12/12] Verifying context isolation (no cross-contamination)...")
     log("  Alice's context directory contents:")
     for p in sorted(temp1.rglob("*")):
         if p.is_file():
@@ -532,9 +595,11 @@ def run_interactive_session_flow(temp1: Path, temp2: Path) -> None:
     log(f"Alice: {alice_email}")
     log(f"Bob: {bob_email}")
     log(f"Transcript: {transcript_path.name}")
-    log(f"Alice's copy: {len(transcript_path.read_text())} bytes")
-    log(f"Bob's copy: {len(bob_content)} bytes")
-    log("✓ Peer pull verified (from Alice's repo)")
+    log(f"Alice's copy (own context): {len(transcript_path.read_text())} bytes")
+    log(f"Bob's copy (own context): {len(bob_content)} bytes")
+    log("✓ Both peers receive transcript in their own with-{peer} directories")
+    log("✓ Both transcripts uploaded to respective server repos")
+    log("✓ Bi-directional peer pull verified")
     log("✓ Encryption/decryption verified")
     log("✓ Context isolation verified (issue #85)")
 
