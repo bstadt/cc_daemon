@@ -95,12 +95,15 @@ def get_terminal_width(default: int = 80) -> int:
 
 def get_dashboard_width() -> int:
     """Return the target dashboard width (matches Claude Code box width)."""
-    override = os.environ.get("CC_DASHBOARD_WIDTH", "").strip()
-    if override.isdigit():
-        return max(40, int(override))
+    override = os.environ.get("CC_DASHBOARD_WIDTH", "").strip().lower()
     terminal_width = get_terminal_width()
+    max_width = max(1, terminal_width - 2)
+    if override in ("full", "max"):
+        return max_width
+    if override.isdigit():
+        return max(1, min(int(override), max_width))
     target = 80
-    return max(40, min(target, terminal_width - 2))
+    return max(1, min(target, max_width))
 
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
@@ -174,7 +177,9 @@ def build_banner_box_lines(email: str, peer_name: str | None, width: int) -> lis
         lines.append(f"Interactive session with {LIME}{peer_name}{RESET}")
 
     max_art_width = max(len(_strip_ansi(line)) for line in lines) if lines else 0
-    width = max(width, max_art_width + 4, 40)
+    terminal_width = get_terminal_width()
+    max_width = max(1, terminal_width - 2)
+    width = min(max(width, max_art_width + 4, 40), max_width)
     inner_width = width - 2
     content_width = inner_width - 2
 
