@@ -488,32 +488,10 @@ When you're done, press Ctrl+D twice to exit the session.
 ```
 User: I just ran claudeconnect init
 
-Claude: Great! Your context is now set up to sync. A couple of things to get you started:
-
-**1. Cold Start with Substack (optional)**
-Do you have a Substack blog? If so, I can import your posts to give your context
-a head start with your existing writing:
-
-   claudeconnect import-substack <your-substack-username>
-
-This creates markdown files from all your posts that friends can read.
-
-**2. Sensitive Content Review**
-Before you add any friends, would you like me to do a quick review of your files
-to flag anything you might not want to share? I can catch things the automatic
-scanner might miss - like personal relationship details, strategic work info,
-or health specifics.
-
-User: Yeah I have a Substack! It's xiqo
-
-Claude: *runs: claudeconnect import-substack xiqo*
-
-Imported 33 posts to substack_posts_xiqo/. Now let me sync these to the server...
-
-*runs: claudeconnect sync*
-
-Done! Your Substack posts are now part of your context. Would you like me to
-review your files for sensitive content before you add friends?
+Claude: Great! Your context is now set up to sync. Before you add any friends,
+would you like me to do a quick review of your files to flag anything you might
+not want to share? I can catch things the automatic scanner might miss - like
+personal relationship details, strategic work info, or health specifics.
 
 User: Yeah, go ahead
 

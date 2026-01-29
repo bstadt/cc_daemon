@@ -334,11 +334,11 @@ def convert_to_markdown(soup: BeautifulSoup) -> str:
     return content.strip()
 
 
-def import_substack_blog(username: str, context_dir: Path, delay: float = 0.01, max_posts: int | None = None) -> tuple[int, Path]:
+def import_substack_blog(source: str, context_dir: Path, delay: float = 0.01, max_posts: int | None = None) -> tuple[int, Path]:
     """Import all posts from a Substack blog to context directory.
 
     Args:
-        username: Substack username or URL
+        source: Substack username or URL (URL preferred for custom domains)
         context_dir: Context directory where files will be saved
         delay: Delay between API requests in seconds
         max_posts: Maximum number of posts to import (None = all posts)
@@ -350,19 +350,19 @@ def import_substack_blog(username: str, context_dir: Path, delay: float = 0.01, 
         httpx.HTTPStatusError: If API requests fail
         OSError: If directory creation or file writing fails
     """
-    # Normalize username to extract just the username part
-    base_url = normalize_substack_url(username)
+    # Normalize source to extract the name part
+    base_url = normalize_substack_url(source)
     parsed = urlparse(base_url)
-    username_clean = parsed.netloc.split('.')[0]  # Extract "xiqo" from "xiqo.substack.com"
+    name = parsed.netloc.split('.')[0]  # Extract "xiqo" from "xiqo.substack.com"
 
     # Create output directory
-    output_dir = context_dir / f"substack_posts_{username_clean}"
+    output_dir = context_dir / f"substack_posts_{name}"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Importing Substack posts to: {output_dir}")
 
     # Get all post URLs
-    posts_by_section = list_all_posts(username, delay=delay, max_requests=max_posts//50 + 1 if max_posts is not None else None)
+    posts_by_section = list_all_posts(source, delay=delay, max_requests=max_posts//50 + 1 if max_posts is not None else None)
 
     # Flatten to single list of URLs
     all_urls = []
@@ -382,7 +382,7 @@ def import_substack_blog(username: str, context_dir: Path, delay: float = 0.01, 
         try:
             # Show progress on a single updating line
             # Truncate URL if too long to fit nicely
-            max_url_len = 100
+            max_url_len = 60
             display_url = url if len(url) <= max_url_len else url[:max_url_len-3] + "..."
             print(f"\r  [{i}/{total}] {display_url:<{max_url_len}}", end="", flush=True)
 
