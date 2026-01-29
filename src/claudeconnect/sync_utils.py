@@ -21,6 +21,7 @@ def write_context_if_decryptable(
     decrypt_fn: Callable[[bytes], bytes] | None,
     is_encrypted_fn: Callable[[bytes], bool],
     error_prefix: str,
+    emit_error: bool = True,
 ) -> bool:
     """Write plaintext to context if possible, never ciphertext."""
     if not is_encrypted_fn(encrypted_content):
@@ -29,13 +30,15 @@ def write_context_if_decryptable(
         return True
 
     if not can_decrypt or decrypt_fn is None:
-        print(f"  Error: Could not decrypt {path} ({error_prefix}): missing master key")
+        if emit_error:
+            print(f"  Error: Could not decrypt {path} ({error_prefix}): missing master key")
         return False
 
     try:
         plaintext = decrypt_fn(encrypted_content)
     except Exception as exc:
-        print(f"  Error: Could not decrypt {path} ({error_prefix}): {exc}")
+        if emit_error:
+            print(f"  Error: Could not decrypt {path} ({error_prefix}): {exc}")
         return False
 
     context_path.parent.mkdir(parents=True, exist_ok=True)
