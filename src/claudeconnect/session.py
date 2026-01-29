@@ -25,6 +25,7 @@ from .config import (
     SERVER_URL, API_BASE_URL, email_to_repo_name, get_active_account,
     get_pending_sessions_dir,
 )
+from .sync_utils import write_shadow_file, write_context_if_decryptable
 
 # Encryption imports (optional)
 try:
@@ -208,26 +209,25 @@ def pull_peer_context_http(peer_email: str, id_token: str, our_email: str, max_w
             if response.status_code == 200:
                 encrypted_content = response.content
                 shadow_path = peer_shadow_dir / path
-                shadow_path.parent.mkdir(parents=True, exist_ok=True)
-                shadow_path.write_bytes(encrypted_content)
+                write_shadow_file(shadow_path, encrypted_content)
 
                 local_path = peer_dir / path
-                local_path.parent.mkdir(parents=True, exist_ok=True)
-                if HAS_ENCRYPTION and is_encrypted_file(encrypted_content):
-                    if has_friend_master_key(peer_email, our_email):
-                        try:
-                            plaintext = decrypt_file_with_friend_master_key(
-                                encrypted_content, peer_email, our_email
-                            )
-                            local_path.write_bytes(plaintext)
-                        except Exception as e:
-                            print(f"  Warning: Could not decrypt {path}: {e}")
-                            local_path.write_bytes(encrypted_content)
-                    else:
-                        print(f"  Warning: No master key for {peer_email}, cannot decrypt {path}")
-                        local_path.write_bytes(encrypted_content)
-                else:
-                    local_path.write_bytes(encrypted_content)
+                is_encrypted_fn = is_encrypted_file if HAS_ENCRYPTION else (lambda _: False)
+                can_decrypt = HAS_ENCRYPTION and has_friend_master_key(peer_email, our_email)
+                decrypt_fn = (
+                    (lambda data: decrypt_file_with_friend_master_key(data, peer_email, our_email))
+                    if can_decrypt
+                    else None
+                )
+                write_context_if_decryptable(
+                    encrypted_content=encrypted_content,
+                    context_path=local_path,
+                    path=path,
+                    can_decrypt=can_decrypt,
+                    decrypt_fn=decrypt_fn,
+                    is_encrypted_fn=is_encrypted_fn,
+                    error_prefix="peer context",
+                )
                 return True
             return False
         except Exception:
@@ -256,16 +256,22 @@ def pull_peer_context_http(peer_email: str, id_token: str, our_email: str, max_w
         if not shadow_path.exists():
             continue
         encrypted_content = shadow_path.read_bytes()
-        if HAS_ENCRYPTION and is_encrypted_file(encrypted_content) and has_friend_master_key(peer_email, our_email):
-            try:
-                plaintext = decrypt_file_with_friend_master_key(encrypted_content, peer_email, our_email)
-                local_path.parent.mkdir(parents=True, exist_ok=True)
-                local_path.write_bytes(plaintext)
-                continue
-            except Exception:
-                pass
-        local_path.parent.mkdir(parents=True, exist_ok=True)
-        local_path.write_bytes(encrypted_content)
+        is_encrypted_fn = is_encrypted_file if HAS_ENCRYPTION else (lambda _: False)
+        can_decrypt = HAS_ENCRYPTION and has_friend_master_key(peer_email, our_email)
+        decrypt_fn = (
+            (lambda data: decrypt_file_with_friend_master_key(data, peer_email, our_email))
+            if can_decrypt
+            else None
+        )
+        write_context_if_decryptable(
+            encrypted_content=encrypted_content,
+            context_path=local_path,
+            path=path,
+            can_decrypt=can_decrypt,
+            decrypt_fn=decrypt_fn,
+            is_encrypted_fn=is_encrypted_fn,
+            error_prefix="peer context",
+        )
 
     for path in removed:
         cached_files.pop(path, None)

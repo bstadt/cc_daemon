@@ -64,6 +64,7 @@ from .config import (
     get_tokens_file, get_config_file, ACTIVE_ACCOUNT_FILE, LEGACY_TOKENS_FILE,
     get_friends_dir, get_peers_dir,
 )
+from .sync_utils import write_shadow_file, write_context_if_decryptable
 # Encryption is optional - only available if cryptography is installed
 try:
     from .encryption import (
@@ -1515,8 +1516,8 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
                         plaintext = decrypt_file_with_master_key(encrypted_content, email)
                         file_path.write_bytes(plaintext)
                         decrypted_local += 1
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"  Error: Could not decrypt {rel_path} (local context): {e}")
             stat = file_path.stat()
             context_files[rel_path] = {
                 "path": rel_path,
@@ -1696,21 +1697,29 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
                 encrypted_content = response.content
 
                 # Save encrypted to shadow
-                shadow_path.parent.mkdir(parents=True, exist_ok=True)
-                shadow_path.write_bytes(encrypted_content)
+                write_shadow_file(shadow_path, encrypted_content)
 
                 # Decrypt and save to context
-                decrypted_content = encrypted_content
                 if HAS_ENCRYPTION:
-                    try:
-                        from .encryption import is_encrypted_file, decrypt_file_with_master_key
-                        if is_encrypted_file(encrypted_content):
-                            decrypted_content = decrypt_file_with_master_key(encrypted_content, email)
-                    except Exception:
-                        pass  # Keep as-is if decryption fails
+                    from .encryption import is_encrypted_file, decrypt_file_with_master_key
+                    is_encrypted_fn = is_encrypted_file
+                    decrypt_fn = lambda data: decrypt_file_with_master_key(data, email)
+                else:
+                    is_encrypted_fn = lambda _: False
+                    decrypt_fn = None
 
-                context_path.parent.mkdir(parents=True, exist_ok=True)
-                context_path.write_bytes(decrypted_content)
+                wrote_context = write_context_if_decryptable(
+                    encrypted_content=encrypted_content,
+                    context_path=context_path,
+                    path=path,
+                    can_decrypt=HAS_ENCRYPTION,
+                    decrypt_fn=decrypt_fn,
+                    is_encrypted_fn=is_encrypted_fn,
+                    error_prefix="local context",
+                )
+                if not wrote_context:
+                    with lock:
+                        errors.append(f"Decrypt {path}: failed")
                 with lock:
                     downloaded += 1
                 print_progress("DOWN", path)
