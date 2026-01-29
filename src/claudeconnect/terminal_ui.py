@@ -99,8 +99,7 @@ def get_dashboard_width() -> int:
     if override.isdigit():
         return max(40, int(override))
     terminal_width = get_terminal_width()
-    target = 80
-    return max(40, min(target, terminal_width - 2))
+    return max(40, terminal_width - 2)
 
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
@@ -115,6 +114,23 @@ def _pad_visible(text: str, width: int) -> str:
     if visible >= width:
         return text
     return text + (" " * (width - visible))
+
+
+def should_use_legacy_banner() -> bool:
+    """Check if legacy PTY banner rendering should be used."""
+    override = os.environ.get("CC_LEGACY_BANNER", "").lower()
+    if override in ("1", "true", "yes"):
+        return True
+    if override in ("0", "false", "no"):
+        return False
+
+    persist = os.environ.get("CC_PERSIST_BANNER", "").lower()
+    if persist in ("1", "true", "yes"):
+        return True
+    soft = os.environ.get("CC_SOFT_BANNER", "").lower()
+    if soft in ("1", "true", "yes"):
+        return True
+    return False
 
 
 def should_use_persistent_banner() -> bool:

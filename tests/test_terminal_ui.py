@@ -38,3 +38,33 @@ def test_soft_banner_disabled_via_env(monkeypatch):
     monkeypatch.setenv("CC_SOFT_BANNER", "0")
     monkeypatch.setenv("TERM", "xterm-256color")
     assert terminal_ui.should_use_soft_banner() is False
+
+
+def test_legacy_banner_disabled_by_default(monkeypatch):
+    monkeypatch.delenv("CC_LEGACY_BANNER", raising=False)
+    monkeypatch.delenv("CC_PERSIST_BANNER", raising=False)
+    monkeypatch.delenv("CC_SOFT_BANNER", raising=False)
+    assert terminal_ui.should_use_legacy_banner() is False
+
+
+def test_legacy_banner_enabled_via_env(monkeypatch):
+    monkeypatch.setenv("CC_LEGACY_BANNER", "1")
+    assert terminal_ui.should_use_legacy_banner() is True
+
+
+def test_legacy_banner_enabled_via_persist_banner(monkeypatch):
+    monkeypatch.delenv("CC_LEGACY_BANNER", raising=False)
+    monkeypatch.setenv("CC_PERSIST_BANNER", "1")
+    assert terminal_ui.should_use_legacy_banner() is True
+
+
+def test_legacy_banner_enabled_via_soft_banner(monkeypatch):
+    monkeypatch.delenv("CC_LEGACY_BANNER", raising=False)
+    monkeypatch.setenv("CC_SOFT_BANNER", "1")
+    assert terminal_ui.should_use_legacy_banner() is True
+
+
+def test_legacy_banner_override_false(monkeypatch):
+    monkeypatch.setenv("CC_LEGACY_BANNER", "0")
+    monkeypatch.setenv("CC_PERSIST_BANNER", "1")
+    assert terminal_ui.should_use_legacy_banner() is False
