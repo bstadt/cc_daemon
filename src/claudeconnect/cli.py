@@ -1213,7 +1213,7 @@ async def run_with_http_sync(
                 # Refresh token if needed
                 tokens = get_valid_token()
                 if tokens:
-                    sync_http(context_dir, tokens.email, tokens.id_token)
+                    sync_http(context_dir, tokens.email, tokens.id_token, emit_errors=False)
             except Exception as e:
                 # Log but don't crash the sync loop
                 pass
@@ -1444,7 +1444,14 @@ def compute_bytes_sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
-def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 10, verbose: bool = False) -> bool:
+def sync_http(
+    context_dir: Path,
+    email: str,
+    id_token: str,
+    max_workers: int = 10,
+    verbose: bool = False,
+    emit_errors: bool = True,
+) -> bool:
     """Sync local files with server using HTTP API.
 
     Uses shadow directory for encrypted file storage and comparison.
@@ -1476,11 +1483,13 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
             timeout=60,
         )
         if response.status_code != 200:
-            print(f"  Failed to get manifest: {response.text}")
+            if emit_errors:
+                print(f"  Failed to get manifest: {response.text}")
             return False
         manifest = response.json()
     except Exception as e:
-        print(f"  Error getting manifest: {e}")
+        if emit_errors:
+            print(f"  Error getting manifest: {e}")
         return False
 
     server_files = {f["path"]: f for f in manifest.get("files", [])}
@@ -1519,7 +1528,8 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
                         file_path.write_bytes(plaintext)
                         decrypted_local += 1
                 except Exception as e:
-                    print(f"  Error: Could not decrypt {rel_path} (local context): {e}")
+                    if emit_errors:
+                        print(f"  Error: Could not decrypt {rel_path} (local context): {e}")
             stat = file_path.stat()
             context_files[rel_path] = {
                 "path": rel_path,
@@ -1718,6 +1728,7 @@ def sync_http(context_dir: Path, email: str, id_token: str, max_workers: int = 1
                     decrypt_fn=decrypt_fn,
                     is_encrypted_fn=is_encrypted_fn,
                     error_prefix="local context",
+                    emit_error=emit_errors,
                 )
                 if not wrote_context:
                     with lock:
