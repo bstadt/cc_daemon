@@ -42,6 +42,8 @@ from .terminal_ui import (
     DIM,
     LIME,
     RESET,
+    WRAP_OFF,
+    WRAP_ON,
     WHITE,
     build_banner_box_lines,
     get_dashboard_width,
@@ -101,19 +103,24 @@ def display_startup_banner(context_dir: Path, email: str, clear_screen: bool = T
     if clear_screen:
         print(CLEAR, end='')
 
-    print()
-    width = get_dashboard_width()
-    for line in build_banner_box_lines(email, peer_name, width):
-        print(line)
+    try:
+        # Disable line wrapping while drawing the banner to avoid box reflow artifacts.
+        print(WRAP_OFF, end='')
+        print()
+        width = get_dashboard_width()
+        for line in build_banner_box_lines(email, peer_name, width):
+            print(line)
 
-    print()
+        print()
 
-    # For interactive sessions, show simplified banner and skip notifications
-    if peer_name:
-        print(RESET, end='', flush=True)
-        return
+        # For interactive sessions, show simplified banner and skip notifications
+        if peer_name:
+            print(RESET, end='', flush=True)
+            return
 
-    display_notifications(context_dir)
+        display_notifications(context_dir)
+    finally:
+        print(WRAP_ON, end='')
 
 
 def build_soft_banner_lines(context_dir: Path, email: str, peer_name: str | None = None) -> list[str]:

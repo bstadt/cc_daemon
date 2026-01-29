@@ -43,6 +43,8 @@ ORIGIN_MODE_OFF = '\033[?6l'
 RESET_SCROLL_REGION = '\033[r'
 SAVE_CURSOR = '\0337'
 RESTORE_CURSOR = '\0338'
+WRAP_OFF = '\033[?7l'
+WRAP_ON = '\033[?7h'
 
 
 def get_cell_aspect_ratio() -> float | None:
