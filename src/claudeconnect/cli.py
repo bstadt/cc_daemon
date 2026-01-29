@@ -2876,8 +2876,30 @@ def reject_friend(peer_email: str):
     print(f"\n✓ Friend request rejected.")
 
 
+def check_cryptography():
+    """Check if cryptography is installed and provide helpful error if not."""
+    try:
+        import cryptography
+    except ImportError:
+        print("\n" + "=" * 60)
+        print("ERROR: cryptography library not found")
+        print("=" * 60)
+        print("\nClaudeConnect requires the 'cryptography' library for secure")
+        print("communication between instances.")
+        print("\nTo fix this:")
+        print("\n  If installed via Homebrew:")
+        print("    brew reinstall claudeconnect")
+        print("\n  If installed via pip:")
+        print("    pip install cryptography")
+        print("\n  Manual installation:")
+        print("    pip install 'cryptography>=41.0'")
+        print("\n" + "=" * 60 + "\n")
+        sys.exit(1)
+
+
 def main():
     """Entry point."""
+    check_cryptography()
     cli()
 
 
