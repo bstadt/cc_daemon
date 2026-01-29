@@ -50,6 +50,7 @@ from .terminal_ui import (
     reset_persistent_banner,
     run_claude_with_persistent_banner,
     run_claude_with_soft_banner,
+    should_use_legacy_banner,
     should_use_persistent_banner,
     should_use_soft_banner,
 )
@@ -1130,32 +1131,33 @@ def start(system_prompt: str | None, initial_prompt: str | None, context_dir: Pa
             print("  Sync failed")
             sys.exit(1)
 
-    # Prepare banner data before launching Claude
+    # Prepare banner data before launching Claude (legacy PTY rendering only)
     banner_lines = None
     banner_mode = None
-    if should_use_persistent_banner():
-        width = get_dashboard_width()
-        header_lines = build_banner_box_lines(tokens.email, peer, width)
-        extra_lines = None
-        if not is_interactive:
-            extra_lines = build_notifications_lines(context_dir, width)
-        banner_lines = get_persistent_banner_lines(
-            tokens.email,
-            peer,
-            extra_lines=extra_lines,
-            header_lines=header_lines,
-        )
-        banner_mode = "persistent"
-    elif should_use_soft_banner():
-        banner_lines = build_soft_banner_lines(context_dir, tokens.email, peer)
-        banner_mode = "soft"
+    if should_use_legacy_banner():
+        if should_use_persistent_banner():
+            width = get_dashboard_width()
+            header_lines = build_banner_box_lines(tokens.email, peer, width)
+            extra_lines = None
+            if not is_interactive:
+                extra_lines = build_notifications_lines(context_dir, width)
+            banner_lines = get_persistent_banner_lines(
+                tokens.email,
+                peer,
+                extra_lines=extra_lines,
+                header_lines=header_lines,
+            )
+            banner_mode = "persistent"
+        elif should_use_soft_banner():
+            banner_lines = build_soft_banner_lines(context_dir, tokens.email, peer)
+            banner_mode = "soft"
 
     # Start sync loop and Claude
     if not is_interactive:
         print("Starting Claude Code with sync enabled...")
         print(f"{DIM}(Sync runs every 30 seconds in background){RESET}\n")
 
-    # Render startup banner only when soft/persistent mode is disabled
+    # Render startup banner once unless legacy PTY banners are enabled
     if banner_mode is None:
         display_startup_banner(context_dir, tokens.email, peer_name=peer)
 
