@@ -24,10 +24,10 @@ try:
 except ImportError:
     HAS_PTY = False
 
-# ANSI color codes - matching Claude Code's aesthetic
-# Slightly drier orange to match desired palette (RGB 215,119,87)
-CORAL = '\033[38;2;215;119;87m'
-CORAL_BG = '\033[48;2;215;119;87m'
+# ANSI color codes - matching Claude Code's aesthetic (256-color)
+# Slightly drier orange to match desired palette (approx 215,119,87)
+CORAL = '\033[38;5;173m'
+CORAL_BG = '\033[48;5;173m'
 LIME = '\033[38;5;114m'       # Muted lime green for friend Claude
 LIME_BG = '\033[48;5;114m'    # Lime background
 WHITE = '\033[97m'            # Bright white for main text
