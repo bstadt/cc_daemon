@@ -897,8 +897,16 @@ def cli(ctx):
 
 
 @cli.command()
-def login():
-    """Login to Claude Connect with Google."""
+@click.option("--provider", type=click.Choice(["google", "moltbook"]), default="google",
+              help="Auth provider (google for humans, moltbook for bots).")
+def login(provider: str):
+    """Login to Claude Connect."""
+    if provider == "moltbook":
+        # Delegate to bot-login
+        ctx = click.get_current_context()
+        ctx.invoke(bot_login)
+        return
+
     print("Logging in to Claude Connect...")
 
     result = do_login()
@@ -909,6 +917,98 @@ def login():
     else:
         print(f"\n✗ Login failed: {result.error}")
         sys.exit(1)
+
+
+@cli.command("bot-login")
+@click.option("--handle", prompt="Moltbook handle", help="Your Moltbook username (without u/).")
+def bot_login(handle: str):
+    """Login as a Moltbook bot via post verification."""
+    from .config import API_BASE_URL, Tokens
+
+    handle = handle.strip().lower()
+    if handle.startswith("u/"):
+        handle = handle[2:]
+
+    print(f"Starting bot authentication for: {handle}")
+    print()
+
+    # Step 1: Request claim
+    print("Requesting challenge from server...")
+    try:
+        response = httpx.post(
+            f"{API_BASE_URL}/bot/claim",
+            json={"handle": handle},
+            timeout=30,
+        )
+        response.raise_for_status()
+        claim = response.json()
+    except httpx.HTTPStatusError as e:
+        detail = e.response.json().get("detail", str(e))
+        print(f"\n✗ Failed to request claim: {detail}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n✗ Failed to request claim: {e}")
+        sys.exit(1)
+
+    challenge_text = claim["challenge_text"]
+    exp = claim["exp"]
+    expires_in = exp - int(time.time())
+
+    print()
+    print("=" * 60)
+    print("ADD THIS TEXT TO YOUR MOLTBOOK PROFILE OR A NEW POST:")
+    print("=" * 60)
+    print()
+    print(f"  {challenge_text}")
+    print()
+    print("=" * 60)
+    print(f"(Challenge expires in {expires_in // 60} minutes)")
+    print()
+    print("Options:")
+    print("  1. Edit your profile description to include the challenge")
+    print("  2. Create a new post with the challenge in title or body")
+    print()
+
+    # Step 2: Wait for user to add challenge
+    click.prompt("Press Enter when ready to verify", default="", show_default=False)
+
+    print()
+    print("Verifying via Moltbook API...")
+
+    # Step 3: Verify
+    try:
+        response = httpx.post(
+            f"{API_BASE_URL}/bot/verify",
+            json={"handle": handle},
+            timeout=30,
+        )
+        response.raise_for_status()
+        result = response.json()
+    except httpx.HTTPStatusError as e:
+        detail = e.response.json().get("detail", str(e))
+        print(f"\n✗ Verification failed: {detail}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n✗ Verification failed: {e}")
+        sys.exit(1)
+
+    # Save token
+    token = result["token"]
+    email = result["email"]
+
+    # Bot tokens don't have refresh tokens
+    tokens = Tokens(
+        id_token=token,
+        refresh_token="",  # Bot tokens are long-lived, no refresh
+        email=email,
+    )
+    tokens.save()
+
+    print()
+    print(f"✓ Verified! Logged in as {email}")
+    print()
+    print("Your bot token is valid for 1 year.")
+    print("Run `claudeconnect` in your context directory to start.")
 
 
 @cli.command()

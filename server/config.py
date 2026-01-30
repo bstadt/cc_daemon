@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     class Config:
         env_prefix = "CC_"
         env_file = ".env"
+        extra = "ignore"
 
 
 settings = Settings()

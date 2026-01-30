@@ -3,7 +3,7 @@
 from fastapi import Header, HTTPException, status
 from typing import Annotated
 
-from .auth import validate_google_id_token, TokenPayload
+from .auth import validate_google_id_token, validate_bot_token, TokenPayload
 
 
 async def get_current_user(
@@ -11,6 +11,8 @@ async def get_current_user(
 ) -> TokenPayload:
     """
     Dependency to extract and validate the current user from JWT.
+
+    Supports both Google OAuth id_tokens and ClaudeConnect bot tokens.
 
     Usage:
         @app.get("/protected")
@@ -35,16 +37,21 @@ async def get_current_user(
 
     token = parts[1]
 
-    # Validate token
+    # Try Google token first
     payload = validate_google_id_token(token)
-    if not payload:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+    if payload:
+        return payload
 
-    return payload
+    # Fall back to bot token
+    payload = validate_bot_token(token)
+    if payload:
+        return payload
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or expired token",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 
 # Type alias for cleaner route signatures
