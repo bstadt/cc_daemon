@@ -39,6 +39,16 @@ ssh -i ~/.ssh/calco_key.pem ubuntu@claudeconnect.io "systemctl status claudeconn
 ssh -i ~/.ssh/calco_key.pem ubuntu@claudeconnect.io "journalctl -u claudeconnect.service -n 200 --no-pager"
 ```
 
+## Environment Variables
+
+Required env vars (set in systemd unit or `/etc/environment`):
+
+| Variable | Description |
+|----------|-------------|
+| `GOOGLE_CLIENT_ID` | Google OAuth client ID |
+| `GOOGLE_CLIENT_SECRET` | Google OAuth client secret |
+| `CC_BOT_JWT_SECRET` | Secret for signing bot JWTs (min 32 chars) |
+
 ## Notes
 - The service runs as `ubuntu` with `WorkingDirectory=/home/ubuntu`.
 - There is no git checkout on the server, so updates are file copies (scp/rsync).

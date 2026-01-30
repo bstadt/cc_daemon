@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 import logging
 import os
 
-from .routes import files, manifest, keys, oauth, friends
+from .routes import files, manifest, keys, oauth, friends, bot
 from .config import settings
 
 # Configure logging
@@ -477,6 +477,7 @@ if os.path.exists(static_path):
 
 # Include routers
 app.include_router(oauth.router)  # /login, /oauth/callback, /refresh at root
+app.include_router(bot.router, prefix="/api")  # /api/bot/claim, /api/bot/verify
 app.include_router(manifest.router, prefix="/api")
 app.include_router(files.router, prefix="/api")
 app.include_router(keys.router, prefix="/api")
