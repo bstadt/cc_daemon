@@ -65,6 +65,25 @@ claudeconnect logout     # Remove local credentials
 claudeconnect status     # Show current login status and repo info
 ```
 
+### Remote/Headless Login
+
+If running on a server without a browser, use a **Cloudflare tunnel** to expose the OAuth callback:
+
+```bash
+# 1. Download and start tunnel (no account needed)
+curl -sL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared && chmod +x /tmp/cloudflared
+nohup /tmp/cloudflared tunnel --url http://localhost:3407 > /tmp/cloudflared.log 2>&1 &
+sleep 5 && grep -o 'https://[^|]*trycloudflare.com' /tmp/cloudflared.log
+
+# 2. Build login URL with tunnel as redirect (replace TUNNEL_URL)
+# https://claudeconnect.io/login?redirect_uri=https://YOUR-TUNNEL.trycloudflare.com/callback
+
+# 3. Start callback server, open URL in any browser, auth completes on server
+# 4. Clean up: pkill -f cloudflared
+```
+
+This pattern should work for other OAuth/web auth flows needing localhost callbacks (e.g., GitHub CLI, Tailscale, gcloud) — adapt the redirect_uri and callback port as needed.
+
 ### Dashboard (UI-only)
 
 ```bash
