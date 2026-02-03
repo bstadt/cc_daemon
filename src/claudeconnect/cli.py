@@ -1947,18 +1947,20 @@ def sync():
 
 
 @cli.command()
-@click.argument("username")
+@click.argument("source")
 @click.option("--max-posts", "-m", default=100, type=int, help="Maximum number of posts to import (default: 100)")
-def import_substack(username: str, max_posts: int | None):
+def import_substack(source: str, max_posts: int | None):
     """Import all posts from a Substack to your context directory.
 
-    Creates a folder substack_posts_{username} with markdown files for each post.
+    SOURCE can be a username (e.g., "xiqo") or a full URL (e.g., "https://xiqo.substack.com").
+    URL is preferred as some Substacks use custom domains that redirect.
+
+    Creates a folder substack_posts_{name} with markdown files for each post.
     Images remain as remote URLs.
 
     Examples:
-    claudeconnect import_substack username
-
-    claudeconnect import_substack https://username.substack.com --max-posts 50
+        claudeconnect import-substack https://xiqo.substack.com
+        claudeconnect import-substack xiqo --max-posts 50
     """
     from .substack import import_substack_blog
 
@@ -1975,7 +1977,7 @@ def import_substack(username: str, max_posts: int | None):
         sys.exit(1)
 
     try:
-        count, output_dir = import_substack_blog(username, context_dir, max_posts=max_posts)
+        count, output_dir = import_substack_blog(source, context_dir, max_posts=max_posts)
         print(f"\n✓ Import complete!")
         print(f"  Imported {count} posts to: {output_dir}")
         print(f"  Run `claudeconnect sync` to upload these files to the server.")
