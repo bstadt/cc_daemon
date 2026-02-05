@@ -896,10 +896,67 @@ def cli(ctx):
         ctx.invoke(start)
 
 
+def _start_cloudflared_tunnel() -> tuple[str | None, subprocess.Popen | None]:
+    """Start a cloudflared tunnel and return (tunnel_url, process) or (None, None) on failure."""
+    import urllib.request
+    import platform
+    import re
+
+    cloudflared_path = Path("/tmp/cloudflared")
+
+    # Download cloudflared if not present
+    if not cloudflared_path.exists():
+        print("Downloading cloudflared...")
+        arch = platform.machine()
+        if arch == "x86_64":
+            arch = "amd64"
+        elif arch == "aarch64":
+            arch = "arm64"
+        url = f"https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-{arch}"
+        try:
+            urllib.request.urlretrieve(url, cloudflared_path)
+            cloudflared_path.chmod(0o755)
+        except Exception as e:
+            print(f"Failed to download cloudflared: {e}")
+            return None, None
+
+    # Start tunnel
+    print("Starting tunnel...")
+    log_path = Path("/tmp/cloudflared.log")
+    log_file = open(log_path, "w")
+    proc = subprocess.Popen(
+        [str(cloudflared_path), "tunnel", "--url", "http://localhost:3407"],
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+    )
+
+    # Wait for tunnel URL (up to 15 seconds)
+    tunnel_url = None
+    for _ in range(30):
+        time.sleep(0.5)
+        if log_path.exists():
+            content = log_path.read_text()
+            match = re.search(r'https://[a-z0-9-]+\.trycloudflare\.com', content)
+            if match:
+                tunnel_url = match.group(0)
+                break
+
+    if not tunnel_url:
+        print("Failed to get tunnel URL")
+        proc.terminate()
+        return None, None
+
+    return tunnel_url, proc
+
+
 @cli.command()
 @click.option("--provider", type=click.Choice(["google", "moltbook"]), default="google",
               help="Auth provider (google for humans, moltbook for bots).")
-def login(provider: str):
+@click.option("--redirect-uri", default=None,
+              help="Custom redirect URI for headless/tunnel login.")
+@click.option("--remote", is_flag=True, default=False,
+              help="Use Cloudflare tunnel for headless/remote login (auto-downloads cloudflared).")
+def login(provider: str, redirect_uri: str | None, remote: bool):
     """Login to Claude Connect."""
     if provider == "moltbook":
         # Delegate to bot-login
@@ -907,9 +964,26 @@ def login(provider: str):
         ctx.invoke(bot_login)
         return
 
+    tunnel_proc = None
+
+    if remote:
+        if redirect_uri:
+            print("Cannot use both --remote and --redirect-uri")
+            sys.exit(1)
+        tunnel_url, tunnel_proc = _start_cloudflared_tunnel()
+        if not tunnel_url:
+            sys.exit(1)
+        redirect_uri = f"{tunnel_url}/callback"
+        print(f"Tunnel ready: {tunnel_url}")
+
     print("Logging in to Claude Connect...")
 
-    result = do_login()
+    try:
+        result = do_login(redirect_uri=redirect_uri)
+    finally:
+        if tunnel_proc:
+            tunnel_proc.terminate()
+            print("Tunnel closed.")
 
     if result.success:
         print(f"\n✓ Logged in as {result.tokens.email}")

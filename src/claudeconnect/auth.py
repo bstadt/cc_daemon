@@ -104,11 +104,15 @@ class CallbackHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
 
 
-def login() -> AuthResult:
+def login(redirect_uri: Optional[str] = None) -> AuthResult:
     """
     Run the OAuth login flow.
 
     Opens browser to claudeconnect.io, waits for callback with tokens.
+
+    Args:
+        redirect_uri: Optional custom redirect URI (e.g., tunnel URL for headless login).
+                      If provided, prints URL instead of opening browser.
 
     Returns:
         AuthResult with tokens on success, error on failure.
@@ -122,11 +126,17 @@ def login() -> AuthResult:
     server.timeout = 120  # 2 minute timeout
 
     # Build login URL
-    redirect_uri = f"http://localhost:{LOCAL_PORT}/callback"
+    if redirect_uri is None:
+        redirect_uri = f"http://localhost:{LOCAL_PORT}/callback"
     login_url = f"{SERVER_URL}/login?redirect_uri={urllib.parse.quote(redirect_uri)}"
 
-    print(f"Opening browser for login...")
-    webbrowser.open(login_url)
+    if "localhost" in redirect_uri:
+        print(f"Opening browser for login...")
+        webbrowser.open(login_url)
+    else:
+        # Remote/tunnel login - print URL for manual opening
+        print(f"\nOpen this URL in any browser to login:\n")
+        print(f"  {login_url}\n")
 
     print(f"Waiting for authentication (timeout: 2 minutes)...")
 
