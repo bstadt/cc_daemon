@@ -86,6 +86,9 @@ try:
         has_friend_master_key,
         should_encrypt_file,
         encrypt_file_with_master_key,
+        export_keys,
+        import_keys,
+        verify_export_file,
     )
     HAS_ENCRYPTION = is_encryption_available()
 except ImportError:
@@ -598,6 +601,7 @@ def generate_authz_content(
     email: str,
     private_files: list[str] | None = None,
     public_key_hex: str | None = None,
+    friends: list[str] | None = None,
 ) -> str:
     """
     Generate initial authz file content for a new user.
@@ -614,6 +618,7 @@ def generate_authz_content(
         email: User's email
         private_files: List of file paths (relative to repo root) to make private
         public_key_hex: User's X25519 public key as hex string (64 chars)
+        friends: List of friend emails to include with read access
 
     Returns:
         authz file content string
@@ -630,6 +635,14 @@ def generate_authz_content(
     lines.extend([
         "[/]",
         f"{email} = rw",
+    ])
+
+    # Add friends with read access to root
+    if friends:
+        for friend_email in friends:
+            lines.append(f"{friend_email} = r")
+
+    lines.extend([
         "",
         "# System messages folder (server writes here using admin bypass)",
         "[/claudeconnect/with-claudeconnect-io]",
@@ -639,6 +652,20 @@ def generate_authz_content(
         f"[/claudeconnect/with-{email_repo_name}]",
         f"{email} = rw",
     ])
+
+    # Add friend write access to the conversations folder
+    if friends:
+        for friend_email in friends:
+            lines.append(f"{friend_email} = rw")
+
+    # Add with-{friend}/ sections for each friend
+    if friends:
+        for friend_email in friends:
+            friend_repo_name = email_to_repo_name(friend_email)
+            lines.append("")
+            lines.append(f"[/claudeconnect/with-{friend_repo_name}]")
+            lines.append(f"{email} = rw")
+            lines.append(f"{friend_email} = rw")
 
     # Add private file sections - only owner has access
     if private_files:
@@ -701,6 +728,76 @@ def _read_authz_owner_email(authz_path: Path) -> str | None:
     except OSError:
         return None
     return None
+
+
+def _fetch_server_authz(token: str, email: str) -> str | None:
+    """
+    Fetch authz file from server if it exists.
+
+    Args:
+        token: OAuth id_token for authentication
+        email: User's email address
+
+    Returns:
+        authz file content if found, None otherwise.
+    """
+    try:
+        response = httpx.get(
+            f"{API_BASE_URL}/files/{email}/authz",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=30,
+        )
+        if response.status_code == 200:
+            return response.text
+        return None
+    except Exception:
+        return None
+
+
+def _extract_authz_public_key(authz_content: str) -> str | None:
+    """Extract public key hex from authz content string."""
+    for line in authz_content.splitlines():
+        value = line.strip()
+        if not value:
+            continue
+        if value.startswith("#"):
+            match = _AUTHZ_PUBLIC_KEY_PATTERN.match(value)
+            if match:
+                return match.group(1).lower()
+            continue
+        break
+    return None
+
+
+def _count_authz_friends(authz_content: str) -> int:
+    """Count the number of friends (non-owner users with permissions) in authz."""
+    friends = set()
+    owner_email = None
+    current_section = None
+
+    for line in authz_content.splitlines():
+        value = line.strip()
+        if not value or value.startswith("#"):
+            continue
+        section_match = _AUTHZ_SECTION_PATTERN.match(value)
+        if section_match:
+            current_section = section_match.group(1)
+            continue
+        perm_match = _AUTHZ_PERMISSION_PATTERN.match(value)
+        if not perm_match:
+            continue
+        user = perm_match.group(1).strip()
+        perms = perm_match.group(2).lower()
+        if user == "*":
+            continue
+        if "@" in user:
+            # First user with rw on / is likely the owner
+            if current_section == "/" and "rw" in perms and owner_email is None:
+                owner_email = user
+            elif user != owner_email:
+                friends.add(user)
+
+    return len(friends)
 
 
 def upload_authz_http(token: str, email: str, content: str) -> bool:
@@ -832,6 +929,9 @@ def init_context_dir(
     - authz file with proper permissions
     - claudeconnect/ directory structure
 
+    If server already has an authz with friends, those friend permissions
+    are preserved in the new authz.
+
     Args:
         context_dir: The user's plaintext directory to initialize
         email: User email
@@ -863,9 +963,23 @@ def init_context_dir(
         print("  Using existing authz file")
         shutil.copy2(shadow_authz, context_authz)
     else:
-        # Create new authz
+        # Fetch existing server authz to preserve friends
+        print("  Checking server for existing friends...")
+        existing_friends = []
+        server_authz = _fetch_server_authz(token, email)
+        if server_authz:
+            existing_friends = parse_friends_from_authz(server_authz, email)
+            if existing_friends:
+                print(f"  Preserving {len(existing_friends)} friend(s) from server")
+
+        # Create new authz with preserved friends
         print("  Creating authz file...")
-        authz_content = generate_authz_content(email, None, public_key_hex)
+        authz_content = generate_authz_content(
+            email,
+            private_files=None,
+            public_key_hex=public_key_hex,
+            friends=existing_friends if existing_friends else None,
+        )
         # Write to both locations
         shadow_authz.write_text(authz_content)
         context_authz.write_text(authz_content)
@@ -1489,6 +1603,62 @@ def init(no_encrypt: bool, force: bool):
 
     config = get_config()
     cwd = Path.cwd()
+
+    # Check for existing server data that would be lost
+    if not force:
+        print(f"Checking server for existing data...")
+        server_authz = _fetch_server_authz(tokens.id_token, tokens.email)
+        if server_authz:
+            warnings = []
+
+            # Check for public key mismatch (would lose encrypted data)
+            server_public_key = _extract_authz_public_key(server_authz)
+            local_public_key = None
+            if HAS_ENCRYPTION:
+                try:
+                    local_public_key = load_public_key(tokens.email).hex().lower()
+                except FileNotFoundError:
+                    pass
+
+            if server_public_key and local_public_key is None:
+                # Server has encrypted data but we have no local keys
+                warnings.append(
+                    f"  - Your server has encrypted files (key: {server_public_key[:16]}...)\n"
+                    f"    You have NO local keys. Running init will generate NEW keys,\n"
+                    f"    making your existing encrypted files PERMANENTLY UNDECRYPTABLE.\n"
+                    f"    To access existing data, copy your keys from another machine:\n"
+                    f"      ~/.claude-connect/accounts/{tokens.email}/keys/"
+                )
+            elif server_public_key and local_public_key and server_public_key != local_public_key:
+                warnings.append(
+                    f"  - Server key ({server_public_key[:16]}...) differs from local key ({local_public_key[:16]}...)\n"
+                    f"    Your encrypted server files were created with a DIFFERENT key.\n"
+                    f"    Running init will overwrite the server authz with your local key,\n"
+                    f"    but those files will remain encrypted with the old key."
+                )
+
+            # Check for friends that would be lost
+            friend_count = _count_authz_friends(server_authz)
+            if friend_count > 0:
+                warnings.append(
+                    f"  - Your server authz has {friend_count} friend(s) with permissions.\n"
+                    f"    Running init will OVERWRITE the authz, removing all friend permissions.\n"
+                    f"    You will need to re-add your friends after init."
+                )
+
+            if warnings:
+                print("\n" + "=" * 60)
+                print("WARNING: Running init will cause DATA LOSS")
+                print("=" * 60 + "\n")
+                for warning in warnings:
+                    print(warning)
+                    print()
+                print("=" * 60)
+                print("Use --force to skip this check, or fix the issues above first.")
+                print("=" * 60 + "\n")
+                if not click.confirm("Do you understand the risks and want to continue?", default=False):
+                    print("Aborted.")
+                    sys.exit(1)
 
     if not force:
         existing_authz = cwd / "authz"
@@ -2648,12 +2818,13 @@ def accept_friend(peer_email: str):
     except Exception as e:
         print(f"  Warning: Could not delete local request file: {e}")
 
-    # Delete from server via accept-friend API
+    # Delete from server via files API
     try:
-        response = httpx.post(
-            f"{API_BASE_URL}/accept-friend",
+        peer_email_sanitized = email_to_repo_name(peer_email)
+        rel_path = f"claudeconnect/with-claudeconnect-io/friend-request-{peer_email_sanitized}.md"
+        response = httpx.delete(
+            f"{API_BASE_URL}/files/{my_email}/{rel_path}",
             headers={"Authorization": f"Bearer {tokens.id_token}"},
-            json={"from_email": peer_email},
             timeout=30,
         )
         if response.status_code == 200:
@@ -2965,15 +3136,16 @@ def auto_accept_reciprocal_requests(
             except Exception:
                 pass
 
-            # Delete from server
+            # Delete from server using the files API (same as reject-friend)
             try:
-                response = httpx.post(
-                    f"{API_BASE_URL}/accept-friend",
+                peer_email_sanitized = email_to_repo_name(peer_email)
+                rel_path = f"claudeconnect/with-claudeconnect-io/friend-request-{peer_email_sanitized}.md"
+                response = httpx.delete(
+                    f"{API_BASE_URL}/files/{my_email}/{rel_path}",
                     headers={"Authorization": f"Bearer {id_token}"},
-                    json={"from_email": peer_email},
                     timeout=30,
                 )
-                # Ignore response - best effort cleanup
+                # Ignore response - best effort cleanup (404 is fine)
             except Exception:
                 pass
 
@@ -3050,6 +3222,498 @@ def reject_friend(peer_email: str):
         print(f"  Warning: Could not delete server request file: {e}")
 
     print(f"\n✓ Friend request rejected.")
+
+
+# =============================================================================
+# Keys Command Group
+# =============================================================================
+
+@cli.group()
+def keys():
+    """Manage encryption keys."""
+    pass
+
+
+@keys.command("export")
+@click.argument("output_file", required=False, type=click.Path())
+@click.option("--no-password", is_flag=True, help="Export without password (DANGEROUS)")
+@click.option("--force", is_flag=True, help="Overwrite existing output file")
+def keys_export(output_file: str | None, no_password: bool, force: bool):
+    """Export encryption keys to a backup file.
+
+    Creates a portable backup of your encryption keys that can be
+    imported on another machine. By default, the export is encrypted
+    with a password you provide.
+
+    WARNING: Keep this file secure! Anyone with the file and password
+    can decrypt all your ClaudeConnect data.
+    """
+    if not HAS_ENCRYPTION:
+        print("Encryption not available. Install cryptography package.")
+        sys.exit(1)
+
+    tokens = get_valid_token()
+    if not tokens:
+        print("Not logged in. Run `claudeconnect login` first.")
+        sys.exit(1)
+
+    email = tokens.email
+
+    # Check keys exist
+    try:
+        public_bytes = load_public_key(email)
+        fingerprint = get_key_fingerprint(public_bytes)
+    except FileNotFoundError:
+        print(f"No encryption keys found for {email}.")
+        print("Run `claudeconnect init` to generate keys.")
+        sys.exit(1)
+
+    # Determine output path
+    if not output_file:
+        output_file = f"claudeconnect-keys-{fingerprint[:8]}.cckeys"
+
+    output_path = Path(output_file)
+
+    if output_path.exists() and not force:
+        print(f"Output file already exists: {output_path}")
+        print("Use --force to overwrite.")
+        sys.exit(1)
+
+    # Get password
+    password = None
+    if not no_password:
+        password = click.prompt(
+            "Enter password to protect export",
+            hide_input=True,
+            confirmation_prompt=True,
+        )
+        if len(password) < 8:
+            print("Password must be at least 8 characters.")
+            sys.exit(1)
+    else:
+        if not click.confirm(
+            "WARNING: Exporting without password protection is DANGEROUS.\n"
+            "Anyone who obtains this file can decrypt your data.\n"
+            "Continue?"
+        ):
+            print("Aborted.")
+            sys.exit(1)
+
+    # Export
+    print(f"Exporting keys for {email}...")
+    try:
+        import json as json_module
+        export_data = export_keys(email, password)
+        output_path.write_text(json_module.dumps(export_data, indent=2))
+        output_path.chmod(0o600)
+    except Exception as e:
+        print(f"Export failed: {e}")
+        sys.exit(1)
+
+    # Count friends from export data
+    if password:
+        # Encrypted - we need to check the unencrypted version
+        # Re-export without password just to count
+        unencrypted = export_keys(email, password=None)
+        friend_count = len(unencrypted.get("keys", {}).get("friends", {}))
+    else:
+        friend_count = len(export_data.get("keys", {}).get("friends", {}))
+
+    print(f"\n✓ Keys exported to {output_path}")
+    print(f"  Fingerprint: {fingerprint}")
+    if friend_count > 0:
+        print(f"  Friend keys: {friend_count} included")
+    print(f"  Encrypted: {'Yes' if password else 'NO - INSECURE!'}")
+    if password:
+        print("\n  Keep this file secure and remember your password!")
+        print("  You will need both to restore your keys.")
+
+
+@keys.command("import")
+@click.argument("file", type=click.Path(exists=True))
+@click.option("--force", is_flag=True, help="Overwrite existing keys (DANGEROUS)")
+@click.option("--verify-only", is_flag=True, help="Verify file without importing")
+def keys_import(file: str, force: bool, verify_only: bool):
+    """Import encryption keys from a backup file.
+
+    Restores encryption keys from a previous export. The import will
+    fail if keys already exist unless --force is used.
+
+    WARNING: Using --force will overwrite existing keys. If your server
+    has data encrypted with the old keys, you will lose access to it!
+    """
+    if not HAS_ENCRYPTION:
+        print("Encryption not available. Install cryptography package.")
+        sys.exit(1)
+
+    file_path = Path(file)
+    import json as json_module
+
+    # Load and parse file
+    try:
+        export_data = json_module.loads(file_path.read_text())
+    except json_module.JSONDecodeError:
+        print("Invalid export file: not valid JSON")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Failed to read file: {e}")
+        sys.exit(1)
+
+    # Check format
+    if export_data.get("format") != "claudeconnect-keys-v1":
+        print("Invalid export file: unrecognized format")
+        sys.exit(1)
+
+    is_encrypted = "encrypted_keys" in export_data
+
+    # Get password if needed
+    password = None
+    if is_encrypted:
+        password = click.prompt("Enter password", hide_input=True)
+
+    if verify_only:
+        # Just verify and show info
+        try:
+            info = verify_export_file(export_data, password)
+            print(f"\n✓ Export file is valid")
+            print(f"  Email: {info['email']}")
+            print(f"  Fingerprint: {info['fingerprint']}")
+            print(f"  Created: {info['created_at']}")
+            print(f"  Encrypted: {'Yes' if info['encrypted'] else 'No'}")
+            if info['has_master_key'] is not None:
+                print(f"  Has master key: {'Yes' if info['has_master_key'] else 'No'}")
+            if info['friend_count'] is not None:
+                print(f"  Friend keys: {info['friend_count']}")
+            return
+        except ValueError as e:
+            print(f"\n✗ Verification failed: {e}")
+            sys.exit(1)
+
+    # Get current account for verification
+    tokens = get_valid_token()
+    expected_email = tokens.email if tokens else None
+
+    export_email = export_data.get("email")
+
+    # Warn if emails don't match
+    if expected_email and export_email != expected_email:
+        print(f"WARNING: You are logged in as {expected_email}")
+        print(f"         but the export file is for {export_email}")
+        if not click.confirm("Import anyway?"):
+            print("Aborted.")
+            sys.exit(1)
+
+    # Import
+    try:
+        email, fingerprint, friend_count = import_keys(
+            export_data,
+            password=password,
+            email=None,  # Don't enforce match, user confirmed above
+            force=force,
+        )
+        print(f"\n✓ Keys imported for {email}")
+        print(f"  Fingerprint: {fingerprint}")
+        if friend_count > 0:
+            print(f"  Friend keys: {friend_count} restored")
+        print("\n  Next steps:")
+        print("  1. Run `claudeconnect init` if setting up a new context directory")
+        print("  2. Or run `claudeconnect sync` to pull files with restored keys")
+    except FileExistsError as e:
+        print(f"\n✗ {e}")
+        sys.exit(1)
+    except ValueError as e:
+        print(f"\n✗ Import failed: {e}")
+        sys.exit(1)
+
+
+# =============================================================================
+# RM Command
+# =============================================================================
+
+def _fetch_manifest(email: str, id_token: str) -> dict:
+    """Fetch manifest from server."""
+    try:
+        response = httpx.get(
+            f"{API_BASE_URL}/manifest/{email}",
+            headers={"Authorization": f"Bearer {id_token}"},
+            timeout=60,
+        )
+        if response.status_code != 200:
+            return {"files": []}
+        return response.json()
+    except Exception:
+        return {"files": []}
+
+
+def _resolve_rm_paths(
+    paths: tuple[str, ...],
+    server_files: set[str],
+    recursive: bool,
+) -> tuple[list[str], list[str], list[str]]:
+    """
+    Resolve input paths to actual files/directories on server.
+
+    Returns:
+        (files_to_delete, dirs_to_delete, warnings)
+    """
+    import fnmatch
+
+    files = []
+    dirs = []
+    warnings = []
+
+    for pattern in paths:
+        # Normalize: remove leading slash if present
+        pattern = pattern.lstrip("/")
+
+        # Block authz deletion
+        if pattern == "authz" or pattern.startswith("authz/"):
+            raise click.ClickException("Cannot delete authz file")
+
+        # Check if it's a glob pattern
+        if any(c in pattern for c in "*?["):
+            # Match against server manifest
+            matched = [f for f in server_files if fnmatch.fnmatch(f, pattern)]
+            if not matched:
+                warnings.append(f"No files match pattern '{pattern}'")
+            files.extend(matched)
+        else:
+            # Direct path - check if file or directory
+            if pattern in server_files:
+                files.append(pattern)
+            else:
+                # Could be a directory - check if any files have this prefix
+                prefix = pattern.rstrip("/") + "/"
+                dir_files = [f for f in server_files if f.startswith(prefix)]
+                if dir_files:
+                    if not recursive:
+                        raise click.ClickException(
+                            f"'{pattern}' is a directory; use --recursive to delete"
+                        )
+                    dirs.append(pattern.rstrip("/"))
+                else:
+                    warnings.append(f"'{pattern}' not found on server")
+
+    return files, dirs, warnings
+
+
+def _execute_rm_deletions(
+    email: str,
+    id_token: str,
+    files: list[str],
+    dirs: list[str],
+    shadow_dir: Path,
+    context_dir: Path,
+    server_only: bool,
+) -> dict:
+    """
+    Execute deletions on server, shadow, and optionally context.
+
+    Returns:
+        {
+            "server_deleted": int,
+            "shadow_deleted": int,
+            "context_deleted": int,
+            "errors": list[str]
+        }
+    """
+    import shutil
+
+    results = {
+        "server_deleted": 0,
+        "shadow_deleted": 0,
+        "context_deleted": 0,
+        "errors": []
+    }
+
+    # Delete individual files
+    for path in files:
+        # Server
+        try:
+            resp = httpx.delete(
+                f"{API_BASE_URL}/files/{email}/{path}",
+                headers={"Authorization": f"Bearer {id_token}"},
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                results["server_deleted"] += 1
+            elif resp.status_code != 404:  # 404 is fine (idempotent)
+                results["errors"].append(f"{path}: server error - {resp.text}")
+        except Exception as e:
+            results["errors"].append(f"{path}: {e}")
+            continue
+
+        # Shadow
+        shadow_path = shadow_dir / path
+        if shadow_path.exists():
+            shadow_path.unlink()
+            results["shadow_deleted"] += 1
+
+        # Context (unless --server-only)
+        if not server_only:
+            context_path = context_dir / path
+            if context_path.exists():
+                context_path.unlink()
+                results["context_deleted"] += 1
+
+    # Delete directories (recursive)
+    for dir_path in dirs:
+        try:
+            resp = httpx.delete(
+                f"{API_BASE_URL}/files/{email}/{dir_path}",
+                headers={"Authorization": f"Bearer {id_token}"},
+                params={"recursive": "true"},
+                timeout=60,
+            )
+            if resp.status_code == 200:
+                deleted = resp.json().get("deleted", 1)
+                results["server_deleted"] += deleted
+            elif resp.status_code != 404:
+                results["errors"].append(f"{dir_path}/: server error - {resp.text}")
+                continue
+        except Exception as e:
+            results["errors"].append(f"{dir_path}/: {e}")
+            continue
+
+        # Shadow dir
+        shadow_dir_path = shadow_dir / dir_path
+        if shadow_dir_path.exists() and shadow_dir_path.is_dir():
+            count = sum(1 for _ in shadow_dir_path.rglob("*") if _.is_file())
+            shutil.rmtree(shadow_dir_path)
+            results["shadow_deleted"] += count
+
+        # Context dir (unless --server-only)
+        if not server_only:
+            context_dir_path = context_dir / dir_path
+            if context_dir_path.exists() and context_dir_path.is_dir():
+                count = sum(1 for _ in context_dir_path.rglob("*") if _.is_file())
+                shutil.rmtree(context_dir_path)
+                results["context_deleted"] += count
+
+    return results
+
+
+@cli.command()
+@click.argument("paths", nargs=-1, required=True)
+@click.option("--recursive", "-r", is_flag=True, help="Delete directories recursively.")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
+@click.option("--dry-run", "-n", is_flag=True, help="Show what would be deleted without deleting.")
+@click.option("--server-only", is_flag=True, help="Only delete from server and shadow, keep context files.")
+def rm(paths: tuple[str, ...], recursive: bool, yes: bool, dry_run: bool, server_only: bool):
+    """Delete files from the server.
+
+    Removes files from the server, shadow directory (sync cache), and optionally
+    the local context directory.
+
+    Supports glob patterns (e.g., '*.tmp', 'claudeconnect/with-*/*.md').
+
+    Examples:
+
+        claudeconnect rm notes/old-draft.md
+
+        claudeconnect rm 'claudeconnect/with-*/session-*.md' --yes
+
+        claudeconnect rm claudeconnect/with-bob-gmail-com -r
+
+        claudeconnect rm '*.bak' --dry-run
+    """
+    # Validate auth and get context
+    tokens = get_valid_token()
+    if not tokens:
+        print("Not logged in. Run `claudeconnect login` first.")
+        sys.exit(1)
+
+    config = get_config()
+    if not config.context_dir:
+        print("No context directory configured. Run `claudeconnect init` first.")
+        sys.exit(1)
+
+    email = tokens.email
+    context_dir = Path(config.context_dir)
+    shadow_dir = get_shadow_dir(email)
+
+    # Fetch manifest from server
+    print("Fetching file list from server...")
+    manifest = _fetch_manifest(email, tokens.id_token)
+    server_files = {f["path"] for f in manifest.get("files", []) if isinstance(f, dict) and "path" in f}
+
+    if not server_files:
+        print("No files found on server.")
+        return
+
+    # Resolve paths (handle globs, validate)
+    try:
+        files_to_delete, dirs_to_delete, warnings = _resolve_rm_paths(
+            paths, server_files, recursive
+        )
+    except click.ClickException:
+        raise
+
+    # Print warnings
+    for warning in warnings:
+        print(f"Warning: {warning}")
+
+    if not files_to_delete and not dirs_to_delete:
+        print("No files to delete.")
+        return
+
+    # Count files in directories
+    dir_file_counts = {}
+    for dir_path in dirs_to_delete:
+        prefix = dir_path + "/"
+        count = sum(1 for f in server_files if f.startswith(prefix))
+        dir_file_counts[dir_path] = count
+
+    total_dir_files = sum(dir_file_counts.values())
+    total_files = len(files_to_delete) + total_dir_files
+
+    # Show preview
+    if dry_run:
+        print(f"\nWould delete {len(files_to_delete)} file(s):")
+        for f in files_to_delete[:10]:
+            print(f"  - {f}")
+        if len(files_to_delete) > 10:
+            print(f"  ... and {len(files_to_delete) - 10} more")
+
+        if dirs_to_delete:
+            print(f"\nWould delete {len(dirs_to_delete)} directory(ies) ({total_dir_files} files):")
+            for d in dirs_to_delete:
+                print(f"  - {d}/ ({dir_file_counts[d]} files)")
+        return
+
+    # Confirmation
+    if not yes:
+        print(f"\nDelete {total_files} file(s)?")
+        for f in files_to_delete[:5]:
+            print(f"  - {f}")
+        if len(files_to_delete) > 5:
+            print(f"  ... and {len(files_to_delete) - 5} more files")
+        for d in dirs_to_delete:
+            print(f"  - {d}/ ({dir_file_counts[d]} files)")
+
+        if not click.confirm("\nProceed with deletion?", default=False):
+            print("Aborted.")
+            return
+
+    # Execute deletions
+    print("\nDeleting...")
+    results = _execute_rm_deletions(
+        email, tokens.id_token,
+        files_to_delete, dirs_to_delete,
+        shadow_dir, context_dir,
+        server_only
+    )
+
+    # Report results
+    print(f"\nDeleted from server: {results['server_deleted']} file(s)")
+    print(f"Deleted from shadow: {results['shadow_deleted']} file(s)")
+    if not server_only:
+        print(f"Deleted from context: {results['context_deleted']} file(s)")
+
+    if results["errors"]:
+        print(f"\nErrors ({len(results['errors'])}):")
+        for error in results["errors"]:
+            print(f"  - {error}")
 
 
 def check_cryptography():
