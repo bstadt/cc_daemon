@@ -17,7 +17,10 @@ Encryption rules:
 
 from __future__ import annotations
 
+import base64
+import datetime
 import hashlib
+import json
 import os
 import struct
 from pathlib import Path
@@ -32,6 +35,7 @@ try:
     )
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+    from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
     HAS_CRYPTO = True
 except ImportError:
     HAS_CRYPTO = False
@@ -61,6 +65,15 @@ from .config import get_keys_dir, get_friends_dir, email_to_repo_name
 # Master key encryption format (v2)
 MASTER_KEY_FORMAT_VERSION = 2
 ENCRYPTED_MASTER_KEY_SIZE = 80  # 32 ephemeral pub + 48 encrypted key
+
+# Key export format constants
+KEYS_EXPORT_VERSION = 1
+KEYS_EXPORT_MAGIC = "claudeconnect-keys-v1"
+SCRYPT_N = 2**17  # ~128MB memory, ~1s on modern hardware
+SCRYPT_R = 8
+SCRYPT_P = 1
+SCRYPT_KEY_LEN = 32
+SCRYPT_SALT_LEN = 16
 
 
 def is_encryption_available() -> bool:
@@ -455,6 +468,322 @@ def delete_friend_master_key(
         key_path.unlink()
         return True
     return False
+
+
+# =============================================================================
+# Key Export/Import
+# =============================================================================
+
+def derive_key_from_password(password: str, salt: bytes) -> bytes:
+    """
+    Derive an AES-256 key from a password using scrypt.
+
+    Args:
+        password: User-provided password
+        salt: Random 16-byte salt
+
+    Returns:
+        32-byte derived key
+    """
+    _ensure_crypto()
+
+    kdf = Scrypt(
+        salt=salt,
+        length=SCRYPT_KEY_LEN,
+        n=SCRYPT_N,
+        r=SCRYPT_R,
+        p=SCRYPT_P,
+    )
+    return kdf.derive(password.encode("utf-8"))
+
+
+def export_keys(
+    email: str,
+    password: Optional[str] = None,
+    keys_dir: Optional[Path] = None,
+    friends_dir: Optional[Path] = None,
+) -> dict:
+    """
+    Export all keys to a dictionary suitable for JSON serialization.
+
+    If password is provided, the keys are encrypted with AES-256-GCM
+    using a key derived from the password via scrypt.
+
+    Includes friend keys (public and master) so they can be restored
+    on a new machine.
+
+    Args:
+        email: User's email address
+        password: If provided, encrypt the keys
+        keys_dir: Override keys directory
+        friends_dir: Override friends directory
+
+    Returns:
+        Dict with export format (ready for json.dumps)
+
+    Raises:
+        FileNotFoundError: If keys don't exist
+    """
+    _ensure_crypto()
+
+    keys_dir = keys_dir or get_keys_dir(email)
+    friends_dir = friends_dir or get_friends_dir(email)
+
+    # Load keys
+    private_key = load_private_key(email, keys_dir)
+    private_bytes = private_key.private_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PrivateFormat.Raw,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    public_bytes = load_public_key(email, keys_dir)
+
+    # Load master key if exists
+    master_bytes = None
+    try:
+        master_bytes = load_master_key(email, keys_dir)
+    except FileNotFoundError:
+        pass
+
+    # Load friend keys
+    friends_data = {}
+    if friends_dir.exists():
+        # Get all unique friend identifiers (stem of .pub or .master files)
+        friend_ids = set()
+        for pub_file in friends_dir.glob("*.pub"):
+            friend_ids.add(pub_file.stem)
+        for master_file in friends_dir.glob("*.master"):
+            friend_ids.add(master_file.stem)
+
+        for friend_id in friend_ids:
+            friend_entry = {}
+            pub_path = friends_dir / f"{friend_id}.pub"
+            master_path = friends_dir / f"{friend_id}.master"
+
+            if pub_path.exists():
+                friend_entry["public_key"] = base64.b64encode(pub_path.read_bytes()).decode()
+            if master_path.exists():
+                friend_entry["master_key"] = base64.b64encode(master_path.read_bytes()).decode()
+
+            if friend_entry:
+                friends_data[friend_id] = friend_entry
+
+    # Build keys dict
+    keys_data = {
+        "private_key": base64.b64encode(private_bytes).decode(),
+        "public_key": base64.b64encode(public_bytes).decode(),
+        "master_key": base64.b64encode(master_bytes).decode() if master_bytes else None,
+        "friends": friends_data,
+    }
+
+    fingerprint = get_key_fingerprint(public_bytes)
+
+    export = {
+        "version": KEYS_EXPORT_VERSION,
+        "format": KEYS_EXPORT_MAGIC,
+        "email": email,
+        "fingerprint": fingerprint,
+        "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+
+    if password:
+        # Encrypt keys
+        salt = os.urandom(SCRYPT_SALT_LEN)
+        nonce = os.urandom(NONCE_SIZE)
+        key = derive_key_from_password(password, salt)
+        aesgcm = AESGCM(key)
+        plaintext = json.dumps(keys_data).encode()
+        ciphertext = aesgcm.encrypt(nonce, plaintext, None)
+
+        export["salt"] = base64.b64encode(salt).decode()
+        export["nonce"] = base64.b64encode(nonce).decode()
+        export["encrypted_keys"] = base64.b64encode(ciphertext).decode()
+    else:
+        export["keys"] = keys_data
+
+    return export
+
+
+def import_keys(
+    export_data: dict,
+    password: Optional[str] = None,
+    email: Optional[str] = None,
+    keys_dir: Optional[Path] = None,
+    friends_dir: Optional[Path] = None,
+    force: bool = False,
+) -> tuple[str, str, int]:
+    """
+    Import keys from export data.
+
+    Args:
+        export_data: Parsed JSON export
+        password: Password if encrypted
+        email: Expected email (for verification, optional)
+        keys_dir: Override keys directory
+        friends_dir: Override friends directory
+        force: Allow overwriting existing keys
+
+    Returns:
+        Tuple of (email, fingerprint, friend_count) of imported keys
+
+    Raises:
+        ValueError: If verification fails or password wrong
+        FileExistsError: If keys exist and force=False
+    """
+    _ensure_crypto()
+
+    # Validate format
+    if export_data.get("format") != KEYS_EXPORT_MAGIC:
+        raise ValueError("Invalid export file format")
+
+    version = export_data.get("version", 0)
+    if version > KEYS_EXPORT_VERSION:
+        raise ValueError(f"Unsupported export version: {version}")
+
+    export_email = export_data.get("email")
+    if not export_email:
+        raise ValueError("Export file missing email")
+
+    # Verify email matches if specified
+    if email and email != export_email:
+        raise ValueError(
+            f"Email mismatch: expected {email}, "
+            f"but export file is for {export_email}"
+        )
+
+    # Decrypt or extract keys
+    if "encrypted_keys" in export_data:
+        if not password:
+            raise ValueError("Export file is encrypted, password required")
+        salt = base64.b64decode(export_data["salt"])
+        nonce = base64.b64decode(export_data["nonce"])
+        ciphertext = base64.b64decode(export_data["encrypted_keys"])
+        key = derive_key_from_password(password, salt)
+        aesgcm = AESGCM(key)
+        try:
+            plaintext = aesgcm.decrypt(nonce, ciphertext, None)
+        except Exception:
+            raise ValueError("Decryption failed - wrong password?")
+        keys_data = json.loads(plaintext)
+    else:
+        keys_data = export_data.get("keys")
+        if not keys_data:
+            raise ValueError("Export file missing keys")
+
+    # Decode keys
+    private_bytes = base64.b64decode(keys_data["private_key"])
+    public_bytes = base64.b64decode(keys_data["public_key"])
+    master_bytes = (
+        base64.b64decode(keys_data["master_key"])
+        if keys_data.get("master_key")
+        else None
+    )
+
+    # Verify fingerprint
+    fingerprint = get_key_fingerprint(public_bytes)
+    expected_fingerprint = export_data.get("fingerprint")
+    if expected_fingerprint and fingerprint != expected_fingerprint:
+        raise ValueError("Key fingerprint mismatch - file may be corrupted")
+
+    # Check for existing keys
+    target_keys_dir = keys_dir or get_keys_dir(export_email)
+    private_path = target_keys_dir / "private.key"
+
+    if private_path.exists() and not force:
+        raise FileExistsError(
+            f"Keys already exist for {export_email}. "
+            "Use --force to overwrite (this is DANGEROUS)."
+        )
+
+    # Write keys
+    target_keys_dir.mkdir(parents=True, exist_ok=True)
+
+    private_path.write_bytes(private_bytes)
+    private_path.chmod(0o600)
+
+    public_path = target_keys_dir / "public.key"
+    public_path.write_bytes(public_bytes)
+
+    if master_bytes:
+        master_path = target_keys_dir / "master.key"
+        master_path.write_bytes(master_bytes)
+        master_path.chmod(0o600)
+
+    # Restore friend keys
+    friend_count = 0
+    friends_data = keys_data.get("friends", {})
+    if friends_data:
+        target_friends_dir = friends_dir or get_friends_dir(export_email)
+        target_friends_dir.mkdir(parents=True, exist_ok=True)
+
+        for friend_id, friend_keys in friends_data.items():
+            if "public_key" in friend_keys:
+                pub_path = target_friends_dir / f"{friend_id}.pub"
+                pub_path.write_bytes(base64.b64decode(friend_keys["public_key"]))
+
+            if "master_key" in friend_keys:
+                master_path = target_friends_dir / f"{friend_id}.master"
+                master_path.write_bytes(base64.b64decode(friend_keys["master_key"]))
+                master_path.chmod(0o600)
+
+            friend_count += 1
+
+    return export_email, fingerprint, friend_count
+
+
+def verify_export_file(
+    export_data: dict,
+    password: Optional[str] = None,
+) -> dict:
+    """
+    Verify export file integrity and return metadata.
+
+    Args:
+        export_data: Parsed JSON export
+        password: Password if encrypted (to verify it's correct)
+
+    Returns:
+        Dict with: email, fingerprint, created_at, has_master_key, encrypted, friend_count
+
+    Raises:
+        ValueError: If file is invalid or password is wrong
+    """
+    if export_data.get("format") != KEYS_EXPORT_MAGIC:
+        raise ValueError("Invalid export file format")
+
+    is_encrypted = "encrypted_keys" in export_data
+
+    result = {
+        "email": export_data.get("email"),
+        "fingerprint": export_data.get("fingerprint"),
+        "created_at": export_data.get("created_at"),
+        "encrypted": is_encrypted,
+        "has_master_key": None,  # Unknown until decrypted
+        "friend_count": None,  # Unknown until decrypted
+    }
+
+    if is_encrypted:
+        if password:
+            _ensure_crypto()
+            # Try to decrypt to verify
+            salt = base64.b64decode(export_data["salt"])
+            nonce = base64.b64decode(export_data["nonce"])
+            ciphertext = base64.b64decode(export_data["encrypted_keys"])
+            key = derive_key_from_password(password, salt)
+            aesgcm = AESGCM(key)
+            try:
+                plaintext = aesgcm.decrypt(nonce, ciphertext, None)
+                keys_data = json.loads(plaintext)
+                result["has_master_key"] = keys_data.get("master_key") is not None
+                result["friend_count"] = len(keys_data.get("friends", {}))
+            except Exception:
+                raise ValueError("Decryption failed - wrong password?")
+    else:
+        keys_data = export_data.get("keys", {})
+        result["has_master_key"] = keys_data.get("master_key") is not None
+        result["friend_count"] = len(keys_data.get("friends", {}))
+
+    return result
 
 
 # =============================================================================
