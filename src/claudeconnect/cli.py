@@ -829,36 +829,44 @@ def upload_authz_http(token: str, email: str, content: str) -> bool:
         return False
 
 
-def install_skill() -> bool:
+def _read_skill_content() -> str:
+    """Read the SKILL.md content from the installed package."""
+    import importlib.resources as pkg_resources
+
+    try:
+        # Python 3.9+ with importlib.resources.files
+        return pkg_resources.files("claudeconnect").joinpath("skills/SKILL.md").read_text()
+    except (AttributeError, TypeError):
+        # Fallback for older Python
+        with pkg_resources.open_text("claudeconnect.skills", "SKILL.md") as f:
+            return f.read()
+
+
+def install_skill(base_dir: Path, *, require_existing: bool = False) -> bool:
     """
-    Install the claudeconnect skill to ~/.claude/skills/.
+    Install the claudeconnect skill to base_dir/skills/claudeconnect/SKILL.md.
+
+    Args:
+        base_dir: Parent directory (e.g. ~/.claude or ~/.openclaw).
+        require_existing: If True, skip silently when base_dir doesn't exist.
+            If False, create the directory tree as needed.
 
     Returns:
-        True if installed successfully.
+        True if installed successfully, False otherwise.
     """
     try:
-        import importlib.resources as pkg_resources
+        if require_existing and not base_dir.is_dir():
+            return False
 
-        # Destination: ~/.claude/skills/claudeconnect/SKILL.md
-        skill_dir = Path.home() / ".claude" / "skills" / "claudeconnect"
+        skill_dir = base_dir / "skills" / "claudeconnect"
         skill_dir.mkdir(parents=True, exist_ok=True)
-        skill_dest = skill_dir / "SKILL.md"
 
-        # Read skill from package
-        try:
-            # Python 3.9+ with importlib.resources.files
-            skill_content = pkg_resources.files("claudeconnect").joinpath("skills/SKILL.md").read_text()
-        except (AttributeError, TypeError):
-            # Fallback for older Python
-            with pkg_resources.open_text("claudeconnect.skills", "SKILL.md") as f:
-                skill_content = f.read()
-
-        # Write skill file
-        skill_dest.write_text(skill_content)
+        skill_content = _read_skill_content()
+        (skill_dir / "SKILL.md").write_text(skill_content)
         return True
 
     except Exception as e:
-        print(f"  Warning: Could not install skill: {e}")
+        print(f"  Warning: Could not install skill to {base_dir}: {e}")
         return False
 
 
@@ -911,6 +919,13 @@ def verify_init_structure(context_dir: Path, email: str) -> list[str]:
     skill_file = Path.home() / ".claude" / "skills" / "claudeconnect" / "SKILL.md"
     if not skill_file.is_file():
         errors.append("SKILL.md not installed at ~/.claude/skills/claudeconnect/")
+
+    # Check openclaw skill installation if ~/.openclaw exists
+    openclaw_dir = Path.home() / ".openclaw"
+    if openclaw_dir.is_dir():
+        openclaw_skill_file = openclaw_dir / "skills" / "claudeconnect" / "SKILL.md"
+        if not openclaw_skill_file.is_file():
+            errors.append("SKILL.md not installed at ~/.openclaw/skills/claudeconnect/")
 
     return errors
 
@@ -1748,11 +1763,17 @@ def init(no_encrypt: bool, force: bool):
         config.save(tokens.email)
 
         # Install skill for Claude Code
-        if install_skill():
-            print("  Installed claudeconnect skill")
+        claude_dir = Path.home() / ".claude"
+        if install_skill(claude_dir):
+            print(f"  Installed skill to {claude_dir / 'skills' / 'claudeconnect' / 'SKILL.md'}")
         else:
             print("  Warning: Could not install claudeconnect skill")
             print("    You may need to manually copy SKILL.md to ~/.claude/skills/claudeconnect/")
+
+        openclaw_dir = Path.home() / ".openclaw"
+        if install_skill(openclaw_dir, require_existing=True):
+            print(f"  Installed skill to {openclaw_dir / 'skills' / 'claudeconnect' / 'SKILL.md'}")
+            print(f"  Openclaw agents: read the 'Openclaw Setup' section in the claudeconnect skill for continuous scanning setup.")
 
         # Verify directory structure was created correctly
         verification_errors = verify_init_structure(cwd, tokens.email)

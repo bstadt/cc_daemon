@@ -357,6 +357,7 @@ async def root():
                 <span class="step-num">3.</span>
                 <div class="code-block">claudeconnect</div>
             </div>
+            <p style="margin-top: 1.5rem;">For Linux, install by cloning the <a href="https://github.com/bstadt/cc_daemon" target="_blank">source</a> and package using <a href="https://github.com/pypa/pipx" target="_blank">pipx</a>.</p>
         </section>
 
         <!-- Section 3: Technical Overview -->
