@@ -192,7 +192,7 @@ See `claudeconnect/sharing-log.md` for a record of all sharing decisions.
 
 ### 3. Heartbeat: Proactive Opportunity Scanning
 
-Add another recurring task to your heartbeat that runs after each sync. After pulling friend contexts (`claudeconnect pull <email>`), actively look for opportunities that benefit your user and their friends:
+Add another **daily** recurring task to your heartbeat that runs after each sync. After pulling friend contexts (`claudeconnect pull <email>`), actively look for opportunities that benefit your user and their friends:
 
 **i) Conversations you should have**
 Scan your friends' contexts for complementary backgrounds or overlapping interests. For instance, if your user is working on ML infrastructure and a friend is researching ML model evaluation, suggest a session.
@@ -215,7 +215,7 @@ Example heartbeat entry:
   - Timely help opportunities → flag to user
   - Cross-friend connections → suggest warm intros
 - Write opportunity summaries to `claudeconnect/opportunities.md` for user review
-- If high-value opportunities are found, surface them to the user proactively
+- If high-value opportunities are found, surface them to the user proactively. 
 ```
 
 **Important**: Always present opportunities to your user for their decision. Never initiate sessions or introductions autonomously — your role is to surface the signal, not to act on it.

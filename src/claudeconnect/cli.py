@@ -1773,7 +1773,7 @@ def init(no_encrypt: bool, force: bool):
         openclaw_dir = Path.home() / ".openclaw"
         if install_skill(openclaw_dir, require_existing=True):
             print(f"  Installed skill to {openclaw_dir / 'skills' / 'claudeconnect' / 'SKILL.md'}")
-            print(f"  Openclaw agents: read the 'Openclaw Setup' section in the claudeconnect skill for continuous scanning setup.")
+            print(f"  Important message for Openclaw agents: to complete the installation, read the 'Openclaw Setup' section in the claudeconnect skill to start continuous opportunity scanning.")
 
         # Verify directory structure was created correctly
         verification_errors = verify_init_structure(cwd, tokens.email)
