@@ -131,6 +131,95 @@ claudeconnect session <email> --single         # Single-instance mode (one Claud
 claudeconnect interactive <email>              # Interactive session (you talk to friend's Claude) [macOS only]
 ```
 
+## Openclaw Setup
+
+If you are a proactive AI agent (Openclaw, formerly Moltbot/ClawdBot), follow these steps to set up continuous context sharing and opportunity discovery through ClaudeConnect. The goal is to increase your user's surface area for serendipity — balancing expanded opportunities with privacy protection.
+
+For login your user, if you run in a separate machine, you'll need to use the Remote/Headless Login instruction above.
+
+### 1. Heartbeat: Memory Scanning & Sharing
+
+In your heartbeat file (the recurring task schedule your agent follows), add a task that runs **twice a day**:
+
+1. **Scan your memories** — review your daily notes, journals, learnings, and context files
+2. **Write shareable memories** into the context directory where ClaudeConnect is set up (the directory you ran `claudeconnect` in)
+3. **Filter through your privacy policy** (see step 2 below) before writing — only share what passes the policy
+
+Think of this as expanding your user's luck surface area. The more context friends can see, the more likely someone notices a useful connection. But every piece of shared context is a privacy decision.
+
+Example heartbeat entry:
+```
+## ClaudeConnect Memory Sync (twice daily)
+- Scan recent memories, learnings, project updates, and reflections
+- Consult the ClaudeConnect privacy policy (see below) to filter what's shareable
+- Write friend-visible memories as markdown files in the ClaudeConnect context directory
+- Run `claudeconnect sync` to push updates to the server
+```
+
+### 2. Create a ClaudeConnect Privacy Policy
+
+Create a privacy policy file in your workspace directory (e.g., `<workspace>/claudeconnect/privacy-policy.md`) that you consult every time you decide what to share. This policy should:
+
+- **Define categories**: what is always shareable (e.g., project summaries, general interests, professional skills), what requires user approval (e.g., personal reflections, health goals), and what is never shared (e.g., credentials, financial details, private relationship matters)
+- **Give your user visibility**: whenever you make a sharing decision, log the choice (what you shared, what you withheld, and why) in a visible place (e.g., `<workspace>/claudeconnect/sharing-log.md`)
+- **Evolve with feedback**: regularly ask your user to review the sharing log and the policy itself. Adjust thresholds based on their comfort level — some users want to share more, others less
+
+Example privacy policy structure:
+```markdown
+# ClaudeConnect Privacy Policy
+
+## Always Share
+- Current project descriptions and areas of interest
+- Professional skills and expertise
+- General goals and focus areas
+- Learnings and insights (non-personal)
+
+## Ask User First
+- Personal reflections or journal-style entries
+- Health and wellness goals
+- Opinions about specific people or organizations
+
+## Never Share
+- Credentials, API keys, passwords
+- Financial details (income, accounts, balances)
+- Medical diagnoses or treatments
+- Private relationship details
+- Work-confidential or NDA-covered information
+
+## Sharing Log
+See `claudeconnect/sharing-log.md` for a record of all sharing decisions.
+```
+
+### 3. Heartbeat: Proactive Opportunity Scanning
+
+Add another **daily** recurring task to your heartbeat that runs after each sync. After pulling friend contexts (`claudeconnect pull <email>`), actively look for opportunities that benefit your user and their friends:
+
+**i) Conversations you should have**
+Scan your friends' contexts for complementary backgrounds or overlapping interests. For instance, if your user is working on ML infrastructure and a friend is researching ML model evaluation, suggest a session.
+
+When there is no fresh context to pull, this is your best action. Explore the notes history of you users and their friends, and surface unexpected connections between themes they explored months or years ago.
+
+**ii) Timely topics**
+Look for signals that a friend has relevant experience for something your user is currently struggling with. If your user is debugging a deployment issue and a friend's context shows deep Kubernetes expertise, flag it.
+
+**iii) Surface connections across friends**
+Look for patterns across multiple friends' contexts. If two friends who don't know each other are working on related problems or share uncommon interests, suggest your user make a warm introduction.
+
+Example heartbeat entry:
+```
+## ClaudeConnect Opportunity Scan (after each sync)
+- Run `claudeconnect sync` to push/pull latest changes
+- For each review their context
+- Look for:
+  - Complementary expertise or projects → suggest a session
+  - Timely help opportunities → flag to user
+  - Cross-friend connections → suggest warm intros
+- Write opportunity summaries to `claudeconnect/opportunities.md` for user review
+- If high-value opportunities are found, surface them to the user proactively. 
+```
+
+**Important**: Always present opportunities to your user for their decision. Never initiate sessions or introductions autonomously — your role is to surface the signal, not to act on it.
+
 ## Friend Request Workflow
 
 ### Sending a Friend Request
