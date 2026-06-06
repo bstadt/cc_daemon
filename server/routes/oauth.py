@@ -1,6 +1,5 @@
 """OAuth endpoints for login and token refresh."""
 
-import os
 import logging
 from urllib.parse import urlencode, quote
 
@@ -8,18 +7,17 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import RedirectResponse
 import httpx
 
+from ..config import settings
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["oauth"])
 
-# Google OAuth configuration
-GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
-GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+# Google OAuth configuration. The client id/secret and base URL come from the
+# shared Settings object (server/config.py) so this login flow and the ID-token
+# audience check in auth.py can never read different values.
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
-
-# This server's base URL (for OAuth callback)
-SERVER_BASE_URL = os.environ.get("SERVER_BASE_URL", "https://claudeconnect.io")
 
 
 @router.get("/login")
@@ -30,7 +28,7 @@ async def login(redirect_uri: str = Query(..., description="Client callback URL"
     Redirects to Google OAuth, which will redirect back to /oauth/callback,
     which will then redirect to the client's redirect_uri with tokens.
     """
-    if not GOOGLE_CLIENT_ID:
+    if not settings.google_client_id:
         raise HTTPException(status_code=500, detail="Google OAuth not configured")
 
     # Store the client's redirect_uri in state (we'll pass it through OAuth)
@@ -38,8 +36,8 @@ async def login(redirect_uri: str = Query(..., description="Client callback URL"
     state = quote(redirect_uri)
 
     params = {
-        "client_id": GOOGLE_CLIENT_ID,
-        "redirect_uri": f"{SERVER_BASE_URL}/callback",
+        "client_id": settings.google_client_id,
+        "redirect_uri": f"{settings.server_base_url}/callback",
         "response_type": "code",
         "scope": "openid email",
         "access_type": "offline",
@@ -73,7 +71,7 @@ async def oauth_callback(
     if not code or not state:
         raise HTTPException(status_code=400, detail="Missing code or state")
 
-    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+    if not settings.google_client_id or not settings.google_client_secret:
         raise HTTPException(status_code=500, detail="Google OAuth not configured")
 
     # Exchange code for tokens
@@ -82,11 +80,11 @@ async def oauth_callback(
             response = await client.post(
                 GOOGLE_TOKEN_URL,
                 data={
-                    "client_id": GOOGLE_CLIENT_ID,
-                    "client_secret": GOOGLE_CLIENT_SECRET,
+                    "client_id": settings.google_client_id,
+                    "client_secret": settings.google_client_secret,
                     "code": code,
                     "grant_type": "authorization_code",
-                    "redirect_uri": f"{SERVER_BASE_URL}/callback",
+                    "redirect_uri": f"{settings.server_base_url}/callback",
                 },
             )
             response.raise_for_status()
@@ -118,7 +116,7 @@ async def refresh_token(refresh_token: str = Query(..., description="Refresh tok
     """
     Refresh an expired id_token using the refresh token.
     """
-    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+    if not settings.google_client_id or not settings.google_client_secret:
         raise HTTPException(status_code=500, detail="Google OAuth not configured")
 
     try:
@@ -126,8 +124,8 @@ async def refresh_token(refresh_token: str = Query(..., description="Refresh tok
             response = await client.post(
                 GOOGLE_TOKEN_URL,
                 data={
-                    "client_id": GOOGLE_CLIENT_ID,
-                    "client_secret": GOOGLE_CLIENT_SECRET,
+                    "client_id": settings.google_client_id,
+                    "client_secret": settings.google_client_secret,
                     "refresh_token": refresh_token,
                     "grant_type": "refresh_token",
                 },

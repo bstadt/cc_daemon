@@ -60,14 +60,26 @@ def validate_google_id_token(token: str) -> Optional[TokenPayload]:
     Returns:
         TokenPayload with user info if valid, None if invalid
     """
+    # Fail closed: without a configured client id we cannot verify the token's
+    # audience, and an unverified audience means tokens minted for *any* Google
+    # app would be accepted. Reject rather than silently downgrade. (server/app.py
+    # also refuses to start without it; this guards direct/library callers.)
+    if not settings.google_client_id:
+        logger.error(
+            "google_client_id is not configured; refusing to validate Google ID "
+            "tokens (cannot verify audience). Set GOOGLE_CLIENT_ID."
+        )
+        return None
+
     try:
         # Get the signing key from Google's JWKS
         jwk_client = _get_jwk_client()
         signing_key = jwk_client.get_signing_key_from_jwt(token)
 
-        # Decode and verify the token
+        # Decode and verify the token. Audience is always verified against this
+        # server's OAuth client id — see the fail-closed guard above.
         decode_options = {
-            "verify_aud": bool(settings.google_client_id),
+            "verify_aud": True,
             "verify_iss": True,
             "verify_exp": True,
         }
@@ -76,7 +88,7 @@ def validate_google_id_token(token: str) -> Optional[TokenPayload]:
             token,
             signing_key.key,
             algorithms=["RS256"],
-            audience=settings.google_client_id if settings.google_client_id else None,
+            audience=settings.google_client_id,
             issuer=GOOGLE_ISSUERS,
             options=decode_options,
         )
