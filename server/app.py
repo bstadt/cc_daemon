@@ -1,5 +1,7 @@
 """ClaudeConnect v2s Sync Server - FastAPI Application."""
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -17,10 +19,29 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Fail closed: refuse to start without a Google OAuth client id. It is required
+    # to verify the audience of incoming Google ID tokens (see server/auth.py); if
+    # it is missing, the server would otherwise accept tokens issued for any other
+    # Google app. Failing startup turns a silent auth-bypass into a loud
+    # misconfiguration. (Checked at startup, not import, so the package stays
+    # importable for tests/tooling.)
+    if not settings.google_client_id:
+        raise RuntimeError(
+            "GOOGLE_CLIENT_ID is not set. Refusing to start: it is required to "
+            "verify Google ID token audiences. Set GOOGLE_CLIENT_ID (or "
+            "CC_GOOGLE_CLIENT_ID) in the environment."
+        )
+    yield
+
+
 app = FastAPI(
     title="ClaudeConnect Sync Server",
     description="HTTP-based file sync server for ClaudeConnect",
     version="2.0.0",
+    lifespan=lifespan,
 )
 
 # CORS - allow client access
