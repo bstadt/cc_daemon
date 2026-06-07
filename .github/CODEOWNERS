@@ -1,0 +1,5 @@
+# Code owners for cc_daemon.
+# Any change to main requires approval from one of these owners (enforced via branch
+# protection: "require review from code owners"). GitHub disallows authors approving
+# their own PRs, so this cross-gates Brandon <-> Tej and blocks other collaborators.
+* @bstadt @TheExGenesis
