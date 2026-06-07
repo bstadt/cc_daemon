@@ -189,6 +189,7 @@ class Config:
     """Claude Connect configuration."""
     context_dir: Optional[str] = None
     encryption_enabled: bool = False  # Whether to encrypt context files
+    md_only: bool = False  # If True, sync only Markdown (.md) files (+ system files)
     email: Optional[str] = None  # Associated email (set after load)
 
     def save(self, email: str):
@@ -197,7 +198,11 @@ class Config:
         account_dir.mkdir(parents=True, exist_ok=True)
         config_file = get_config_file(email)
         # Don't save the email field in the JSON (it's derived from path)
-        data = {"context_dir": self.context_dir, "encryption_enabled": self.encryption_enabled}
+        data = {
+            "context_dir": self.context_dir,
+            "encryption_enabled": self.encryption_enabled,
+            "md_only": self.md_only,
+        }
         config_file.write_text(json.dumps(data, indent=2))
 
     @classmethod
@@ -216,7 +221,7 @@ class Config:
             if LEGACY_CONFIG_FILE.exists():
                 try:
                     data = json.loads(LEGACY_CONFIG_FILE.read_text())
-                    known_fields = {"context_dir", "encryption_enabled"}
+                    known_fields = {"context_dir", "encryption_enabled", "md_only"}
                     filtered = {k: v for k, v in data.items() if k in known_fields}
                     return cls(**filtered)
                 except (json.JSONDecodeError, TypeError):
@@ -232,7 +237,7 @@ class Config:
         try:
             data = json.loads(config_file.read_text())
             # Filter to only known fields (backwards compatibility)
-            known_fields = {"context_dir", "encryption_enabled"}
+            known_fields = {"context_dir", "encryption_enabled", "md_only"}
             filtered = {k: v for k, v in data.items() if k in known_fields}
             config = cls(**filtered)
             config.email = email

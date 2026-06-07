@@ -1809,6 +1809,30 @@ def compute_bytes_sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
+def _sync_in_scope(rel_path: str, md_only: bool = False) -> bool:
+    """Whether a path should participate in normal (bidirectional) sync.
+
+    Always skips hidden files and dependency/build dirs (node_modules, venv, …)
+    so a context dir that also holds code never uploads vendored junk. When
+    ``md_only`` is set, restricts to Markdown files — but always keeps the
+    `authz` file and the `claudeconnect/` system subtree, which sync must carry
+    regardless of extension for friend permissions and conversations to work.
+    """
+    parts = Path(rel_path).parts
+    if not parts:
+        return False
+    if any(p.startswith(".") for p in parts):
+        return False
+    if any(p in _FORCE_SKIP_DIRS for p in parts):
+        return False
+    if md_only:
+        if rel_path == "authz" or parts[0] == "claudeconnect":
+            return True
+        if not rel_path.endswith(".md"):
+            return False
+    return True
+
+
 def sync_http(
     context_dir: Path,
     email: str,
@@ -1833,6 +1857,7 @@ def sync_http(
 
     config = get_config(email)
     encryption_enabled = config.encryption_enabled and HAS_ENCRYPTION
+    md_only = getattr(config, "md_only", False)
 
     # Shadow directory stores encrypted files (mirrors server)
     shadow_dir = get_shadow_dir(email)
@@ -1857,15 +1882,18 @@ def sync_http(
             print(f"  Error getting manifest: {e}")
         return False
 
-    server_files = {f["path"]: f for f in manifest.get("files", [])}
+    server_files = {
+        f["path"]: f
+        for f in manifest.get("files", [])
+        if _sync_in_scope(f["path"], md_only)
+    }
 
     # Step 2: Build shadow directory manifest (encrypted files)
     shadow_files = {}
     for file_path in shadow_dir.rglob("*"):
         if file_path.is_file():
             rel_path = str(file_path.relative_to(shadow_dir))
-            # Skip hidden files (any path component starting with '.')
-            if any(part.startswith('.') for part in Path(rel_path).parts):
+            if not _sync_in_scope(rel_path, md_only):
                 continue
             shadow_files[rel_path] = {
                 "path": rel_path,
@@ -1879,8 +1907,7 @@ def sync_http(
     for file_path in context_dir.rglob("*"):
         if file_path.is_file():
             rel_path = str(file_path.relative_to(context_dir))
-            # Skip hidden files (any path component starting with '.')
-            if any(part.startswith('.') for part in Path(rel_path).parts):
+            if not _sync_in_scope(rel_path, md_only):
                 continue
             if HAS_ENCRYPTION and file_path.suffix == ".md":
                 try:
