@@ -2188,13 +2188,29 @@ def sync_http(
     return True
 
 
-def _force_in_scope(rel: str) -> bool:
+# Dependency / build directories that are never user context and would bloat the
+# server with thousands of vendored files (e.g. node_modules READMEs).
+_FORCE_SKIP_DIRS = {
+    "node_modules",
+    "__pycache__",
+    "venv",
+    "site-packages",
+    "build",
+    "dist",
+    ".egg-info",
+}
+
+
+def _force_in_scope(rel: str, md_only: bool = False) -> bool:
     """Whether a relative path participates in `sync force`.
 
     Force-push mirrors regular content only. It deliberately leaves alone:
     - the `authz` file (your permissions; the server also refuses to delete it),
     - the entire `claudeconnect/` subtree (friend mailboxes / system messages),
-    - hidden files (any dot-prefixed path component, e.g. `.git`).
+    - hidden files (any dot-prefixed path component, e.g. `.git`),
+    - dependency/build dirs (node_modules, venv, …) — vendored junk, never context.
+
+    With ``md_only`` set, only Markdown (`.md`) files are in scope.
     """
     parts = Path(rel).parts
     if not parts:
@@ -2205,10 +2221,16 @@ def _force_in_scope(rel: str) -> bool:
         return False
     if parts[0] == "claudeconnect":
         return False
+    if any(p in _FORCE_SKIP_DIRS for p in parts):
+        return False
+    if md_only and not rel.endswith(".md"):
+        return False
     return True
 
 
-def compute_force_plan(context_dir: Path, email: str, id_token: str) -> dict:
+def compute_force_plan(
+    context_dir: Path, email: str, id_token: str, md_only: bool = False
+) -> dict:
     """Compute what `sync force` would change to make the server mirror local.
 
     Returns sorted lists: ``to_upload`` (local content files, <=1MB),
@@ -2223,14 +2245,16 @@ def compute_force_plan(context_dir: Path, email: str, id_token: str) -> dict:
     for file_path in context_dir.rglob("*"):
         if file_path.is_file():
             rel = str(file_path.relative_to(context_dir))
-            if _force_in_scope(rel):
+            if _force_in_scope(rel, md_only=md_only):
                 local_files[rel] = file_path.stat().st_size
 
     # Server manifest (owner sees all of their own files)
     response = httpx.get(f"{API_BASE_URL}/manifest/{email}", headers=headers, timeout=60)
     response.raise_for_status()
     server_files = {
-        f["path"] for f in response.json().get("files", []) if _force_in_scope(f["path"])
+        f["path"]
+        for f in response.json().get("files", [])
+        if _force_in_scope(f["path"], md_only=md_only)
     }
 
     to_upload, skipped_large = [], []
@@ -2381,13 +2405,17 @@ def sync(ctx):
 @click.option(
     "--dry-run", is_flag=True, help="Show what would change without modifying the server."
 )
-def sync_force(yes: bool, dry_run: bool):
+@click.option(
+    "--md-only", is_flag=True, help="Only sync Markdown (.md) files; skip everything else."
+)
+def sync_force(yes: bool, dry_run: bool, md_only: bool):
     """Force the server to match your local state (like `git push --force`).
 
     Uploads every local content file and DELETES server files that are not
-    present locally. The `authz` file and the `claudeconnect/` mailbox subtree
-    are left untouched; hidden files and files >1MB are skipped. Destructive to
-    server-side state, so it prompts for confirmation.
+    present locally. The `authz` file, the `claudeconnect/` mailbox subtree,
+    hidden files, dependency dirs (node_modules, venv, …) and files >1MB are
+    left untouched. Use --md-only to restrict the sync to Markdown files.
+    Destructive to server-side state, so it prompts for confirmation.
     """
     tokens = get_valid_token()
     config = get_config()
@@ -2404,7 +2432,9 @@ def sync_force(yes: bool, dry_run: bool):
 
     print("Computing force-push plan...")
     try:
-        plan = compute_force_plan(context_dir, tokens.email, tokens.id_token)
+        plan = compute_force_plan(
+            context_dir, tokens.email, tokens.id_token, md_only=md_only
+        )
     except Exception as e:
         print(f"Failed to compute plan: {e}")
         sys.exit(1)
