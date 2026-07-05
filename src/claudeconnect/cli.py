@@ -1809,6 +1809,30 @@ def compute_bytes_sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
+def _sync_in_scope(rel_path: str, md_only: bool = False) -> bool:
+    """Whether a path should participate in normal (bidirectional) sync.
+
+    Always skips hidden files and dependency/build dirs (node_modules, venv, …)
+    so a context dir that also holds code never uploads vendored junk. When
+    ``md_only`` is set, restricts to Markdown files — but always keeps the
+    `authz` file and the `claudeconnect/` system subtree, which sync must carry
+    regardless of extension for friend permissions and conversations to work.
+    """
+    parts = Path(rel_path).parts
+    if not parts:
+        return False
+    if any(p.startswith(".") for p in parts):
+        return False
+    if any(p in _FORCE_SKIP_DIRS for p in parts):
+        return False
+    if md_only:
+        if rel_path == "authz" or parts[0] == "claudeconnect":
+            return True
+        if not rel_path.endswith(".md"):
+            return False
+    return True
+
+
 def sync_http(
     context_dir: Path,
     email: str,
@@ -1833,6 +1857,7 @@ def sync_http(
 
     config = get_config(email)
     encryption_enabled = config.encryption_enabled and HAS_ENCRYPTION
+    md_only = getattr(config, "md_only", False)
 
     # Shadow directory stores encrypted files (mirrors server)
     shadow_dir = get_shadow_dir(email)
@@ -1857,15 +1882,18 @@ def sync_http(
             print(f"  Error getting manifest: {e}")
         return False
 
-    server_files = {f["path"]: f for f in manifest.get("files", [])}
+    server_files = {
+        f["path"]: f
+        for f in manifest.get("files", [])
+        if _sync_in_scope(f["path"], md_only)
+    }
 
     # Step 2: Build shadow directory manifest (encrypted files)
     shadow_files = {}
     for file_path in shadow_dir.rglob("*"):
         if file_path.is_file():
             rel_path = str(file_path.relative_to(shadow_dir))
-            # Skip hidden files (any path component starting with '.')
-            if any(part.startswith('.') for part in Path(rel_path).parts):
+            if not _sync_in_scope(rel_path, md_only):
                 continue
             shadow_files[rel_path] = {
                 "path": rel_path,
@@ -1879,8 +1907,7 @@ def sync_http(
     for file_path in context_dir.rglob("*"):
         if file_path.is_file():
             rel_path = str(file_path.relative_to(context_dir))
-            # Skip hidden files (any path component starting with '.')
-            if any(part.startswith('.') for part in Path(rel_path).parts):
+            if not _sync_in_scope(rel_path, md_only):
                 continue
             if HAS_ENCRYPTION and file_path.suffix == ".md":
                 try:
@@ -2188,9 +2215,198 @@ def sync_http(
     return True
 
 
-@cli.command()
-def sync():
-    """Manually trigger a sync with the server."""
+# Dependency / build directories that are never user context and would bloat the
+# server with thousands of vendored files (e.g. node_modules READMEs).
+_FORCE_SKIP_DIRS = {
+    "node_modules",
+    "__pycache__",
+    "venv",
+    "site-packages",
+    "build",
+    "dist",
+    ".egg-info",
+}
+
+
+def _force_in_scope(rel: str, md_only: bool = False) -> bool:
+    """Whether a relative path participates in `sync force`.
+
+    Force-push mirrors regular content only. It deliberately leaves alone:
+    - the `authz` file (your permissions; the server also refuses to delete it),
+    - the entire `claudeconnect/` subtree (friend mailboxes / system messages),
+    - hidden files (any dot-prefixed path component, e.g. `.git`),
+    - dependency/build dirs (node_modules, venv, …) — vendored junk, never context.
+
+    With ``md_only`` set, only Markdown (`.md`) files are in scope.
+    """
+    parts = Path(rel).parts
+    if not parts:
+        return False
+    if any(p.startswith(".") for p in parts):
+        return False
+    if rel == "authz":
+        return False
+    if parts[0] == "claudeconnect":
+        return False
+    if any(p in _FORCE_SKIP_DIRS for p in parts):
+        return False
+    if md_only and not rel.endswith(".md"):
+        return False
+    return True
+
+
+def compute_force_plan(
+    context_dir: Path, email: str, id_token: str, md_only: bool = False
+) -> dict:
+    """Compute what `sync force` would change to make the server mirror local.
+
+    Returns sorted lists: ``to_upload`` (local content files, <=1MB),
+    ``to_delete`` (in-scope server files not present locally), and
+    ``skipped_large`` (local files >1MB, which are not synced).
+    """
+    headers = {"Authorization": f"Bearer {id_token}"}
+    max_upload_bytes = 1_000_000
+
+    # Local content files
+    local_files: dict[str, int] = {}
+    for file_path in context_dir.rglob("*"):
+        if file_path.is_file():
+            rel = str(file_path.relative_to(context_dir))
+            if _force_in_scope(rel, md_only=md_only):
+                local_files[rel] = file_path.stat().st_size
+
+    # Server manifest (owner sees all of their own files)
+    response = httpx.get(f"{API_BASE_URL}/manifest/{email}", headers=headers, timeout=60)
+    response.raise_for_status()
+    server_files = {
+        f["path"]
+        for f in response.json().get("files", [])
+        if _force_in_scope(f["path"], md_only=md_only)
+    }
+
+    to_upload, skipped_large = [], []
+    for rel, size in local_files.items():
+        (skipped_large if size > max_upload_bytes else to_upload).append(rel)
+
+    to_delete = [p for p in server_files if p not in local_files]
+
+    return {
+        "to_upload": sorted(to_upload),
+        "to_delete": sorted(to_delete),
+        "skipped_large": sorted(skipped_large),
+    }
+
+
+def execute_force_push(
+    context_dir: Path,
+    email: str,
+    id_token: str,
+    plan: dict,
+    max_workers: int = 10,
+    verbose: bool = True,
+) -> bool:
+    """Execute a force-push: overwrite the server with local files and delete
+    in-scope server files absent locally. Keeps the shadow dir consistent."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import threading
+
+    config = get_config(email)
+    encryption_enabled = config.encryption_enabled and HAS_ENCRYPTION
+    shadow_dir = get_shadow_dir(email)
+    shadow_dir.mkdir(parents=True, exist_ok=True)
+    headers = {"Authorization": f"Bearer {id_token}"}
+
+    uploaded = deleted = 0
+    errors: list[str] = []
+    lock = threading.Lock()
+
+    def upload(path: str) -> None:
+        nonlocal uploaded
+        context_path = context_dir / path
+        shadow_path = shadow_dir / path
+        try:
+            content = context_path.read_bytes()
+            payload = content
+            if encryption_enabled and should_encrypt_file(path):
+                try:
+                    payload = encrypt_file_with_master_key(content, email)
+                except Exception:
+                    payload = content  # upload unencrypted if encryption fails
+            resp = httpx.put(
+                f"{API_BASE_URL}/files/{email}/{path}",
+                headers=headers,
+                content=payload,
+                timeout=60,
+            )
+            if resp.status_code == 200:
+                shadow_path.parent.mkdir(parents=True, exist_ok=True)
+                shadow_path.write_bytes(payload)
+                with lock:
+                    uploaded += 1
+            else:
+                with lock:
+                    errors.append(f"Upload {path}: HTTP {resp.status_code}")
+        except Exception as e:
+            with lock:
+                errors.append(f"Upload {path}: {e}")
+
+    def delete(path: str) -> None:
+        nonlocal deleted
+        try:
+            resp = httpx.request(
+                "DELETE",
+                f"{API_BASE_URL}/files/{email}/{path}",
+                headers=headers,
+                timeout=60,
+            )
+            if resp.status_code == 200:
+                shadow_path = shadow_dir / path
+                try:
+                    if shadow_path.exists():
+                        shadow_path.unlink()
+                except OSError:
+                    pass
+                with lock:
+                    deleted += 1
+            else:
+                with lock:
+                    errors.append(f"Delete {path}: HTTP {resp.status_code}")
+        except Exception as e:
+            with lock:
+                errors.append(f"Delete {path}: {e}")
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(upload, p) for p in plan["to_upload"]]
+        futures += [executor.submit(delete, p) for p in plan["to_delete"]]
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except Exception as e:
+                with lock:
+                    errors.append(str(e))
+
+    if verbose:
+        print(f"  Uploaded {uploaded} file(s), deleted {deleted} file(s) on server.")
+        if errors:
+            print(f"  Warnings ({len(errors)}):")
+            for err in errors[:5]:
+                print(f"    - {err}")
+            if len(errors) > 5:
+                print(f"    ... and {len(errors) - 5} more")
+
+    return not errors
+
+
+@cli.group(invoke_without_command=True)
+@click.pass_context
+def sync(ctx):
+    """Sync with the server.
+
+    With no subcommand, performs a normal bidirectional sync.
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+
     tokens = get_valid_token()
     config = get_config()
 
@@ -2208,6 +2424,82 @@ def sync():
     if sync_http(context_dir, tokens.email, tokens.id_token, verbose=True):
         print("✓ Sync complete")
     else:
+        sys.exit(1)
+
+
+@sync.command("force")
+@click.option("--yes", "-y", is_flag=True, help="Skip the confirmation prompt.")
+@click.option(
+    "--dry-run", is_flag=True, help="Show what would change without modifying the server."
+)
+@click.option(
+    "--md-only", is_flag=True, help="Only sync Markdown (.md) files; skip everything else."
+)
+def sync_force(yes: bool, dry_run: bool, md_only: bool):
+    """Force the server to match your local state (like `git push --force`).
+
+    Uploads every local content file and DELETES server files that are not
+    present locally. The `authz` file, the `claudeconnect/` mailbox subtree,
+    hidden files, dependency dirs (node_modules, venv, …) and files >1MB are
+    left untouched. Use --md-only to restrict the sync to Markdown files.
+    Destructive to server-side state, so it prompts for confirmation.
+    """
+    tokens = get_valid_token()
+    config = get_config()
+
+    if not tokens:
+        print("Not logged in or token expired. Run `claudeconnect login` first.")
+        sys.exit(1)
+
+    if not config.context_dir:
+        print("No context directory configured.")
+        sys.exit(1)
+
+    context_dir = Path(config.context_dir)
+
+    print("Computing force-push plan...")
+    try:
+        plan = compute_force_plan(
+            context_dir, tokens.email, tokens.id_token, md_only=md_only
+        )
+    except Exception as e:
+        print(f"Failed to compute plan: {e}")
+        sys.exit(1)
+
+    n_up, n_del, n_skip = (
+        len(plan["to_upload"]),
+        len(plan["to_delete"]),
+        len(plan["skipped_large"]),
+    )
+    print(f"  {n_up} file(s) to upload (overwrite server)")
+    print(f"  {n_del} file(s) to DELETE from server (not present locally)")
+    for p in plan["to_delete"][:20]:
+        print(f"      - {p}")
+    if n_del > 20:
+        print(f"      ... and {n_del - 20} more")
+    if n_skip:
+        print(f"  {n_skip} local file(s) skipped (>1MB, not synced)")
+
+    if dry_run:
+        print("Dry run - no changes made.")
+        return
+
+    if n_up == 0 and n_del == 0:
+        print("✓ Server already matches local state.")
+        return
+
+    if not yes:
+        click.confirm(
+            f"\nThis will overwrite {n_up} file(s) and DELETE {n_del} file(s) on the server. Continue?",
+            abort=True,
+            default=False,
+        )
+
+    print("Force-pushing...")
+    if execute_force_push(context_dir, tokens.email, tokens.id_token, plan, verbose=True):
+        print("✓ Force-push complete - server now matches local state.")
+    else:
+        print("⚠ Force-push completed with warnings.")
         sys.exit(1)
 
 
